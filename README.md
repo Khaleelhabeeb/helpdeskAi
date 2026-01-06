@@ -1,7 +1,3 @@
-# HelpdeskAI
-
-HelpdeskAI is an advanced customer support platform that leverages cutting-edge technologies to deliver efficient, context-aware, and professional assistance. Designed for scalability and flexibility, it integrates generative AI, Retrieval-Augmented Generation (RAG), and modern web frameworks to create a seamless support experience.
-
 ## Key Features
 
 ### Generative AI with Groq
@@ -24,7 +20,7 @@ Built with FastAPI, HelpdeskAI offers a modular and high-performance API structu
 - **Analytics**: Monitor key performance indicators (KPIs) to optimize support.
 
 ### Database Integration
-HelpdeskAI uses SQLAlchemy for database interactions, supporting various relational databases. The database stores:
+The database stores:
 - User information and authentication tokens.
 - Agent configurations and knowledge base entries.
 - Interaction logs for analytics.
@@ -38,14 +34,6 @@ The platform supports multiple data ingestion methods:
 ### Static Assets
 Static files, such as JavaScript widgets, are served to enable easy integration into web applications.
 
-## Technology Stack
-
-- **Backend**: FastAPI for asynchronous, high-performance API development.
-- **Database**: SQLAlchemy ORM for database management.
-- **AI Integration**: Groq for generative AI and prompt engineering.
-- **Environment Management**: dotenv for secure configuration.
-- **Rate Limiting**: SlowAPI to prevent abuse and ensure fair usage.
-- **Static Files**: FastAPI StaticFiles for serving assets.
 
 ## How It Works
 
@@ -88,18 +76,6 @@ Static files, such as JavaScript widgets, are served to enable easy integration 
 
 5. Access the API at `http://127.0.0.1:8000`.
 
-## Folder Structure
-
-- `api/`: Contains API routes for various functionalities like authentication, agents, and chat.
-- `db/`: Handles database models and schemas.
-- `services/`: Includes utility scripts for AI prompt generation, file parsing, and data ingestion.
-- `static/`: Stores static assets like JavaScript widgets.
-- `uploads/`: Directory for storing uploaded files.
-- `utils/`: Helper functions for security and token management.
-
-## Contributing
-
-Contributions are welcome! Please fork the repository and submit a pull request with your changes.
 
 ## License
 
