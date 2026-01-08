@@ -3,7 +3,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from db import schemas, models, database
 from utils.jwt import get_current_user
-import requests
+import httpx
 from bs4 import BeautifulSoup
 from pydantic import BaseModel
 
@@ -14,10 +14,11 @@ class ScrapeRequest(BaseModel):
     url: str
 
 
-def scrape_url_content(url: str) -> str:
+async def scrape_url_content(url: str) -> str:
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         content = []
         for tag in soup.find_all(['h1', 'h2', 'h3', 'p', 'li']):
@@ -37,6 +38,6 @@ def scrape_url_content(url: str) -> str:
 @router.post("/scrape")
 async def scrape_url(request: ScrapeRequest):
     # logger.debug(f"Received scrape request for URL: {request.url}")
-    structured_text = scrape_url_content(request.url)
+    structured_text = await scrape_url_content(request.url)
     return {"structured_text": structured_text}
 

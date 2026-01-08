@@ -7,7 +7,8 @@ from db import models
 from services.file_parser import extract_text_from_pdf_file, extract_text_from_txt_file
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from services.vector_store import upsert_texts
-import requests
+import httpx
+import asyncio
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
@@ -64,7 +65,10 @@ def process_kb_ingest_job(job_id: str, transient_text: Optional[str] = None) -> 
                     text_content = rf.read().decode("utf-8", errors="ignore")
         elif kb.source_type == models.KBSourceType.url:
             # Fetch HTML and extract main text
-            resp = requests.get(kb.source_uri, timeout=30)
+            async def fetch_url():
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    return await client.get(kb.source_uri)
+            resp = asyncio.run(fetch_url())
             resp.raise_for_status()
             soup = BeautifulSoup(resp.text, "html.parser")
             for tag in soup(["script", "style", "noscript"]):
