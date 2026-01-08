@@ -39,10 +39,6 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         raise HTTPException(status_code=401, detail="Token verification failed")
     
 def verify_token(token: str) -> dict:
-    """
-    Verifies the JWT token and returns the decoded payload if valid.
-    Raises an exception if the token is invalid or expired.
-    """
     try:
         payload = jwt.decode(token, os.getenv("SECRET_KEY"), algorithms=["HS256"])
         if payload.get("exp") and datetime.utcfromtimestamp(payload["exp"]) < datetime.utcnow():

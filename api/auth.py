@@ -62,58 +62,6 @@ def login(request: Request, user: schemas.UserLogin, db: Session = Depends(get_d
         "user_type": db_user.user_type
     } 
 
-@router.get("/google")
-@limiter.limit("10/minute")
-def google_auth(request: Request, code: str, db: Session = Depends(get_db)):
-    """
-    Endpoint to handle Google OAuth callback.
-    It exchanges the provided authorization code for tokens and returns a JWT access token.
-    """
-    token_endpoint = "https://oauth2.googleapis.com/token"
-    data = {
-        "code": code,
-        "client_id": GOOGLE_CLIENT_ID,
-        "client_secret": GOOGLE_CLIENT_SECRET,
-        "redirect_uri": "http://127.0.0.1:8000/auth/google/callback",
-        "grant_type": "authorization_code"
-    }
-    token_response = requests.post(token_endpoint, data=data)
-    if token_response.status_code != 200:
-        raise HTTPException(status_code=400, detail="Failed to fetch tokens from Google")
-
-    token_json = token_response.json()
-    id_token = token_json.get("id_token")
-    if not id_token:
-        raise HTTPException(status_code=400, detail="No id_token received from Google")
-
-    from jose import jwt
-    try:
-        user_info = jwt.get_unverified_claims(id_token)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail="Failed to decode id_token")
-
-    email = user_info.get("email")
-    if not email:
-        raise HTTPException(status_code=400, detail="No email found in token")
-
-    user = db.query(models.User).filter(models.User.email == email).first()
-    if not user:
-        new_user = models.User(
-        email=email,
-        hashed_password=hash_password("google_oauth_user"),
-        user_type="free"  # Set Google OAuth users to free by default
-    )
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
-        user = new_user
-
-    token = create_access_token({"sub": user.email}, expires_delta=timedelta(days=7))
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user_type": user.user_type
-    }
 
 @router.get("/google/callback")
 @limiter.limit("10/minute")
@@ -161,7 +109,7 @@ def google_callback(request: Request, code: str, db: Session = Depends(get_db)):
         user = new_user
     access_token = create_access_token({"sub": user.email}, expires_delta=timedelta(days=7))
     # Redirect to the production frontend, now including user_type in the query params
-    redirect_url = f"https://example.web.app/auth?token={access_token}&email={user.email}&user_type={user.user_type}"
+    redirect_url = f"https://helpdeskai.web.app/auth?token={access_token}&email={user.email}&user_type={user.user_type}"
     return RedirectResponse(redirect_url)
 
 @router.get("/verify")
