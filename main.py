@@ -3,8 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from api.auth import auth, password_reset
 from db.database import Base, engine
-from api import auth, agents, upload, chat, users, scrape, analytic, kb
+from api import agents, upload, chat, users, scrape, analytic, kb
 from fastapi.staticfiles import StaticFiles
 
 
@@ -25,6 +26,7 @@ app.add_middleware(
 
 
 app.include_router(auth.router, prefix="/auth")
+app.include_router(password_reset.router, prefix="/auth")
 
 app.include_router(agents.router, prefix="/agents", tags=["Agents"])
 app.include_router(upload.router, prefix="/knowledge", tags=["Knowledge Upload"])

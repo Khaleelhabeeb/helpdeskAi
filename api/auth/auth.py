@@ -22,6 +22,7 @@ security = HTTPBearer()
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("REDIRECT_URI")
+REDIRECT_URL = os.getenv("REDIRECT_URL")
 
 def get_db():
     db = SessionLocal()
@@ -76,7 +77,7 @@ def google_callback(request: Request, code: str, db: Session = Depends(get_db)):
         "code": code,
         "client_id": GOOGLE_CLIENT_ID,
         "client_secret": GOOGLE_CLIENT_SECRET,
-        "redirect_uri": REDIRECT_URI,  # <-- UPDATED
+        "redirect_uri": REDIRECT_URI,
         "grant_type": "authorization_code"
     }
     token_response = requests.post(token_endpoint, data=data)
@@ -109,7 +110,7 @@ def google_callback(request: Request, code: str, db: Session = Depends(get_db)):
         user = new_user
     access_token = create_access_token({"sub": user.email}, expires_delta=timedelta(days=7))
     # Redirect to the production frontend, now including user_type in the query params
-    redirect_url = f"https://helpdeskai.web.app/auth?token={access_token}&email={user.email}&user_type={user.user_type}"
+    redirect_url = f"{REDIRECT_URL}/auth?token={access_token}&email={user.email}&user_type={user.user_type}"
     return RedirectResponse(redirect_url)
 
 @router.get("/verify")

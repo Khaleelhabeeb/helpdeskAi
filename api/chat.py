@@ -11,7 +11,7 @@ from langchain.prompts import (
 )
 from langchain.chains import LLMChain
 from db import models, schemas
-from api.auth import get_db
+from api.auth.auth import get_db
 from datetime import datetime, timedelta
 from typing import Optional
 import uuid

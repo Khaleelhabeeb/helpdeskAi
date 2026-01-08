@@ -3,7 +3,7 @@ import os
 import uuid
 from services.file_parser import extract_text_from_pdf_file, extract_text_from_txt_file
 from services.ai_prompt_builder import generate_system_prompt_from_text
-from api.auth import get_db
+from api.auth.auth import get_db
 from db import models
 from sqlalchemy.orm import Session
 from utils.jwt import get_current_user

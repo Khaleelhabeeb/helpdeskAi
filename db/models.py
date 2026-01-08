@@ -15,6 +15,8 @@ class User(Base):
     user_type = Column(String, default="free")
     credits_remaining = Column(Integer, default=100)
     last_reset_date = Column(DateTime, default=datetime.utcnow)
+    reset_token = Column(String, nullable=True)
+    reset_token_expires = Column(DateTime, nullable=True)
 
     def get_max_credits(self):
         if self.user_type == "free":

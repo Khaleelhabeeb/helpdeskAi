@@ -6,7 +6,7 @@ from services.ai_prompt_builder import generate_system_prompt_from_text, default
 from db import models, schemas
 from sqlalchemy.orm import Session
 from fastapi import Depends, APIRouter, HTTPException
-from api.auth import get_db
+from api.auth.auth import get_db
 from typing import Optional
 from pydantic import BaseModel
 from utils.jwt import get_current_user
