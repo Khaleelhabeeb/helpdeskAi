@@ -8,26 +8,41 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Environment-driven config
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "helpdesk_docs")
 GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "models/gemini-embedding-001")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# Gemini embeddings
-if not GOOGLE_API_KEY:
-    raise RuntimeError("GOOGLE_API_KEY must be set")
-_doc_embedder = GoogleGenerativeAIEmbeddings(
-    model=GEMINI_EMBED_MODEL,
-    task_type="RETRIEVAL_DOCUMENT",
-    google_api_key=GOOGLE_API_KEY,
-)
-_query_embedder = GoogleGenerativeAIEmbeddings(
-    model=GEMINI_EMBED_MODEL,
-    task_type="RETRIEVAL_QUERY",
-    google_api_key=GOOGLE_API_KEY,
-)
+# Lazy-loaded embedders to avoid startup overhead
+_doc_embedder = None
+_query_embedder = None
+
+
+def _get_doc_embedder():
+    global _doc_embedder
+    if _doc_embedder is None:
+        if not GOOGLE_API_KEY:
+            raise RuntimeError("GOOGLE_API_KEY must be set")
+        _doc_embedder = GoogleGenerativeAIEmbeddings(
+            model=GEMINI_EMBED_MODEL,
+            task_type="RETRIEVAL_DOCUMENT",
+            google_api_key=GOOGLE_API_KEY,
+        )
+    return _doc_embedder
+
+
+def _get_query_embedder():
+    global _query_embedder
+    if _query_embedder is None:
+        if not GOOGLE_API_KEY:
+            raise RuntimeError("GOOGLE_API_KEY must be set")
+        _query_embedder = GoogleGenerativeAIEmbeddings(
+            model=GEMINI_EMBED_MODEL,
+            task_type="RETRIEVAL_QUERY",
+            google_api_key=GOOGLE_API_KEY,
+        )
+    return _query_embedder
 
 
 def get_qdrant_client() -> QdrantClient:
@@ -37,7 +52,6 @@ def get_qdrant_client() -> QdrantClient:
 
 
 def ensure_collection(client: QdrantClient, vector_size: int = 3072) -> None:
-    """Create the collection if it doesn't exist and ensure payload indexes exist."""
     existing = client.get_collections()
     names = [c.name for c in existing.collections]
     if QDRANT_COLLECTION not in names:
@@ -73,7 +87,7 @@ def upsert_texts(namespace: str, kb_id: str, agent_id: str, texts: List[str], me
     client = get_qdrant_client()
     ensure_collection(client)
 
-    vectors = _doc_embedder.embed_documents(texts)
+    vectors = _get_doc_embedder().embed_documents(texts)
     points = []
     for i, vec in enumerate(vectors):
         pid = str(uuid.uuid4())
@@ -91,7 +105,7 @@ def search(namespace: str, query: str, top_k: int = 4) -> List[Tuple[str, float]
     client = get_qdrant_client()
     ensure_collection(client)
 
-    qvec = _query_embedder.embed_query(query)
+    qvec = _get_query_embedder().embed_query(query)
     flt = qmodels.Filter(
         must=[qmodels.FieldCondition(key="namespace", match=qmodels.MatchValue(value=namespace))]
     )

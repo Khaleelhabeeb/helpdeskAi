@@ -5,7 +5,7 @@ annotated-types==0.7.0
 anyio==4.9.0
 async-timeout==4.0.3
 attrs==25.3.0
-bcrypt==4.3.0
+bcrypt==3.2.2
 beautifulsoup4==4.13.4
 certifi==2025.4.26
 cffi==1.17.1
