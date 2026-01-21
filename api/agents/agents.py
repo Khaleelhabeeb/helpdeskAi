@@ -241,10 +241,22 @@ def delete_agent(agent_id: UUID, db: Session = Depends(get_db), user = Depends(g
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    # Delete all KBs and their S3 files for this agent
+    # Get all KBs for this agent
     kbs = db.query(models.KnowledgeBase).filter(models.KnowledgeBase.agent_id == agent.id).all()
+    
+    # Calculate total storage to decrement in one go
+    total_storage_bytes = 0
+    total_chunks = 0
     for kb in kbs:
-        # Delete from S3
+        total_storage_bytes += (kb.file_size_bytes or 0) + (kb.extracted_size_bytes or 0)
+        total_chunks += (kb.chunk_count or 0)
+    
+    if total_storage_bytes > 0:
+        from services.storage_quota import decrement_storage_usage
+        decrement_storage_usage(db, user.id, total_storage_bytes, total_chunks)
+    
+    # Delete S3 files for each KB
+    for kb in kbs:
         if kb.s3_original_key or kb.s3_extracted_key:
             try:
                 delete_kb_files(user.id, agent.id, kb.id)
@@ -261,7 +273,7 @@ def delete_agent(agent_id: UUID, db: Session = Depends(get_db), user = Depends(g
     
     db.delete(agent)
     db.commit()
-    return {"message": "Agent deleted"}
+    return {"message": "Agent and all associated data deleted successfully"}
 
 
 @router.get("/{agent_id}/config", response_model=schemas.AgentConfigOut)
