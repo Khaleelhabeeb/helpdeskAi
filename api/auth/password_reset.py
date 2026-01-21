@@ -7,7 +7,8 @@ import secrets
 import os
 
 from db.database import SessionLocal
-from db import models, schemas
+from db import schemas
+from db import models
 from utils.security import hash_password
 from services.email import send_email
 

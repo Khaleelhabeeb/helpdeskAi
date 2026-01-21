@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Query
 from typing import Optional, List
 from sqlalchemy.orm import Session
 from db import schemas
@@ -188,11 +188,22 @@ async def add_knowledge_base(
 
 
 @router.get("/{agent_id}", response_model=List[schemas.KnowledgeBaseOut])
-def list_kbs(agent_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
-    agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
+def list_kbs(
+    agent_id: str,
+    skip: int = Query(0, ge=0, description="Number of records to skip"),
+    limit: int = Query(100, ge=1, le=500, description="Max number of KBs to return"),
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user)
+):
+    agent = db.query(models.Agent).filter(
+        models.Agent.id == agent_id,
+        models.Agent.user_id == user.id
+    ).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return db.query(models.KnowledgeBase).filter(models.KnowledgeBase.agent_id == agent.id).all()
+    return db.query(models.KnowledgeBase).filter(
+        models.KnowledgeBase.agent_id == agent.id
+    ).offset(skip).limit(limit).all()
 
 
 @router.delete("/{kb_id}")
@@ -313,3 +324,94 @@ def get_kb_download_url(kb_id: str, db: Session = Depends(get_db), user = Depend
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate download URL: {str(e)}")
+
+
+@router.get("/{kb_id}/details", response_model=schemas.KnowledgeBaseOut)
+def get_kb_details(kb_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    """Get detailed information about a specific knowledge base entry"""
+    if not validate_uuid(kb_id):
+        raise HTTPException(status_code=400, detail="Invalid KB ID format")
+    
+    kb = db.query(models.KnowledgeBase).filter(models.KnowledgeBase.id == kb_id).first()
+    if not kb:
+        raise HTTPException(status_code=404, detail="KB not found")
+    
+    agent = db.query(models.Agent).filter(models.Agent.id == kb.agent_id, models.Agent.user_id == user.id).first()
+    if not agent:
+        raise HTTPException(status_code=403, detail="Forbidden - not your agent")
+    
+    return kb
+
+
+@router.patch("/{kb_id}")
+def update_kb_metadata(
+    kb_id: str,
+    title: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user)
+):
+    """Update KB metadata (currently only title)"""
+    if not validate_uuid(kb_id):
+        raise HTTPException(status_code=400, detail="Invalid KB ID format")
+    
+    kb = db.query(models.KnowledgeBase).filter(models.KnowledgeBase.id == kb_id).first()
+    if not kb:
+        raise HTTPException(status_code=404, detail="KB not found")
+    
+    agent = db.query(models.Agent).filter(models.Agent.id == kb.agent_id, models.Agent.user_id == user.id).first()
+    if not agent:
+        raise HTTPException(status_code=403, detail="Forbidden - not your agent")
+    
+    if title is not None:
+        kb.title = title
+    
+    db.commit()
+    db.refresh(kb)
+    
+    return {"message": "KB updated successfully", "kb": kb}
+
+
+@router.get("/{kb_id}/status")
+def get_kb_ingestion_status(kb_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    """
+    Check the ingestion/vectorization status of a KB entry.
+    Returns KB status and associated job information.
+    """
+    if not validate_uuid(kb_id):
+        raise HTTPException(status_code=400, detail="Invalid KB ID format")
+    
+    kb = db.query(models.KnowledgeBase).filter(models.KnowledgeBase.id == kb_id).first()
+    if not kb:
+        raise HTTPException(status_code=404, detail="KB not found")
+    
+    agent = db.query(models.Agent).filter(models.Agent.id == kb.agent_id, models.Agent.user_id == user.id).first()
+    if not agent:
+        raise HTTPException(status_code=403, detail="Forbidden - not your agent")
+    
+    # Get latest ingest job for this KB
+    latest_job = db.query(models.KBIngestJob).filter(
+        models.KBIngestJob.kb_id == kb_id
+    ).order_by(models.KBIngestJob.created_at.desc()).first()
+    
+    response = {
+        "kb_id": kb_id,
+        "kb_status": kb.status.value,  # pending, ready, failed
+        "chunk_count": kb.chunk_count,
+        "file_size_bytes": kb.file_size_bytes,
+        "extracted_size_bytes": kb.extracted_size_bytes,
+        "original_filename": kb.original_filename,
+        "created_at": kb.created_at.isoformat() if kb.created_at else None,
+        "updated_at": kb.updated_at.isoformat() if kb.updated_at else None
+    }
+    
+    if latest_job:
+        response["latest_job"] = {
+            "job_id": str(latest_job.id),
+            "state": latest_job.state.value,  # queued, running, succeeded, failed
+            "error_message": latest_job.error_message,
+            "created_at": latest_job.created_at.isoformat() if latest_job.created_at else None
+        }
+    else:
+        response["latest_job"] = None
+    
+    return response

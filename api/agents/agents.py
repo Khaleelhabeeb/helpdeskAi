@@ -1,4 +1,4 @@
-from fastapi import UploadFile, File, Form, BackgroundTasks
+from fastapi import UploadFile, File, Form, BackgroundTasks, Query
 import uuid as uuid_lib
 from db import models
 from services.file_parser import extract_text_from_pdf_file, extract_text_from_txt_file, extract_text_from_pdf, extract_text_from_txt
@@ -209,8 +209,15 @@ async def create_agent_with_upload(
 
 
 @router.get("/", response_model=list[schemas.AgentOut])
-def get_user_agents(db: Session = Depends(get_db), user = Depends(get_current_user)):
-    return db.query(models.Agent).filter(models.Agent.user_id == user.id).all()
+def get_user_agents(
+    skip: int = Query(0, ge=0, description="Number of records to skip"),
+    limit: int = Query(100, ge=1, le=500, description="Max number of agents to return"),
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user)
+):
+    return db.query(models.Agent).filter(
+        models.Agent.user_id == user.id
+    ).offset(skip).limit(limit).all()
 
 @router.put("/{agent_id}/edit", response_model=schemas.AgentOut)
 def update_agent(agent_id: UUID, update: schemas.AgentCreate, db: Session = Depends(get_db), user = Depends(get_current_user)):

@@ -1,5 +1,4 @@
-# Backward compatibility - imports from new modular structure
-from schemas import (
+from .user import (
     UserCreate,
     UserLogin,
     UserOut,
@@ -11,6 +10,8 @@ from schemas import (
     UserSettingsCreate,
     UserSettingsUpdate,
     UserSettingsOut,
+)
+from .agent import (
     AgentCreate,
     AgentOut,
     AgentConfigOut,
@@ -18,15 +19,16 @@ from schemas import (
     WidgetConfig,
     EmbedConfig,
     AgentSettingsOut,
+)
+from .knowledge_base import (
     KnowledgeBaseCreate,
     KnowledgeBaseOut,
     KBIngestJobOut,
-    KBSourceType,
-    KBStatus,
-    JobState,
 )
+from .enums import KBSourceType, KBStatus, JobState
 
 __all__ = [
+    # User schemas
     "UserCreate",
     "UserLogin",
     "UserOut",
@@ -38,6 +40,7 @@ __all__ = [
     "UserSettingsCreate",
     "UserSettingsUpdate",
     "UserSettingsOut",
+    # Agent schemas
     "AgentCreate",
     "AgentOut",
     "AgentConfigOut",
@@ -45,9 +48,11 @@ __all__ = [
     "WidgetConfig",
     "EmbedConfig",
     "AgentSettingsOut",
+    # Knowledge base schemas
     "KnowledgeBaseCreate",
     "KnowledgeBaseOut",
     "KBIngestJobOut",
+    # Enums
     "KBSourceType",
     "KBStatus",
     "JobState",

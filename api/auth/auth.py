@@ -8,7 +8,8 @@ import os
 import requests
 from datetime import timedelta
 from db.database import SessionLocal
-from db import models, schemas
+from db import schemas
+from db import models
 from utils.security import hash_password, verify_password
 from utils.jwt import create_access_token, verify_token, get_current_user
 from dotenv import load_dotenv
@@ -121,7 +122,7 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
     """
     try:
         token = credentials.credentials
-        verify_token(token)
+        await verify_token(token)
         return {"status": "valid"}
     except Exception as e:
         raise HTTPException(

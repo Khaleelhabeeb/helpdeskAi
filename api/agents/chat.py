@@ -20,12 +20,14 @@ import time
 from dotenv import load_dotenv
 from db import models
 from services.vector_store import search, format_context
+from utils.jwt import get_current_user
 
 load_dotenv()
 
 router = APIRouter()
 
 conversation_memories = {}  
+MAX_MEMORY_SIZE = 1000  # Maximum number of conversations to keep in memory
 
 class ChatRequest(BaseModel):
     message: str
@@ -44,6 +46,13 @@ def get_conversation_memory(unique_id: str, user_id: str, agent_id: str, system_
     memory_key = get_memory_key(unique_id, user_id, agent_id)
     
     if memory_key not in conversation_memories:
+        # Implement LRU eviction if we're at max capacity
+        if len(conversation_memories) >= MAX_MEMORY_SIZE:
+            # Remove oldest memory by timestamp
+            oldest_key = min(conversation_memories.items(), key=lambda x: x[1]["timestamp"])[0]
+            del conversation_memories[oldest_key]
+            print(f"Evicted memory for key: {oldest_key} (LRU)")
+        
         groq_api_key = os.getenv("GROQ_API_KEY")
         if not groq_api_key:
             raise HTTPException(status_code=500, detail="GROQ_API_KEY not configured")
@@ -93,11 +102,20 @@ async def chat_with_agent(
     agent_id: str,
     chat: ChatRequest,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user)
 ):
-    agent = db.query(models.Agent).filter(models.Agent.id == agent_id).first()
+    # Verify agent exists and belongs to user
+    agent = db.query(models.Agent).filter(
+        models.Agent.id == agent_id,
+        models.Agent.user_id == user.id
+    ).first()
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=404, detail="Agent not found or access denied")
+    
+    # Check user credits
+    if user.credits_balance <= 0:
+        raise HTTPException(status_code=402, detail="Insufficient credits. Please add more credits to continue.")
 
     if not agent.instructions:
         raise HTTPException(status_code=400, detail="Agent has no instructions set yet")
@@ -129,6 +147,22 @@ async def chat_with_agent(
     ai_response = conversation.invoke({"text": chat.message})["text"]
 
     conversation.memory.chat_memory.add_ai_message(ai_response)
+    
+    # Deduct credits and log usage
+    credits_used = 1  # Default credit cost per message
+    user.credits_balance -= credits_used
+    
+    # Log the conversation
+    usage_log = models.UsageLog(
+        user_id=user.id,
+        agent_id=agent_id,
+        message_content=chat.message,
+        response_content=ai_response,
+        credits_used=credits_used,
+        timestamp=datetime.utcnow()
+    )
+    db.add(usage_log)
+    db.commit()
 
     background_tasks.add_task(cleanup_expired_memories)
 

@@ -7,6 +7,7 @@ from db import models
 from services.file_parser import extract_text_from_pdf_file, extract_text_from_txt_file
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from services.vector_store import upsert_texts
+from services.s3_storage import download_text_from_s3
 import httpx
 import asyncio
 from bs4 import BeautifulSoup
@@ -48,36 +49,33 @@ def process_kb_ingest_job(job_id: str, transient_text: Optional[str] = None) -> 
         config = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == kb.agent_id).first()
         namespace = config.vector_store_namespace if config else None
 
-        # Resolve text content
+        # Download extracted text from S3 (all types store extracted text there)
         text_content: Optional[str] = None
-        if kb.source_type in (models.KBSourceType.upload_pdf, models.KBSourceType.upload_txt, models.KBSourceType.other):
-            if not kb.source_uri or not os.path.exists(kb.source_uri):
-                raise FileNotFoundError("KB source file not found")
-            lower = kb.source_uri.lower()
-            if lower.endswith(".pdf"):
-                with open(kb.source_uri, "rb") as rf:
-                    text_content = extract_text_from_pdf_file(rf)
-            elif lower.endswith(".txt"):
-                with open(kb.source_uri, "rb") as rf:
-                    text_content = extract_text_from_txt_file(rf)
-            else:
-                with open(kb.source_uri, "rb") as rf:
-                    text_content = rf.read().decode("utf-8", errors="ignore")
-        elif kb.source_type == models.KBSourceType.url:
-            # Fetch HTML and extract main text
-            async def fetch_url():
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    return await client.get(kb.source_uri)
-            resp = asyncio.run(fetch_url())
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, "html.parser")
-            for tag in soup(["script", "style", "noscript"]):
-                tag.decompose()
-            text_content = " ".join(soup.get_text(separator=" ").split())
-        elif kb.source_type == models.KBSourceType.text:
-            if transient_text is None or len(transient_text.strip()) == 0:
-                raise ValueError("No transient text provided for text KB")
-            text_content = transient_text
+        
+        if kb.s3_extracted_key:
+            # Use cached extracted text from S3
+            text_content = download_text_from_s3(kb.s3_extracted_key)
+            if not text_content:
+                raise ValueError("Failed to download extracted text from S3")
+        else:
+            # Fallback: shouldn't happen with new uploads, but handle legacy
+            if kb.source_type in (models.KBSourceType.upload_pdf, models.KBSourceType.upload_txt, models.KBSourceType.other):
+                if not kb.source_uri or not os.path.exists(kb.source_uri):
+                    raise FileNotFoundError("KB source file not found and no S3 backup")
+                lower = kb.source_uri.lower()
+                if lower.endswith(".pdf"):
+                    with open(kb.source_uri, "rb") as rf:
+                        text_content = extract_text_from_pdf_file(rf)
+                elif lower.endswith(".txt"):
+                    with open(kb.source_uri, "rb") as rf:
+                        text_content = extract_text_from_txt_file(rf)
+                else:
+                    with open(kb.source_uri, "rb") as rf:
+                        text_content = rf.read().decode("utf-8", errors="ignore")
+            elif kb.source_type == models.KBSourceType.text:
+                if transient_text is None or len(transient_text.strip()) == 0:
+                    raise ValueError("No transient text provided for text KB")
+                text_content = transient_text
 
         if not text_content or len(text_content.strip()) == 0:
             raise ValueError("No text content extracted for KB")
@@ -92,8 +90,11 @@ def process_kb_ingest_job(job_id: str, transient_text: Optional[str] = None) -> 
             raise ValueError("Missing vector store namespace")
         upsert_texts(namespace=namespace, kb_id=str(kb.id), agent_id=str(agent.id), texts=chunks, metadatas=None)
 
-        # Mark KB ready and job success
+        # Update KB with chunk count
+        kb.chunk_count = len(chunks)
         kb.status = models.KBStatus.ready
+        
+        # Mark job success
         job.state = models.JobState.succeeded
         job.error = None
         db.commit()

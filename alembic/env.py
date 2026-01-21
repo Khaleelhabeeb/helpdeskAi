@@ -16,7 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 load_dotenv()
 
 from db.database import Base
-from db import models  # Import all models so Alembic can detect them
+# Import all models so Alembic can detect them
+from models import User, Agent, AgentConfig, KnowledgeBase, KBIngestJob, UsageLog, UserSettings, UserStorageUsage
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
