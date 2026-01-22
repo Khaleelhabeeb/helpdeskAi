@@ -13,6 +13,7 @@ class AgentOut(BaseModel):
     id: UUID
     name: str
     instructions: Optional[str]
+    avatar_url: Optional[str]
     created_at: datetime
 
     class Config:

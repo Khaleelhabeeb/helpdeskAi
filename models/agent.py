@@ -12,6 +12,7 @@ class Agent(Base):
     user_id = Column(Integer, ForeignKey("users.id"), index=True)
     name = Column(String, nullable=False)
     instructions = Column(Text, nullable=True)
+    avatar_url = Column(String, nullable=True)  # S3 key for agent avatar image
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", backref="agents")

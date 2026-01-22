@@ -2,7 +2,7 @@ from fastapi import UploadFile, File, Form, BackgroundTasks, Query
 import uuid as uuid_lib
 from db import models
 from services.file_parser import extract_text_from_pdf_file, extract_text_from_txt_file, extract_text_from_pdf, extract_text_from_txt
-from services.ai_prompt_builder import generate_system_prompt_from_text, default_guardrail_system_prompt
+from services.ai_prompt_builder import default_system_prompt
 from db import schemas
 from sqlalchemy.orm import Session
 from fastapi import Depends, APIRouter, HTTPException
@@ -21,15 +21,11 @@ import json
 router = APIRouter()
 
 @router.post("/create", response_model=schemas.AgentOut)
-async def create_agent_with_upload(
+async def create_agent(
     name: str = Form(...),
     instructions: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None),
-    structured_text: Optional[str] = Form(None),
-    url: Optional[str] = Form(None),
+    avatar: Optional[UploadFile] = File(None),
     enable_retrieval: bool = Form(True),
-    legacy_prompt_update: bool = Form(False),
-    background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
@@ -46,20 +42,16 @@ async def create_agent_with_upload(
             detail="Paid users can create up to 3 agents. Please upgrade to a pro plan for unlimited agents."
         )
 
-    # only one of file/structured_text/url is provided
-    provided_sources = [bool(file), bool(structured_text), bool(url)]
-    if sum(provided_sources) != 1:
-        raise HTTPException(status_code=400, detail="Provide exactly one knowledge source: file OR structured_text OR url")
-
-    # Check quota limits before creating agent
-    check_files_quota(db, user)
-
-    guardrails = instructions or default_guardrail_system_prompt(name)
-    new_agent = models.Agent(name=name, instructions=guardrails, user_id=user.id)
+    # Generate default instructions if not provided
+    instructions = instructions or default_system_prompt(name)
+    
+    # Create agent
+    new_agent = models.Agent(name=name, instructions=instructions, user_id=user.id)
     db.add(new_agent)
     db.commit()
     db.refresh(new_agent)
 
+    # Create agent configuration
     namespace = f"{user.id}:{new_agent.id}"
     config = models.AgentConfig(
         agent_id=new_agent.id,
@@ -67,142 +59,33 @@ async def create_agent_with_upload(
         retrieval_top_k=4,
         embedding_model=None,
         vector_store_namespace=namespace,
-        system_prompt_locked=True
+        system_prompt_locked=False  # Allow editing initially
     )
     db.add(config)
     db.commit()
-
-    source_type = None
-    source_uri = None
-    s3_original_key = None
-    s3_extracted_key = None
-    original_filename = None
-    file_size_bytes = 0
-    extracted_size_bytes = 0
-
-    # Generate KB ID early for S3 path
-    kb_id = str(uuid_lib.uuid4())
-
-    # Handle file upload (PDF/TXT)
-    if file:
-        file_content = await file.read()
-        file_size_bytes = len(file_content)
+    
+    # Handle avatar upload if provided
+    if avatar:
+        avatar_content = await avatar.read()
+        avatar_size = len(avatar_content)
         
-        # Check storage quota
-        check_storage_quota(db, user, file_size_bytes)
+        # Validate image size (max 5MB)
+        if avatar_size > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Avatar image must be less than 5MB")
         
-        original_filename = file.filename
+        # Validate image type
+        allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
+        if avatar.content_type not in allowed_types:
+            raise HTTPException(status_code=400, detail="Avatar must be JPG, PNG, or WebP format")
         
-        # Determine source type
-        if file.filename.lower().endswith(".pdf"):
-            source_type = models.KBSourceType.upload_pdf
-            file_extension = "pdf"
-        elif file.filename.lower().endswith(".txt"):
-            source_type = models.KBSourceType.upload_txt
-            file_extension = "txt"
-        else:
-            source_type = models.KBSourceType.other
-            file_extension = file.filename.split('.')[-1] if '.' in file.filename else 'bin'
+        # Upload avatar to S3
+        avatar_extension = avatar.filename.split('.')[-1] if '.' in avatar.filename else 'jpg'
+        avatar_key = f"user_{user.id}/agent_{new_agent.id}/avatar.{avatar_extension}"
+        upload_file_to_s3(avatar_content, avatar_key, content_type=avatar.content_type)
         
-        # Upload original file to S3
-        s3_original_key = get_s3_key(user.id, str(new_agent.id), str(kb_id), "original", file_extension)
-        upload_file_to_s3(file_content, s3_original_key)
-        
-        # Extract text
-        if source_type == models.KBSourceType.upload_pdf:
-            extracted_text = extract_text_from_pdf(file_content)
-        elif source_type == models.KBSourceType.upload_txt:
-            extracted_text = extract_text_from_txt(file_content)
-        else:
-            extracted_text = ""
-        
-        # Upload extracted text to S3
-        if extracted_text:
-            s3_extracted_key = get_s3_key(user.id, str(new_agent.id), str(kb_id), "extracted", "txt")
-            upload_text_to_s3(extracted_text, s3_extracted_key)
-            extracted_size_bytes = len(extracted_text.encode('utf-8'))
-        
-        source_uri = s3_original_key
-        
-    # Handle structured text
-    elif structured_text:
-        source_type = models.KBSourceType.text
-        extracted_text = structured_text
-        extracted_size_bytes = len(structured_text.encode('utf-8'))
-        
-        # Check storage quota
-        check_storage_quota(db, user, extracted_size_bytes)
-        
-        # Upload text to S3
-        s3_extracted_key = get_s3_key(user.id, str(new_agent.id), str(kb_id), "extracted", "txt")
-        upload_text_to_s3(structured_text, s3_extracted_key)
-        source_uri = None
-        original_filename = "Structured Text"
-        
-    # Handle URL scraping
-    elif url:
-        source_type = models.KBSourceType.url
-        
-        # Scrape URL content
-        scraped_data = await scrape_url_content(url)
-        extracted_text = scraped_data.get("text", "")
-        extracted_size_bytes = len(extracted_text.encode('utf-8'))
-        
-        # Check storage quota
-        check_storage_quota(db, user, extracted_size_bytes)
-        
-        # Upload extracted text to S3
-        s3_extracted_key = get_s3_key(user.id, str(new_agent.id), str(kb_id), "extracted", "txt")
-        upload_text_to_s3(extracted_text, s3_extracted_key)
-        
-        # Save metadata as JSON
-        metadata_json = json.dumps({
-            "url": url,
-            "title": scraped_data.get("title", ""),
-            "scraped_at": scraped_data.get("timestamp")
-        })
-        metadata_key = get_s3_key(user.id, str(new_agent.id), str(kb_id), "metadata", "json")
-        upload_text_to_s3(metadata_json, metadata_key)
-        
-        source_uri = url
-        original_filename = scraped_data.get("title", url)
-
-    # Create KB record with S3 metadata
-    kb = models.KnowledgeBase(
-        id=kb_id,
-        agent_id=new_agent.id,
-        source_type=source_type,
-        source_uri=source_uri,
-        status=models.KBStatus.pending,
-        s3_original_key=s3_original_key,
-        s3_extracted_key=s3_extracted_key,
-        original_filename=original_filename,
-        file_size_bytes=file_size_bytes,
-        extracted_size_bytes=extracted_size_bytes
-    )
-    db.add(kb)
-    db.commit()
-    db.refresh(kb)
-
-    # Update storage usage
-    increment_storage_usage(db, user.id, file_size_bytes + extracted_size_bytes, 0)
-
-    job = models.KBIngestJob(kb_id=kb.id, state=models.JobState.queued)
-    db.add(job)
-    db.commit()
-
-    if background_tasks is not None:
-        background_tasks.add_task(process_kb_ingest_job, str(job.id), None)
-
-    if legacy_prompt_update:
-        cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == new_agent.id).first()
-        if cfg and cfg.system_prompt_locked:
-            raise HTTPException(status_code=400, detail="System prompt is locked; cannot overwrite via legacy path")
-        
-        # Use extracted_text from above (already available)
-        if extracted_text:
-            new_agent.instructions = generate_system_prompt_from_text(extracted_text, name)
-            db.commit()
+        # Update agent with avatar URL/key
+        new_agent.avatar_url = avatar_key
+        db.commit()
 
     db.refresh(new_agent)
     return new_agent
