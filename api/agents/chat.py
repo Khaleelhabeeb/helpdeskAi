@@ -114,7 +114,7 @@ async def chat_with_agent(
         raise HTTPException(status_code=404, detail="Agent not found or access denied")
     
     # Check user credits
-    if user.credits_balance <= 0:
+    if user.credits_remaining <= 0:
         raise HTTPException(status_code=402, detail="Insufficient credits. Please add more credits to continue.")
 
     if not agent.instructions:
@@ -150,7 +150,7 @@ async def chat_with_agent(
     
     # Deduct credits and log usage
     credits_used = 1  # Default credit cost per message
-    user.credits_balance -= credits_used
+    user.credits_remaining -= credits_used
     
     # Log the conversation
     usage_log = models.UsageLog(
