@@ -1,4 +1,5 @@
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean, JSON
+from sqlalchemy.dialects.postgresql import UUID
 from datetime import datetime
 from db.database import Base
 from sqlalchemy.orm import relationship
@@ -7,8 +8,9 @@ from sqlalchemy.orm import relationship
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
+    supabase_user_id = Column(String, unique=True, nullable=True, index=True)
     email = Column(String, unique=True, index=True)
-    hashed_password = Column(String)
+    hashed_password = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     user_type = Column(String, default="free")
     credits_remaining = Column(Integer, default=100)
@@ -30,7 +32,7 @@ class UsageLog(Base):
     __tablename__ = "usage_logs"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), index=True)
-    agent_id = Column(Integer, ForeignKey("agents.id"), index=True)
+    agent_id = Column(UUID(as_uuid=True), ForeignKey("agents.id"), index=True)
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
     credits_used = Column(Integer, default=1)
     message_content = Column(Text, nullable=True)

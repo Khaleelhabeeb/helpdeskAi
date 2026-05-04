@@ -1,17 +1,13 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from fastapi.responses import RedirectResponse, HTMLResponse
 from sqlalchemy.orm import Session
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import os
-import requests
 from datetime import timedelta
 from db.database import SessionLocal
 from db import schemas
 from db import models
-from utils.security import hash_password, verify_password
-from utils.jwt import create_access_token, verify_token, get_current_user
+from services.supabase_auth import get_supabase_client, upsert_local_user, verify_supabase_token
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -19,11 +15,15 @@ limiter = Limiter(key_func=get_remote_address)
 router = APIRouter()
 
 load_dotenv()
-security = HTTPBearer()
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("REDIRECT_URI")
-REDIRECT_URL = os.getenv("REDIRECT_URL")
+
+
+@router.get("/supabase-config")
+def supabase_config():
+    url = os.getenv("SUPABASE_URL")
+    anon_key = os.getenv("SUPABASE_ANON_KEY")
+    if not url or not anon_key:
+        raise HTTPException(status_code=500, detail="Supabase config is missing")
+    return {"url": url, "anon_key": anon_key}
 
 def get_db():
     db = SessionLocal()
@@ -36,30 +36,45 @@ def get_db():
 @limiter.limit("5/minute")
 def signup(request: Request, user: schemas.UserCreate, db: Session = Depends(get_db)):
     normalized_email = user.email.lower()
-    if db.query(models.User).filter(models.User.email == normalized_email).first():
-        raise HTTPException(status_code=400, detail="Email already exists")
+    try:
+        response = get_supabase_client().auth.sign_up(
+            {"email": normalized_email, "password": user.password}
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    new_user = models.User(
-        email=normalized_email,
-        hashed_password=hash_password(user.password),
-        user_type="free"  # Explicitly setting new users to free tier
-    )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    return {"message": "User created successfully"}
+    supabase_user = getattr(response, "user", None)
+    if supabase_user:
+        upsert_local_user(db, str(supabase_user.id), normalized_email)
+
+    session = getattr(response, "session", None)
+    return {
+        "message": "User created successfully",
+        "access_token": getattr(session, "access_token", None),
+        "refresh_token": getattr(session, "refresh_token", None),
+        "token_type": "bearer",
+    }
 
 @router.post("/login")
 @limiter.limit("10/minute")
 def login(request: Request, user: schemas.UserLogin, db: Session = Depends(get_db)):
     normalized_email = user.email.lower()
-    db_user = db.query(models.User).filter(models.User.email == normalized_email).first()
-    if not db_user or not verify_password(user.password, db_user.hashed_password):
+    try:
+        response = get_supabase_client().auth.sign_in_with_password(
+            {"email": normalized_email, "password": user.password}
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid credentials") from exc
+
+    supabase_user = getattr(response, "user", None)
+    if not supabase_user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    token = create_access_token({"sub": db_user.email})
+    db_user = upsert_local_user(db, str(supabase_user.id), normalized_email)
+    session = getattr(response, "session", None)
     return {
-        "access_token": token,
+        "access_token": getattr(session, "access_token", None),
+        "refresh_token": getattr(session, "refresh_token", None),
         "token_type": "bearer",
         "user_type": db_user.user_type
     } 
@@ -68,74 +83,20 @@ def login(request: Request, user: schemas.UserLogin, db: Session = Depends(get_d
 @router.get("/google/callback")
 @limiter.limit("10/minute")
 def google_callback(request: Request, code: str, db: Session = Depends(get_db)):
-    """
-    Callback endpoint for Google OAuth.
-    Exchanges the provided authorization code for tokens,
-    then redirects to the front end with the token and user email.
-    """
-    token_endpoint = "https://oauth2.googleapis.com/token"
-    data = {
-        "code": code,
-        "client_id": GOOGLE_CLIENT_ID,
-        "client_secret": GOOGLE_CLIENT_SECRET,
-        "redirect_uri": REDIRECT_URI,
-        "grant_type": "authorization_code"
-    }
-    token_response = requests.post(token_endpoint, data=data)
-    if token_response.status_code != 200:
-        raise HTTPException(status_code=400, detail="Failed to fetch tokens from Google")
-    token_json = token_response.json()
-    id_token = token_json.get("id_token")
-    if not id_token:
-        raise HTTPException(status_code=400, detail="No id_token received from Google")
-    from jose import jwt
-    try:
-        # For production, validate the token signature properly.
-        user_info = jwt.get_unverified_claims(id_token)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Failed to decode id_token")
-    email = user_info.get("email")
-    if not email:
-        raise HTTPException(status_code=400, detail="No email found in token")
-    # Look up the user; create if needed.
-    user = db.query(models.User).filter(models.User.email == email).first()
-    if not user:
-        new_user = models.User(
-            email=email,
-            hashed_password=hash_password("google_oauth_user"),
-            user_type="free"  # Set Google OAuth users to free by default
-        )
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
-        user = new_user
-    access_token = create_access_token({"sub": user.email}, expires_delta=timedelta(days=7))
-    # Redirect to the production frontend, now including user_type in the query params
-    redirect_url = f"{REDIRECT_URL}/auth?token={access_token}&email={user.email}&user_type={user.user_type}"
-    return RedirectResponse(redirect_url)
+    raise HTTPException(
+        status_code=410,
+        detail="Google OAuth callback moved to Supabase Auth. Configure Google in Supabase and use the Supabase callback flow.",
+    )
 
 @router.get("/verify")
-async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """
-    Verifies if the provided JWT token is valid.
-    Returns 200 OK if valid, 401 Unauthorized if invalid.
-    """
-    try:
-        token = credentials.credentials
-        await verify_token(token)
-        return {"status": "valid"}
-    except Exception as e:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+def verify_auth(user = Depends(verify_supabase_token)):
+    return {"status": "valid", "user_id": user.id, "email": user.email}
 
 @router.post("/upgrade/{tier}")
 def upgrade_user(
     tier: str,
     db: Session = Depends(get_db), 
-    user = Depends(get_current_user)
+    user = Depends(verify_supabase_token)
 ):
     """
     Upgrades a user to the specified tier.

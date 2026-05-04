@@ -24,6 +24,7 @@ router = APIRouter()
 async def create_agent(
     name: str = Form(...),
     instructions: Optional[str] = Form(None),
+    model: Optional[str] = Form(None),
     avatar: Optional[UploadFile] = File(None),
     enable_retrieval: bool = Form(True),
     db: Session = Depends(get_db),
@@ -46,7 +47,12 @@ async def create_agent(
     instructions = instructions or default_system_prompt(name)
     
     # Create agent
-    new_agent = models.Agent(name=name, instructions=instructions, user_id=user.id)
+    new_agent = models.Agent(
+        name=name,
+        instructions=instructions,
+        user_id=user.id,
+        model=model or "groq/openai/gpt-oss-20b",
+    )
     db.add(new_agent)
     db.commit()
     db.refresh(new_agent)
@@ -108,6 +114,8 @@ def update_agent(agent_id: UUID, update: schemas.AgentCreate, db: Session = Depe
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     agent.name = update.name
+    if update.model is not None:
+        agent.model = update.model
 
     cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
     if cfg and cfg.system_prompt_locked and update.instructions is not None:

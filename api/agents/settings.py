@@ -69,6 +69,7 @@ def get_agent_settings(
         "agent_id": str(agent_id),
         "name": agent.name,
         "instructions": agent.instructions or "",
+        "model": agent.model,
         "widget": widget_config,
         "embed": {
             "script": embed_script,
@@ -122,6 +123,10 @@ def update_agent_settings(
     if settings.instructions is not None:
         agent.instructions = settings.instructions
         updates.append("instructions")
+
+    if settings.model is not None:
+        agent.model = settings.model
+        updates.append("model")
     
     # Update widget configuration in AgentConfig
     if settings.widget_theme is not None:
@@ -156,6 +161,7 @@ def update_agent_settings(
                 "id": str(agent.id),
                 "name": agent.name,
                 "instructions": agent.instructions,
+                "model": agent.model,
                 "updated_at": config.updated_at.isoformat()
             }
         }

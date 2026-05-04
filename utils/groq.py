@@ -1,11 +1,8 @@
-from groq import Groq
-import os
-
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))  
+from litellm import completion
 
 def send_message_to_groq(system_prompt: str, user_message: str) -> str:
-    completion = client.chat.completions.create(
-        model="openai/gpt-oss-20b",  # Use  supported model
+    response = completion(
+        model="groq/openai/gpt-oss-20b",
         messages=[
             {
                 "role": "system",
@@ -18,8 +15,6 @@ def send_message_to_groq(system_prompt: str, user_message: str) -> str:
         ],
         temperature=1,
         max_tokens=8192,
-        top_p=1,
-        stream=False
     )
 
-    return completion.choices[0].message.content.strip()
+    return response.choices[0].message.content.strip()

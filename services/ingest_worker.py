@@ -5,12 +5,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from db.database import SessionLocal
 from db import models
 from services.file_parser import extract_text_from_pdf_file, extract_text_from_txt_file
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from services.vector_store import upsert_texts
+from services.rag_service import index_kb_text
 from services.s3_storage import download_text_from_s3
-import httpx
-import asyncio
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -80,18 +76,19 @@ def process_kb_ingest_job(job_id: str, transient_text: Optional[str] = None) -> 
         if not text_content or len(text_content.strip()) == 0:
             raise ValueError("No text content extracted for KB")
 
-        # Chunking
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-        chunks = [c for c in splitter.split_text(text_content) if c.strip()]
-        if not chunks:
-            raise ValueError("No chunks generated from content")
-
         if not namespace:
             raise ValueError("Missing vector store namespace")
-        upsert_texts(namespace=namespace, kb_id=str(kb.id), agent_id=str(agent.id), texts=chunks, metadatas=None)
+        chunk_count = index_kb_text(
+            db=db,
+            user_id=agent.user_id,
+            agent_id=str(agent.id),
+            kb_id=str(kb.id),
+            namespace=namespace,
+            text_value=text_content,
+        )
 
         # Update KB with chunk count
-        kb.chunk_count = len(chunks)
+        kb.chunk_count = chunk_count
         kb.status = models.KBStatus.ready
         
         # Mark job success

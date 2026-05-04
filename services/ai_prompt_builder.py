@@ -1,10 +1,4 @@
-import os
-from groq import Groq
-from dotenv import load_dotenv
-
-load_dotenv()
-
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+from litellm import completion
 
 def default_system_prompt(agent_name: str) -> str:
     return f"""### Role
@@ -20,19 +14,31 @@ def default_system_prompt(agent_name: str) -> str:
             4. Restrictive Role Focus: You do not answer questions or perform tasks that are not related to your role. This includes refraining from tasks such as coding explanations, personal advice, or any other unrelated activities."""
 
 
+def default_guardrail_system_prompt(agent_name: str) -> str:
+    return default_system_prompt(agent_name)
+
+
+def generate_system_prompt_from_text(training_text: str, agent_name: str) -> str:
+    summary = training_text[:6000]
+    return (
+        f"{default_system_prompt(agent_name)}\n\n"
+        "Use the following training material as the agent's initial knowledge base. "
+        "Answer only when the user's request is supported by this material.\n\n"
+        f"{summary}"
+    )
+
+
 def send_message_to_groq(system_prompt: str, user_message: str) -> str:
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message}
     ]
 
-    response = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
+    response = completion(
+        model="groq/openai/gpt-oss-20b",
         messages=messages,
         temperature=1,
         max_tokens=8192,
-        top_p=1,
-        stream=False
     )
 
     return response.choices[0].message.content.strip()

@@ -7,12 +7,14 @@ from uuid import UUID
 class AgentCreate(BaseModel):
     name: str
     instructions: Optional[str] = None
+    model: Optional[str] = None
 
 
 class AgentOut(BaseModel):
     id: UUID
     name: str
     instructions: Optional[str]
+    model: str
     avatar_url: Optional[str]
     created_at: datetime
 
@@ -38,6 +40,7 @@ class AgentSettingsUpdate(BaseModel):
     """Schema for updating agent settings (instructions and widget configuration)"""
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     instructions: Optional[str] = Field(None, max_length=5000)
+    model: Optional[str] = Field(None, max_length=120)
     widget_theme: Optional[str] = Field(None, pattern="^(light|dark|auto)$")
     widget_color: Optional[str] = Field(None, pattern="^#[0-9A-Fa-f]{6}$")
     widget_position: Optional[str] = Field(None, pattern="^(bottom-right|bottom-left|top-right|top-left)$")
@@ -65,6 +68,7 @@ class AgentSettingsOut(BaseModel):
     agent_id: str
     name: str
     instructions: str
+    model: str
     widget: WidgetConfig
     embed: EmbedConfig
     statistics: Dict[str, Any]

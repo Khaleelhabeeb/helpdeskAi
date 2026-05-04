@@ -1,9 +1,6 @@
-from passlib.context import CryptContext
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 def hash_password(password: str):
-    return pwd_context.hash(password)
+    raise RuntimeError("Password hashing is managed by Supabase Auth")
+
 
 def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+    raise RuntimeError("Password verification is managed by Supabase Auth")

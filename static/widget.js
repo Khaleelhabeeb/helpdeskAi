@@ -1,6 +1,8 @@
 (function () {
     const agentId = document.currentScript.getAttribute("data-agent-id");
     const displayName = document.currentScript.getAttribute("display-name") || "Chat Assistant";
+    const apiBase = document.currentScript.getAttribute("data-api-base") || new URL(document.currentScript.src).origin;
+    const authToken = document.currentScript.getAttribute("data-auth-token") || "";
     let mainColor = document.currentScript.getAttribute("main-color") || "#4a6cf7";
 
     // Function to convert color names to hex
@@ -597,12 +599,17 @@
         // Save after adding user message
         saveChatHistory();
 
-        // Send to backend and get response
-        fetch(`https://example.com/chat/${agentId}`, {
+        const botMessageElement = document.createElement("div");
+        botMessageElement.className = "chat-message bot-message";
+        botMessageElement.textContent = "";
+        chatMessages.appendChild(botMessageElement);
+
+        const headers = { "Content-Type": "application/json" };
+        if (authToken) headers.Authorization = `Bearer ${authToken}`;
+
+        fetch(`${apiBase}/chat/${agentId}`, {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
+            headers,
             body: JSON.stringify({ message: userMessage })
         })
         .then(async response => {
@@ -610,43 +617,42 @@
                 let errorText = "Sorry, there was an error processing your request.";
                 if (response.status === 401) errorText = "You are not authorized.";
                 if (response.status === 403) errorText = "Access forbidden.";
-                const errorMessage = document.createElement("div");
-                errorMessage.className = "chat-message bot-message";
-                errorMessage.textContent = errorText;
-                chatMessages.appendChild(errorMessage);
+                botMessageElement.textContent = errorText;
                 chatMessages.scrollTop = chatMessages.scrollHeight;
                 saveChatHistory();
                 return;
             }
-            let data;
-            try {
-                data = await response.json();
-            } catch (e) {
-                data = null;
-            }
-            if (data && data.response) {
-                const botMessageElement = document.createElement("div");
-                botMessageElement.className = "chat-message bot-message";
-                // Format the response text before displaying
-                botMessageElement.innerHTML = formatMessageText(data.response);
-                chatMessages.appendChild(botMessageElement);
-                chatMessages.scrollTop = chatMessages.scrollHeight;
-                saveChatHistory();
-            } else {
-                const errorMessage = document.createElement("div");
-                errorMessage.className = "chat-message bot-message";
-                errorMessage.textContent = "Sorry, there was an error processing your request.";
-                chatMessages.appendChild(errorMessage);
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            let fullText = "";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const events = buffer.split("\n\n");
+                buffer = events.pop() || "";
+                for (const eventBlock of events) {
+                    const dataLine = eventBlock.split("\n").find(line => line.startsWith("data: "));
+                    if (!dataLine) continue;
+                    const payload = JSON.parse(dataLine.slice(6));
+                    if (payload.content) {
+                        fullText += payload.content;
+                        botMessageElement.innerHTML = formatMessageText(fullText);
+                    }
+                    if (payload.detail) {
+                        botMessageElement.textContent = payload.detail;
+                    }
+                }
                 chatMessages.scrollTop = chatMessages.scrollHeight;
                 saveChatHistory();
             }
         })
         .catch(error => {
             console.error("Error:", error);
-            const errorMessage = document.createElement("div");
-            errorMessage.className = "chat-message bot-message";
-            errorMessage.textContent = "Sorry, there was an error processing your request.";
-            chatMessages.appendChild(errorMessage);
+            botMessageElement.textContent = "Sorry, there was an error processing your request.";
             chatMessages.scrollTop = chatMessages.scrollHeight;
             saveChatHistory();
         });

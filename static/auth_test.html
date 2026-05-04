@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Supabase Auth Test</title>
+    <style>
+      :root {
+        --bg: #f6f7fb;
+        --card: #ffffff;
+        --text: #0f172a;
+        --muted: #64748b;
+        --accent: #2563eb;
+        --border: #e2e8f0;
+      }
+      body {
+        font-family: "SF Pro Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        margin: 0;
+        padding: 40px 16px;
+      }
+      .container {
+        max-width: 720px;
+        margin: 0 auto;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 24px;
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 24px;
+      }
+      p {
+        margin: 0 0 16px;
+        color: var(--muted);
+      }
+      label {
+        display: block;
+        font-size: 14px;
+        margin: 16px 0 8px;
+      }
+      input {
+        width: 100%;
+        padding: 10px 12px;
+        font-size: 14px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        box-sizing: border-box;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 16px;
+      }
+      button {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        padding: 10px 16px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 14px;
+      }
+      button.secondary {
+        background: #0f172a;
+      }
+      button.ghost {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text);
+      }
+      .status {
+        margin-top: 16px;
+        padding: 12px;
+        background: #f8fafc;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        white-space: pre-wrap;
+        font-size: 12px;
+      }
+      .badge {
+        display: inline-block;
+        background: #e2e8f0;
+        color: #334155;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        margin-left: 6px;
+      }
+      .note {
+        margin-top: 12px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .env {
+        background: #0f172a;
+        color: #e2e8f0;
+        padding: 8px 12px;
+        border-radius: 8px;
+        font-size: 12px;
+      }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  </head>
+  <body>
+    <div class="container">
+      <div class="card">
+        <h1>Supabase Auth Test<span class="badge">Google + Email</span></h1>
+        <p>Use this page to test Supabase Auth before the frontend is ready.</p>
+
+        <div class="env" id="envDisplay"></div>
+
+        <label for="email">Email</label>
+        <input id="email" type="email" placeholder="you@example.com" />
+
+        <label for="password">Password</label>
+        <input id="password" type="password" placeholder="••••••••" />
+
+        <div class="row">
+          <button id="signupBtn">Sign Up</button>
+          <button id="loginBtn">Sign In</button>
+          <button id="googleBtn" class="secondary">Sign In with Google</button>
+          <button id="logoutBtn" class="ghost">Sign Out</button>
+        </div>
+
+        <div class="note">
+          Tip: set the redirect URL in Supabase Auth settings to this page URL.
+        </div>
+
+        <div class="status" id="status">Status: idle</div>
+      </div>
+    </div>
+
+    <script>
+      const statusEl = document.getElementById("status");
+      const emailEl = document.getElementById("email");
+      const passwordEl = document.getElementById("password");
+      const envDisplay = document.getElementById("envDisplay");
+
+      let supabaseClient = null;
+
+      function setStatus(message, payload) {
+        const details = payload ? `\n\n${JSON.stringify(payload, null, 2)}` : "";
+        statusEl.textContent = `${message}${details}`;
+      }
+
+      async function refreshSession() {
+        if (!supabaseClient) return;
+        const { data } = await supabaseClient.auth.getSession();
+        if (data?.session?.user) {
+          setStatus("Status: signed in", { user: data.session.user });
+        }
+      }
+
+      document.getElementById("signupBtn").addEventListener("click", async () => {
+        if (!supabaseClient) return setStatus("Supabase config not loaded.");
+        const email = emailEl.value.trim();
+        const password = passwordEl.value;
+        const { data, error } = await supabaseClient.auth.signUp({ email, password });
+        if (error) return setStatus(`Signup failed: ${error.message}`);
+        setStatus("Signup ok (check email for confirmation if required)", data);
+      });
+
+      document.getElementById("loginBtn").addEventListener("click", async () => {
+        if (!supabaseClient) return setStatus("Supabase config not loaded.");
+        const email = emailEl.value.trim();
+        const password = passwordEl.value;
+        const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+        if (error) return setStatus(`Login failed: ${error.message}`);
+        setStatus("Login ok", data);
+      });
+
+      document.getElementById("googleBtn").addEventListener("click", async () => {
+        if (!supabaseClient) return setStatus("Supabase config not loaded.");
+        const redirectTo = window.location.href;
+        const { data, error } = await supabaseClient.auth.signInWithOAuth({
+          provider: "google",
+          options: { redirectTo },
+        });
+        if (error) return setStatus(`Google sign-in failed: ${error.message}`);
+        setStatus("Redirecting to Google...", data);
+      });
+
+      document.getElementById("logoutBtn").addEventListener("click", async () => {
+        if (!supabaseClient) return setStatus("Supabase config not loaded.");
+        const { error } = await supabaseClient.auth.signOut();
+        if (error) return setStatus(`Sign out failed: ${error.message}`);
+        setStatus("Signed out");
+      });
+
+      async function initSupabase() {
+        try {
+          const response = await fetch("/auth/supabase-config");
+          if (!response.ok) {
+            throw new Error("Supabase config endpoint error");
+          }
+          const data = await response.json();
+          if (!data?.url || !data?.anon_key) {
+            throw new Error("Missing Supabase config");
+          }
+          envDisplay.textContent = `SUPABASE_URL: ${data.url}\nSUPABASE_ANON_KEY: (set)`;
+          supabaseClient = window.supabase.createClient(data.url, data.anon_key);
+          supabaseClient.auth.onAuthStateChange((event, session) => {
+            if (session?.user) {
+              setStatus(`Auth state: ${event}`, { user: session.user });
+            } else {
+              setStatus(`Auth state: ${event}`);
+            }
+          });
+          refreshSession();
+        } catch (error) {
+          envDisplay.textContent = "Supabase config: missing";
+          setStatus("Status: Set SUPABASE_URL and SUPABASE_ANON_KEY in .env and restart the API.");
+        }
+      }
+
+      initSupabase();
+    </script>
+  </body>
+</html>

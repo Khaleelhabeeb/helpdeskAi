@@ -1,169 +1,82 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+import json
+import uuid
+from datetime import datetime
+from typing import Optional
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from langchain_groq import ChatGroq
-from langchain.memory import ConversationBufferMemory
-from langchain.prompts import (
-    ChatPromptTemplate,
-    MessagesPlaceholder,
-    SystemMessagePromptTemplate,
-    HumanMessagePromptTemplate,
-)
-from langchain.chains import LLMChain
-from db import schemas
-from api.auth.auth import get_db
-from datetime import datetime, timedelta
-from typing import Optional
-import uuid
-import os
-import time
-from dotenv import load_dotenv
-from db import models
-from services.vector_store import search, format_context
-from utils.jwt import get_current_user
 
-load_dotenv()
+from api.auth.auth import get_db
+from db import models
+from services.rag_service import build_messages, retrieve_context, stream_answer
+from utils.jwt import get_current_user
 
 router = APIRouter()
 
-conversation_memories = {}  
-MAX_MEMORY_SIZE = 1000  # Maximum number of conversations to keep in memory
 
 class ChatRequest(BaseModel):
     message: str
-    unique_id: Optional[str] = None  
+    unique_id: Optional[str] = None
 
-class ChatResponse(BaseModel):
-    response: str
-    unique_id: str  
 
-def get_memory_key(unique_id: str, user_id: str, agent_id: str) -> str:
-    """Generate a unique key for storing conversation memory."""
-    return f"{unique_id}_{user_id}_{agent_id}"
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
-def get_conversation_memory(unique_id: str, user_id: str, agent_id: str, system_prompt: str) -> LLMChain:
-    """Initialize or retrieve conversation memory and LLM chain for a unique_id-user_id-agent_id triplet."""
-    memory_key = get_memory_key(unique_id, user_id, agent_id)
-    
-    if memory_key not in conversation_memories:
-        # Implement LRU eviction if we're at max capacity
-        if len(conversation_memories) >= MAX_MEMORY_SIZE:
-            # Remove oldest memory by timestamp
-            oldest_key = min(conversation_memories.items(), key=lambda x: x[1]["timestamp"])[0]
-            del conversation_memories[oldest_key]
-            print(f"Evicted memory for key: {oldest_key} (LRU)")
-        
-        groq_api_key = os.getenv("GROQ_API_KEY")
-        if not groq_api_key:
-            raise HTTPException(status_code=500, detail="GROQ_API_KEY not configured")
 
-        llm = ChatGroq(
-            temperature=0,
-            model_name="openai/gpt-oss-20b", 
-            groq_api_key=groq_api_key
-        )
-        
-        memory = ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True
-        )
-        
-        prompt = ChatPromptTemplate.from_messages([
-            SystemMessagePromptTemplate.from_template(system_prompt),
-            MessagesPlaceholder(variable_name="chat_history"),
-            HumanMessagePromptTemplate.from_template("{text}")
-        ])
-        
-        # Create LLM chain
-        conversation = LLMChain(llm=llm, prompt=prompt, memory=memory)
-        conversation_memories[memory_key] = {
-            "chain": conversation,
-            "timestamp": time.time()  
-        }
-    
-
-    conversation_memories[memory_key]["timestamp"] = time.time()
-    return conversation_memories[memory_key]["chain"]
-
-def cleanup_expired_memories():
-    """Remove conversation memories older than 10 minutes."""
-    expiration_time = 600
-    current_time = time.time()
-    keys_to_delete = [
-        key for key, value in conversation_memories.items()
-        if current_time - value["timestamp"] > expiration_time
-    ]
-    for key in keys_to_delete:
-        del conversation_memories[key]
-        print(f"Cleared expired memory for key: {key}")
-
-@router.post("/{agent_id}", response_model=ChatResponse)
+@router.post("/{agent_id}")
 async def chat_with_agent(
     agent_id: str,
     chat: ChatRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    user = Depends(get_current_user)
+    user=Depends(get_current_user),
 ):
-    # Verify agent exists and belongs to user
     agent = db.query(models.Agent).filter(
         models.Agent.id == agent_id,
-        models.Agent.user_id == user.id
+        models.Agent.user_id == user.id,
     ).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found or access denied")
-    
-    # Check user credits
     if user.credits_remaining <= 0:
         raise HTTPException(status_code=402, detail="Insufficient credits. Please add more credits to continue.")
-
     if not agent.instructions:
         raise HTTPException(status_code=400, detail="Agent has no instructions set yet")
 
-    # Generate or use provided unique_id
-    unique_id = chat.unique_id or str(uuid.uuid4())
-
-    # Prepare system prompt (guardrails)
-    system_prompt = agent.instructions or ""
-
-    # Fetch retrieval config
     cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
     use_retrieval = bool(cfg.retrieval_enabled) if cfg else False
     top_k = int(cfg.retrieval_top_k) if cfg else 4
+    namespace = cfg.vector_store_namespace if cfg else None
+    context = ""
+    if use_retrieval and namespace:
+        context = retrieve_context(db, namespace, str(agent.id), chat.message, top_k=top_k)
 
-    context_block = ""
-    if use_retrieval:
-        namespace = cfg.vector_store_namespace if cfg else None
-        if namespace:
-            results = search(namespace, chat.message, top_k=top_k)
-            context_text = format_context(results)
-            if context_text:
-                system_prompt = f"{system_prompt}\n\nRelevant context (top {top_k}):\n{context_text}"
+    unique_id = chat.unique_id or str(uuid.uuid4())
+    messages = build_messages(agent.instructions or "", context, chat.message)
 
-    conversation = get_conversation_memory(unique_id, "public", agent_id, system_prompt)
+    def generate():
+        answer_parts: list[str] = []
+        yield _sse("meta", {"unique_id": unique_id})
+        try:
+            for token in stream_answer(agent.model, messages):
+                answer_parts.append(token)
+                yield _sse("token", {"content": token})
 
-    conversation.memory.chat_memory.add_user_message(chat.message)
+            answer = "".join(answer_parts)
+            user.credits_remaining -= 1
+            db.add(models.UsageLog(
+                user_id=user.id,
+                agent_id=agent.id,
+                message_content=chat.message,
+                response_content=answer,
+                credits_used=1,
+                timestamp=datetime.utcnow(),
+            ))
+            db.commit()
+            yield _sse("done", {"unique_id": unique_id})
+        except Exception as exc:
+            db.rollback()
+            yield _sse("error", {"detail": str(exc)})
 
-    ai_response = conversation.invoke({"text": chat.message})["text"]
-
-    conversation.memory.chat_memory.add_ai_message(ai_response)
-    
-    # Deduct credits and log usage
-    credits_used = 1  # Default credit cost per message
-    user.credits_remaining -= credits_used
-    
-    # Log the conversation
-    usage_log = models.UsageLog(
-        user_id=user.id,
-        agent_id=agent_id,
-        message_content=chat.message,
-        response_content=ai_response,
-        credits_used=credits_used,
-        timestamp=datetime.utcnow()
-    )
-    db.add(usage_log)
-    db.commit()
-
-    background_tasks.add_task(cleanup_expired_memories)
-
-    return ChatResponse(response=ai_response, unique_id=unique_id)
+    return StreamingResponse(generate(), media_type="text/event-stream")

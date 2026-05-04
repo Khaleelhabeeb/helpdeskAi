@@ -408,7 +408,7 @@ def get_kb_ingestion_status(kb_id: str, db: Session = Depends(get_db), user = De
         response["latest_job"] = {
             "job_id": str(latest_job.id),
             "state": latest_job.state.value,  # queued, running, succeeded, failed
-            "error_message": latest_job.error_message,
+            "error_message": latest_job.error,
             "created_at": latest_job.created_at.isoformat() if latest_job.created_at else None
         }
     else:
