@@ -19,13 +19,7 @@ class User(Base):
     reset_token_expires = Column(DateTime, nullable=True)
 
     def get_max_credits(self):
-        if self.user_type == "free":
-            return 100
-        elif self.user_type == "paid":
-            return 2000
-        elif self.user_type == "pro":
-            return 20000
-        return 0
+        return 999999
 
 
 class UsageLog(Base):

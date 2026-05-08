@@ -1,7 +1,6 @@
 import os
 from sqlalchemy.orm import Session
 from db import models
-from fastapi import HTTPException
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,25 +17,13 @@ PRO_FILES_LIMIT = 999999  # Unlimited
 
 
 def get_storage_limit(user_type: str) -> int:
-    # Get storage limit in bytes for user tier
-    if user_type == "free":
-        return FREE_STORAGE_LIMIT
-    elif user_type == "paid":
-        return PAID_STORAGE_LIMIT
-    elif user_type == "pro":
-        return PRO_STORAGE_LIMIT
-    return FREE_STORAGE_LIMIT
+    # Tiers are disabled for now; treat every user as effectively unlimited.
+    return max(PRO_STORAGE_LIMIT * 1000, 1024 * 1024 * 1024)
 
 
 def get_files_limit(user_type: str) -> int:
-    # Get file count limit for user tier
-    if user_type == "free":
-        return FREE_FILES_LIMIT
-    elif user_type == "paid":
-        return PAID_FILES_LIMIT
-    elif user_type == "pro":
-        return PRO_FILES_LIMIT
-    return FREE_FILES_LIMIT
+    # Tiers are disabled for now; treat every user as effectively unlimited.
+    return PRO_FILES_LIMIT
 
 
 def get_or_create_storage_usage(db: Session, user_id: int) -> models.UserStorageUsage:
@@ -55,29 +42,11 @@ def get_or_create_storage_usage(db: Session, user_id: int) -> models.UserStorage
 
 
 def check_storage_quota(db: Session, user: models.User, additional_bytes: int = 0) -> None:
-    # Check if user has sufficient storage quota, raise HTTPException if exceeded
-    usage = get_or_create_storage_usage(db, user.id)
-    limit = get_storage_limit(user.user_type)
-    
-    if usage.total_size_bytes + additional_bytes > limit:
-        limit_mb = limit / (1024 * 1024)
-        current_mb = usage.total_size_bytes / (1024 * 1024)
-        raise HTTPException(
-            status_code=403,
-            detail=f"Storage quota exceeded. Your {user.user_type} plan allows {limit_mb:.1f}MB, you're using {current_mb:.1f}MB"
-        )
+    get_or_create_storage_usage(db, user.id)
 
 
 def check_files_quota(db: Session, user: models.User) -> None:
-    # Check if user has reached file count limit, raise HTTPException if exceeded
-    usage = get_or_create_storage_usage(db, user.id)
-    limit = get_files_limit(user.user_type)
-    
-    if usage.total_files >= limit:
-        raise HTTPException(
-            status_code=403,
-            detail=f"File limit reached. Your {user.user_type} plan allows {limit} files, upgrade to add more"
-        )
+    get_or_create_storage_usage(db, user.id)
 
 
 def increment_storage_usage(db: Session, user_id: int, file_size_bytes: int, chunk_count: int = 0) -> None:

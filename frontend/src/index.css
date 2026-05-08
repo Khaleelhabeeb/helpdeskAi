@@ -1,0 +1,56 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --color-surface: #f9f9fa;
+  --color-surface-dim: #dadadb;
+  --color-surface-bright: #f9f9fa;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f3f3f4;
+  --color-surface-container: #eeeeef;
+  --color-surface-container-high: #e8e8e9;
+  --color-surface-container-highest: #e2e2e3;
+  --color-on-surface: #1a1c1d;
+  --color-on-surface-variant: #4c4546;
+  --color-inverse-surface: #2f3132;
+  --color-inverse-on-surface: #f0f1f2;
+  --color-outline: #7e7576;
+  --color-outline-variant: #cfc4c5;
+  --color-surface-tint: #5e5e5e;
+  
+  --color-brand-primary: #000000;
+  --color-brand-on-primary: #ffffff;
+  --color-brand-primary-container: #1b1b1b;
+  --color-brand-on-primary-container: #848484;
+  --color-brand-inverse-primary: #c6c6c6;
+  
+  --color-brand-secondary: #5d5e66;
+  --color-brand-on-secondary: #ffffff;
+  
+  --radius-sm: 0.125rem;
+  --radius-default: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+
+  --animate-slam-in: slamIn 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes slamIn {
+  0% { transform: scale(1.1) translateY(20px); opacity: 0; }
+  100% { transform: scale(1) translateY(0); opacity: 1; }
+}
+
+body {
+  @apply bg-surface text-on-surface font-sans antialiased;
+}
+
+@layer utilities {
+  .tracking-tighter {
+    letter-spacing: -0.05em;
+  }
+}

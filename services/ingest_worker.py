@@ -6,6 +6,7 @@ from db.database import SessionLocal
 from db import models
 from services.file_parser import extract_text_from_pdf_file, extract_text_from_txt_file
 from services.rag_service import index_kb_text
+from services.cloudflare_storage import download_text_from_url
 from services.s3_storage import download_text_from_s3
 from dotenv import load_dotenv
 
@@ -48,11 +49,17 @@ def process_kb_ingest_job(job_id: str, transient_text: Optional[str] = None) -> 
         # Download extracted text from S3 (all types store extracted text there)
         text_content: Optional[str] = None
         
-        if kb.s3_extracted_key:
-            # Use cached extracted text from S3
-            text_content = download_text_from_s3(kb.s3_extracted_key)
+        if transient_text is not None and len(transient_text.strip()) > 0:
+            text_content = transient_text
+        elif kb.s3_extracted_key:
+            # Use cached extracted text from worker URL or legacy S3.
+            if str(kb.s3_extracted_key).startswith(("http://", "https://")):
+                import anyio
+                text_content = anyio.run(download_text_from_url, kb.s3_extracted_key)
+            else:
+                text_content = download_text_from_s3(kb.s3_extracted_key)
             if not text_content:
-                raise ValueError("Failed to download extracted text from S3")
+                raise ValueError("Failed to download extracted text")
         else:
             # Fallback: shouldn't happen with new uploads, but handle legacy
             if kb.source_type in (models.KBSourceType.upload_pdf, models.KBSourceType.upload_txt, models.KBSourceType.other):
@@ -69,9 +76,7 @@ def process_kb_ingest_job(job_id: str, transient_text: Optional[str] = None) -> 
                     with open(kb.source_uri, "rb") as rf:
                         text_content = rf.read().decode("utf-8", errors="ignore")
             elif kb.source_type == models.KBSourceType.text:
-                if transient_text is None or len(transient_text.strip()) == 0:
-                    raise ValueError("No transient text provided for text KB")
-                text_content = transient_text
+                raise ValueError("No transient text provided for text KB")
 
         if not text_content or len(text_content.strip()) == 0:
             raise ValueError("No text content extracted for KB")

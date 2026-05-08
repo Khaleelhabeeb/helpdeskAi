@@ -10,11 +10,18 @@ from db import models
 from services.supabase_auth import get_supabase_client, upsert_local_user, verify_supabase_token
 from dotenv import load_dotenv
 from datetime import datetime
+from pydantic import BaseModel
 
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter()
 
 load_dotenv()
+
+
+class OAuthCodeExchange(BaseModel):
+    code: str
+    code_verifier: str
+    redirect_to: str | None = None
 
 
 @router.get("/supabase-config")
@@ -92,34 +99,47 @@ def google_callback(request: Request, code: str, db: Session = Depends(get_db)):
 def verify_auth(user = Depends(verify_supabase_token)):
     return {"status": "valid", "user_id": user.id, "email": user.email}
 
+
+@router.post("/oauth/exchange")
+def exchange_oauth_code(payload: OAuthCodeExchange, db: Session = Depends(get_db)):
+    try:
+        response = get_supabase_client().auth.exchange_code_for_session(
+            {
+                "auth_code": payload.code,
+                "code_verifier": payload.code_verifier,
+                "redirect_to": payload.redirect_to,
+            }
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Could not finish Google sign-in") from exc
+
+    supabase_user = getattr(response, "user", None)
+    session = getattr(response, "session", None)
+    if not supabase_user and session:
+        supabase_user = getattr(session, "user", None)
+    if not supabase_user:
+        raise HTTPException(status_code=401, detail="Could not finish Google sign-in")
+
+    db_user = upsert_local_user(db, str(supabase_user.id), str(supabase_user.email).lower())
+    return {
+        "access_token": getattr(session, "access_token", None),
+        "refresh_token": getattr(session, "refresh_token", None),
+        "token_type": "bearer",
+        "user_type": db_user.user_type,
+    }
+
 @router.post("/upgrade/{tier}")
 def upgrade_user(
     tier: str,
     db: Session = Depends(get_db), 
     user = Depends(verify_supabase_token)
 ):
-    """
-    Upgrades a user to the specified tier.
-    Tier can be 'free', 'paid', or 'pro'.
-    In a production, integrate with a payment processor here.
-    """
-    if tier not in ["free", "paid", "pro"]:
-        raise HTTPException(status_code=400, detail="Invalid tier. Choose 'free', 'paid', or 'pro'")
-    
     db_user = db.query(models.User).filter(models.User.id == user.id).first()
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Set the tier
-    db_user.user_type = tier
-
-    # Reset credits based on the new tier
-    if tier == "free":
-        db_user.credits_remaining = 100
-    elif tier == "paid":
-        db_user.credits_remaining = 2000
-    elif tier == "pro":
-        db_user.credits_remaining = 20000
+    db_user.user_type = "free"
+    db_user.credits_remaining = 999999
 
     # Update reset date
     db_user.last_reset_date = datetime.utcnow()
@@ -128,7 +148,7 @@ def upgrade_user(
     db.refresh(db_user)
     
     return {
-        "message": f"User upgraded to {tier} tier successfully", 
+        "message": "Plans are currently disabled; your workspace has full access.", 
         "user_type": db_user.user_type,
         "credits_remaining": db_user.credits_remaining,
         "next_reset": db_user.last_reset_date + timedelta(days=30)

@@ -39,8 +39,6 @@ async def chat_with_agent(
     ).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found or access denied")
-    if user.credits_remaining <= 0:
-        raise HTTPException(status_code=402, detail="Insufficient credits. Please add more credits to continue.")
     if not agent.instructions:
         raise HTTPException(status_code=400, detail="Agent has no instructions set yet")
 
@@ -64,7 +62,6 @@ async def chat_with_agent(
                 yield _sse("token", {"content": token})
 
             answer = "".join(answer_parts)
-            user.credits_remaining -= 1
             db.add(models.UsageLog(
                 user_id=user.id,
                 agent_id=agent.id,

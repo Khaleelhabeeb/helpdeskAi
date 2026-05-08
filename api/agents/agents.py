@@ -13,6 +13,7 @@ from utils.jwt import get_current_user
 from uuid import UUID
 from services.ingest_worker import process_kb_ingest_job
 from services.vector_store import delete_namespace
+from services.cloudflare_storage import upload_avatar_image
 from services.s3_storage import upload_file_to_s3, upload_text_to_s3, delete_kb_files, get_s3_key
 from services.storage_quota import check_storage_quota, check_files_quota, increment_storage_usage
 from api.scrape.scrape import scrape_url_content
@@ -30,19 +31,6 @@ async def create_agent(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
-    # Check user tier limits
-    existing_agents = db.query(models.Agent).filter(models.Agent.user_id == user.id).count()
-    if user.user_type == "free" and existing_agents >= 1:
-        raise HTTPException(
-            status_code=403,
-            detail="Free users can only create one agent. Please upgrade to a paid or pro plan for more agents."
-        )
-    elif user.user_type == "paid" and existing_agents >= 3:
-        raise HTTPException(
-            status_code=403,
-            detail="Paid users can create up to 3 agents. Please upgrade to a pro plan for unlimited agents."
-        )
-
     # Generate default instructions if not provided
     instructions = instructions or default_system_prompt(name)
     
@@ -84,17 +72,38 @@ async def create_agent(
         if avatar.content_type not in allowed_types:
             raise HTTPException(status_code=400, detail="Avatar must be JPG, PNG, or WebP format")
         
-        # Upload avatar to S3
-        avatar_extension = avatar.filename.split('.')[-1] if '.' in avatar.filename else 'jpg'
-        avatar_key = f"user_{user.id}/agent_{new_agent.id}/avatar.{avatar_extension}"
-        upload_file_to_s3(avatar_content, avatar_key, content_type=avatar.content_type)
-        
-        # Update agent with avatar URL/key
-        new_agent.avatar_url = avatar_key
+        avatar_upload = await upload_avatar_image(avatar_content, avatar.filename or "avatar.jpg", avatar.content_type)
+        new_agent.avatar_url = avatar_upload.url
         db.commit()
 
     db.refresh(new_agent)
     return new_agent
+
+
+@router.post("/{agent_id}/avatar", response_model=schemas.AgentOut)
+async def update_agent_avatar(
+    agent_id: UUID,
+    avatar: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    avatar_content = await avatar.read()
+    if len(avatar_content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Avatar image must be less than 5MB")
+
+    allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
+    if avatar.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Avatar must be JPG, PNG, or WebP format")
+
+    avatar_upload = await upload_avatar_image(avatar_content, avatar.filename or "avatar.jpg", avatar.content_type)
+    agent.avatar_url = avatar_upload.url
+    db.commit()
+    db.refresh(agent)
+    return agent
 
 
 @router.get("/", response_model=list[schemas.AgentOut])
@@ -148,7 +157,9 @@ def delete_agent(agent_id: UUID, db: Session = Depends(get_db), user = Depends(g
     
     # Delete S3 files for each KB
     for kb in kbs:
-        if kb.s3_original_key or kb.s3_extracted_key:
+        if (kb.s3_original_key and not str(kb.s3_original_key).startswith(("http://", "https://"))) or (
+            kb.s3_extracted_key and not str(kb.s3_extracted_key).startswith(("http://", "https://"))
+        ):
             try:
                 delete_kb_files(user.id, agent.id, kb.id)
             except Exception:

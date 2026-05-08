@@ -57,7 +57,7 @@ def upsert_local_user(db: Session, supabase_user_id: str, email: str) -> User:
     if not user:
         user = db.query(User).filter(User.email == email).first()
     if not user:
-        user = User(email=email, supabase_user_id=supabase_user_id, user_type="free")
+        user = User(email=email, supabase_user_id=supabase_user_id, user_type="free", credits_remaining=999999)
         db.add(user)
     else:
         user.email = email
@@ -79,4 +79,4 @@ def verify_supabase_token(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=401, detail="Supabase token verification failed") from exc
+        raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.") from exc

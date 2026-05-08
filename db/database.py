@@ -16,8 +16,8 @@ if DATABASE_URL.startswith("postgres://"):
 # Create engine with connection pooling and timeout configuration
 engine = create_engine(
     DATABASE_URL,
-    pool_size=20,  # Maximum number of permanent connections
-    max_overflow=10,  # Maximum number of connections above pool_size
+    pool_size=int(os.getenv("DB_POOL_SIZE", "5")),
+    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "5")),
     pool_timeout=30,  # Seconds to wait before giving up on connection
     pool_recycle=3600,  # Recycle connections after 1 hour
     pool_pre_ping=True,  # Test connections before using them

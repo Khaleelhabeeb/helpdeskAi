@@ -9,8 +9,9 @@ import uuid as uuid_lib
 from services.ingest_worker import process_kb_ingest_job
 from services.vector_store import delete_for_kb
 from services.s3_storage import upload_file_to_s3, upload_text_to_s3, delete_kb_files, get_presigned_url, download_text_from_s3, get_s3_key
+from services.cloudflare_storage import WorkerUploadError, download_text_from_url, upload_extracted_text, upload_knowledge_file
 from services.storage_quota import check_storage_quota, check_files_quota, increment_storage_usage, decrement_storage_usage
-from services.file_parser import extract_text_from_pdf, extract_text_from_txt
+from services.file_parser import extract_text_from_file, extract_text_from_pdf, extract_text_from_txt
 from api.scrape.scrape import scrape_url_content
 import json
 
@@ -24,6 +25,18 @@ def validate_uuid(uuid_str: str) -> bool:
         return True
     except (ValueError, AttributeError):
         return False
+
+
+async def try_upload_extracted_text(text: str, filename: str) -> Optional[str]:
+    try:
+        upload = await upload_extracted_text(text, filename)
+        return upload.url
+    except WorkerUploadError as exc:
+        print(
+            "[WARN /kb/add] Extracted text worker upload failed "
+            f"status={exc.status_code} detail={exc.response_text or str(exc)}"
+        )
+        return None
 
 @router.post("/add", response_model=schemas.KnowledgeBaseOut)
 async def add_knowledge_base(
@@ -58,9 +71,10 @@ async def add_knowledge_base(
     original_filename = None
     file_size_bytes = 0
     extracted_size_bytes = 0
+    transient_text = None
 
     # Handle file upload (PDF/TXT)
-    if source_type in (schemas.KBSourceType.upload_pdf, schemas.KBSourceType.upload_txt):
+    if source_type in (schemas.KBSourceType.upload_pdf, schemas.KBSourceType.upload_txt, schemas.KBSourceType.other):
         if not file:
             raise HTTPException(status_code=400, detail="File is required for upload_* source types")
         
@@ -75,22 +89,18 @@ async def add_knowledge_base(
         kb_id = str(uuid_lib.uuid4())
         original_filename = file.filename
         
-        # Upload original file to S3
+        # Upload original file to Cloudflare worker storage
         file_extension = original_filename.split('.')[-1] if '.' in original_filename else 'bin'
-        s3_original_key = get_s3_key(user.id, str(agent.id), kb_id, "original", file_extension)
-        upload_file_to_s3(file_content, s3_original_key)
+        original_upload = await upload_knowledge_file(file_content, original_filename, file.content_type)
+        s3_original_key = original_upload.url
         
-        # Extract text
-        if source_type == schemas.KBSourceType.upload_pdf:
-            extracted_text = extract_text_from_pdf(file_content)
-        else:
-            extracted_text = extract_text_from_txt(file_content)
+        extracted_text = extract_text_from_file(file_content, original_filename)
         
-        # Upload extracted text to S3
-        s3_extracted_key = get_s3_key(user.id, str(agent.id), kb_id, "extracted", "txt")
-        upload_text_to_s3(extracted_text, s3_extracted_key)
+        # Upload extracted text to Cloudflare worker storage for reindex/content retrieval
+        transient_text = extracted_text
+        s3_extracted_key = await try_upload_extracted_text(extracted_text, f"kb_{kb_id}_extracted.txt")
         extracted_size_bytes = len(extracted_text.encode('utf-8'))
-        source_uri = s3_original_key
+        source_uri = original_upload.url
         
     # Handle URL scraping
     elif source_type == schemas.KBSourceType.url:
@@ -108,19 +118,11 @@ async def add_knowledge_base(
         # Generate KB ID for S3 path
         kb_id = str(uuid_lib.uuid4())
         
-        # Upload extracted text to S3
-        s3_extracted_key = get_s3_key(user.id, str(agent.id), kb_id, "extracted", "txt")
-        upload_text_to_s3(extracted_text, s3_extracted_key)
+        # Upload extracted text to Cloudflare worker storage
+        transient_text = extracted_text
+        s3_extracted_key = await try_upload_extracted_text(extracted_text, f"kb_{kb_id}_extracted.txt")
         
-        # Save metadata as JSON to S3 (optional, for debugging)
-        metadata_json = json.dumps({
-            "url": url,
-            "title": scraped_data.get("title", ""),
-            "scraped_at": scraped_data.get("timestamp")
-        })
-        metadata_key = get_s3_key(user.id, str(agent.id), kb_id, "metadata", "json")
-        upload_text_to_s3(metadata_json, metadata_key)
-        
+        # Keep metadata inline for now; the worker stores the extracted page text URL.
         source_uri = url
         original_filename = scraped_data.get("title", url)
         
@@ -137,9 +139,9 @@ async def add_knowledge_base(
         # Generate KB ID for S3 path
         kb_id = str(uuid_lib.uuid4())
         
-        # Upload text to S3
-        s3_extracted_key = get_s3_key(user.id, str(agent.id), kb_id, "extracted", "txt")
-        upload_text_to_s3(structured_text, s3_extracted_key)
+        # Upload text to Cloudflare worker storage
+        transient_text = structured_text
+        s3_extracted_key = await try_upload_extracted_text(structured_text, f"kb_{kb_id}_extracted.txt")
         source_uri = None
         original_filename = title or "Structured Text"
         
@@ -180,7 +182,7 @@ async def add_knowledge_base(
     print(f"[DEBUG /kb/add] Ingest job created - job_id: {job.id}")
 
     if background_tasks is not None:
-        background_tasks.add_task(process_kb_ingest_job, str(job.id), None)
+        background_tasks.add_task(process_kb_ingest_job, str(job.id), transient_text)
         print(f"[DEBUG /kb/add] Background task added for job_id: {job.id}")
 
     print(f"[DEBUG /kb/add] SUCCESS - Returning KB response")
@@ -229,7 +231,9 @@ def delete_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(get_curr
             pass
     
     # Delete from S3
-    if kb.s3_original_key or kb.s3_extracted_key:
+    if (kb.s3_original_key and not str(kb.s3_original_key).startswith(("http://", "https://"))) or (
+        kb.s3_extracted_key and not str(kb.s3_extracted_key).startswith(("http://", "https://"))
+    ):
         try:
             delete_kb_files(user.id, agent.id, kb.id)
         except Exception:
@@ -268,7 +272,7 @@ def reindex_kb(kb_id: str, background_tasks: BackgroundTasks = None, db: Session
 
 
 @router.get("/{kb_id}/content")
-def get_kb_content(kb_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+async def get_kb_content(kb_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
     # Get extracted text content from S3
     if not validate_uuid(kb_id):
         raise HTTPException(status_code=400, detail="Invalid KB ID format")
@@ -285,7 +289,10 @@ def get_kb_content(kb_id: str, db: Session = Depends(get_db), user = Depends(get
         raise HTTPException(status_code=404, detail="No extracted content available")
     
     try:
-        content = download_text_from_s3(kb.s3_extracted_key)
+        if str(kb.s3_extracted_key).startswith(("http://", "https://")):
+            content = await download_text_from_url(kb.s3_extracted_key)
+        else:
+            content = download_text_from_s3(kb.s3_extracted_key)
         return {
             "kb_id": kb_id,
             "title": kb.title,
@@ -311,11 +318,15 @@ def get_kb_download_url(kb_id: str, db: Session = Depends(get_db), user = Depend
     if not agent:
         raise HTTPException(status_code=403, detail="Forbidden")
     
-    if not kb.s3_original_key:
+    original_url = kb.source_uri or kb.s3_original_key
+    if not original_url:
         raise HTTPException(status_code=404, detail="No original file available for download")
     
     try:
-        presigned_url = get_presigned_url(kb.s3_original_key, kb.original_filename, expiration=3600)
+        if str(original_url).startswith(("http://", "https://")):
+            presigned_url = original_url
+        else:
+            presigned_url = get_presigned_url(kb.s3_original_key, kb.original_filename, expiration=3600)
         return {
             "kb_id": kb_id,
             "filename": kb.original_filename,

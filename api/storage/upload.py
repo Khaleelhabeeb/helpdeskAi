@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from utils.jwt import get_current_user
 from services.ingest_worker import process_kb_ingest_job
 from services.s3_storage import upload_file_to_s3, upload_text_to_s3, get_s3_key
+from services.cloudflare_storage import upload_extracted_text, upload_knowledge_file
 from services.storage_quota import check_storage_quota, check_files_quota, increment_storage_usage
 
 router = APIRouter()
@@ -64,13 +65,11 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
         source_type = models.KBSourceType.other
         file_extension = file.filename.split('.')[-1] if '.' in file.filename else 'bin'
     
-    # Upload original file to S3
-    s3_original_key = get_s3_key(user.id, str(agent.id), kb_id, "original", file_extension)
-    upload_file_to_s3(file_content, s3_original_key)
+    original_upload = await upload_knowledge_file(file_content, file.filename, file.content_type)
+    s3_original_key = original_upload.url
     
-    # Upload extracted text to S3
-    s3_extracted_key = get_s3_key(user.id, str(agent.id), kb_id, "extracted", "txt")
-    upload_text_to_s3(extracted_text, s3_extracted_key)
+    extracted_upload = await upload_extracted_text(extracted_text, f"kb_{kb_id}_extracted.txt")
+    s3_extracted_key = extracted_upload.url
     extracted_size_bytes = len(extracted_text.encode('utf-8'))
 
     # Create KB record with S3 metadata
@@ -78,7 +77,7 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
         id=kb_id,
         agent_id=agent.id,
         source_type=source_type,
-        source_uri=s3_original_key,
+        source_uri=original_upload.url,
         status=models.KBStatus.pending,
         s3_original_key=s3_original_key,
         s3_extracted_key=s3_extracted_key,
