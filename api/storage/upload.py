@@ -1,14 +1,12 @@
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, BackgroundTasks
 import uuid as uuid_lib
-from services.file_parser import extract_text_from_pdf, extract_text_from_txt
+from services.file_parser import extract_text_from_file
 from services.ai_prompt_builder import generate_system_prompt_from_text
 from api.auth.auth import get_db
 from db import models
 from sqlalchemy.orm import Session
 from utils.jwt import get_current_user
 from services.ingest_worker import process_kb_ingest_job
-from services.s3_storage import upload_file_to_s3, upload_text_to_s3, get_s3_key
-from services.cloudflare_storage import upload_extracted_text, upload_knowledge_file
 from services.storage_quota import check_storage_quota, check_files_quota, increment_storage_usage
 
 router = APIRouter()
@@ -33,13 +31,7 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
     # Check storage quota
     check_storage_quota(db, user, file_size_bytes)
 
-    # Extract text from file
-    if file.filename.endswith(".pdf"):
-        extracted_text = extract_text_from_pdf(file_content)
-    elif file.filename.endswith(".txt"):
-        extracted_text = extract_text_from_txt(file_content)
-    else:
-        raise HTTPException(status_code=400, detail="Unsupported file format")
+    extracted_text = extract_text_from_file(file_content, file.filename or "upload")
 
     if legacy_prompt_update:
         cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
@@ -51,36 +43,23 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
         db.commit()
         return {"message": "Agent instructions updated (legacy)", "system_prompt": system_prompt}
 
-    # Generate KB ID for S3 path
     kb_id = str(uuid_lib.uuid4())
     
     # Determine source type and file extension
     if file.filename.lower().endswith(".pdf"):
         source_type = models.KBSourceType.upload_pdf
-        file_extension = "pdf"
     elif file.filename.lower().endswith(".txt"):
         source_type = models.KBSourceType.upload_txt
-        file_extension = "txt"
     else:
         source_type = models.KBSourceType.other
-        file_extension = file.filename.split('.')[-1] if '.' in file.filename else 'bin'
-    
-    original_upload = await upload_knowledge_file(file_content, file.filename, file.content_type)
-    s3_original_key = original_upload.url
-    
-    extracted_upload = await upload_extracted_text(extracted_text, f"kb_{kb_id}_extracted.txt")
-    s3_extracted_key = extracted_upload.url
     extracted_size_bytes = len(extracted_text.encode('utf-8'))
 
-    # Create KB record with S3 metadata
     kb = models.KnowledgeBase(
         id=kb_id,
         agent_id=agent.id,
         source_type=source_type,
-        source_uri=original_upload.url,
+        source_uri=file.filename,
         status=models.KBStatus.pending,
-        s3_original_key=s3_original_key,
-        s3_extracted_key=s3_extracted_key,
         original_filename=file.filename,
         file_size_bytes=file_size_bytes,
         extracted_size_bytes=extracted_size_bytes
@@ -98,6 +77,6 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
 
     # Schedule background ingest (scaffold only)
     if background_tasks is not None:
-        background_tasks.add_task(process_kb_ingest_job, str(job.id), None)
+        background_tasks.add_task(process_kb_ingest_job, str(job.id), extracted_text)
 
     return {"message": "Knowledge base added and ingest queued", "kb_id": str(kb.id)}

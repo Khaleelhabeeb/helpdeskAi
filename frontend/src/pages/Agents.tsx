@@ -3,17 +3,12 @@ import {
   Bot,
   ChevronLeft,
   Code2,
-  Copy,
-  Database,
-  Globe,
   FileText,
   Link as LinkIcon,
   Loader2,
-  Mail,
   MessageCircle,
   Moon,
   MoreHorizontal,
-  PanelRight,
   Plus,
   RotateCcw,
   Save,
@@ -21,15 +16,14 @@ import {
   Sun,
   Trash2,
   Upload,
-  Wand2,
   RefreshCw,
   Send,
-  Smartphone,
   X,
 } from 'lucide-react';
 import { AppLayout } from '../components/Layout';
 import { cn } from '../lib/utils';
-import { ChangeEvent, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
 import { Agent, apiFetch, formatRelative, KnowledgeBase } from '../lib/api';
 
@@ -51,8 +45,6 @@ type WizardState = {
   theme: 'light' | 'dark';
   color: string;
   useColorHeader: boolean;
-  avatarFile: File | null;
-  avatarPreview: string;
 };
 
 type AgentSettingsResponse = {
@@ -70,7 +62,7 @@ type ModelOption = {
   provider: string;
 };
 
-type AgentTab = 'playground' | 'sources' | 'deploy';
+type AgentTab = 'playground' | 'sources';
 
 function initialWizard(): WizardState {
   return {
@@ -86,8 +78,6 @@ function initialWizard(): WizardState {
     theme: 'dark',
     color: '#ffffff',
     useColorHeader: false,
-    avatarFile: null,
-    avatarPreview: '',
   };
 }
 
@@ -130,6 +120,7 @@ function AgentInitials({ name, image }: { name: string; image?: string | null })
 }
 
 export default function Agents() {
+  const navigate = useNavigate();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [documents, setDocuments] = useState<KnowledgeBase[]>([]);
@@ -312,15 +303,7 @@ export default function Agents() {
         }),
       });
 
-      let avatarUrl = createdAgent.avatar_url;
-      if (wizard.avatarFile) {
-        const body = new FormData();
-        body.append('avatar', wizard.avatarFile);
-        const avatarAgent = await apiFetch<Agent>(`/agents/${createdAgent.id}/avatar`, { method: 'POST', body });
-        avatarUrl = avatarAgent.avatar_url;
-      }
-
-      const finalAgent = { ...createdAgent, name: updated.agent.name, avatar_url: avatarUrl };
+      const finalAgent = { ...createdAgent, name: updated.agent.name };
       setAgents((current) => current.map((agent) => (agent.id === finalAgent.id ? finalAgent : agent)));
       setCreatedAgent(null);
       setCreating(false);
@@ -433,15 +416,6 @@ export default function Agents() {
     }
   }
 
-  function pickAvatar(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0] ?? null;
-    setWizard((current) => ({
-      ...current,
-      avatarFile: file,
-      avatarPreview: file ? URL.createObjectURL(file) : '',
-    }));
-  }
-
   if (isCreating) {
     const previewName = wizard.name || createdAgent?.name || 'Your Agent';
     const hasManualSource = (
@@ -552,7 +526,7 @@ export default function Agents() {
                 <div className="w-full max-w-md rounded-2xl bg-black p-5 text-white shadow-2xl">
                   <div className="flex items-center gap-3 border-b border-white/10 pb-4">
                     <div className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-full bg-white text-black">
-                      <AgentInitials name={previewName} image={wizard.avatarPreview} />
+                      <AgentInitials name={previewName} />
                     </div>
                     <div className="font-bold">{previewName}</div>
                     <MoreHorizontal className="ml-auto h-5 w-5" />
@@ -560,7 +534,7 @@ export default function Agents() {
                   <div className="space-y-6 py-6">
                     <div className="max-w-[75%] rounded-2xl bg-zinc-900 p-4">
                       <div className="mb-2 flex items-center gap-2 font-bold">
-                        <div className="h-7 w-7 overflow-hidden rounded-full bg-white text-black flex items-center justify-center"><AgentInitials name={previewName} image={wizard.avatarPreview} /></div>
+                        <div className="h-7 w-7 overflow-hidden rounded-full bg-white text-black flex items-center justify-center"><AgentInitials name={previewName} /></div>
                         {previewName}
                       </div>
                       <p className="text-sm text-zinc-200">Hey, how can I help you today?</p>
@@ -617,20 +591,6 @@ export default function Agents() {
                     <input type="checkbox" checked={wizard.useColorHeader} onChange={(event) => setWizard((current) => ({ ...current, useColorHeader: event.target.checked }))} className="h-5 w-5 accent-brand-primary" />
                   </label>
 
-                  <div className="border-t border-surface-container-highest pt-8">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-bold text-on-surface-variant">Profile picture</span>
-                      <label className="grid h-11 w-11 cursor-pointer place-items-center rounded-lg border border-surface-container-highest bg-surface hover:border-brand-primary">
-                        <input type="file" accept="image/png,image/jpeg,image/webp" onChange={pickAvatar} className="hidden" />
-                        <MoreHorizontal className="h-5 w-5" />
-                      </label>
-                    </div>
-                    <div className="mt-4 flex items-center gap-4">
-                      <div className="h-12 w-12 overflow-hidden rounded-full bg-black text-white flex items-center justify-center"><AgentInitials name={wizard.name} image={wizard.avatarPreview || createdAgent?.avatar_url} /></div>
-                      <span className="text-sm font-bold text-brand-primary">{wizard.avatarFile?.name || createdAgent?.avatar_url || 'Default initials'}</span>
-                    </div>
-                  </div>
-
                   <button onClick={saveAppearance} disabled={isSaving} className="flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-brand-primary px-6 text-sm font-bold text-brand-on-primary transition-opacity hover:opacity-90 disabled:opacity-50">
                     {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                     Looks good
@@ -641,14 +601,14 @@ export default function Agents() {
               <section className="flex items-start justify-center border-l border-surface-container-highest bg-[radial-gradient(#d9d9db_1.5px,transparent_1.5px)] [background-size:28px_28px] px-8 py-20">
                 <div className="h-[680px] w-full max-w-[520px] overflow-hidden rounded-2xl bg-black text-white shadow-2xl">
                   <div className="flex h-24 items-center gap-4 px-7" style={{ backgroundColor: wizard.useColorHeader ? wizard.color : '#1c1c1f', color: wizard.useColorHeader && wizard.color.toLowerCase() === '#ffffff' ? '#000' : '#fff' }}>
-                    <div className="h-12 w-12 overflow-hidden rounded-full bg-white text-black flex items-center justify-center"><AgentInitials name={previewName} image={wizard.avatarPreview || createdAgent?.avatar_url} /></div>
+                    <div className="h-12 w-12 overflow-hidden rounded-full bg-white text-black flex items-center justify-center"><AgentInitials name={previewName} /></div>
                     <div className="text-lg font-bold">{previewName}</div>
                     <MoreHorizontal className="ml-auto h-6 w-6" />
                   </div>
                   <div className={cn('h-full p-7', wizard.theme === 'light' ? 'bg-white text-black' : 'bg-black text-white')}>
                     <div className={cn('max-w-[72%] rounded-2xl p-5', wizard.theme === 'light' ? 'bg-zinc-100' : 'bg-zinc-900')}>
                       <div className="mb-3 flex items-center gap-3 font-bold">
-                        <div className="h-8 w-8 overflow-hidden rounded-full bg-white text-black flex items-center justify-center"><AgentInitials name={previewName} image={wizard.avatarPreview || createdAgent?.avatar_url} /></div>
+                        <div className="h-8 w-8 overflow-hidden rounded-full bg-white text-black flex items-center justify-center"><AgentInitials name={previewName} /></div>
                         {previewName}
                       </div>
                       <p className="text-sm opacity-80">Hey, how can I help you today?</p>
@@ -666,8 +626,6 @@ export default function Agents() {
 
   if (selectedAgent) {
     const readySources = documents.filter((doc) => doc.status === 'ready').length;
-    const embedCode = `<script src="${window.location.origin}/static/widget.js" data-agent-id="${selectedAgent.id}" display-name="${selectedAgent.name}" defer></script>`;
-
     return (
       <AppLayout>
         <div className="min-h-[calc(100vh-8rem)]">
@@ -680,7 +638,7 @@ export default function Agents() {
               </div>
             </div>
             <div className="flex gap-3">
-              <button onClick={() => setAgentTab('deploy')} className="flex items-center justify-center gap-2 px-4 py-2 border border-surface-container-highest bg-surface-container-low text-brand-primary text-sm font-bold rounded-lg hover:bg-surface-container transition-colors"><PanelRight className="w-4 h-4" />Deploy</button>
+              <button onClick={() => navigate(`/agents/${selectedAgent.id}/deploy`)} className="flex items-center justify-center gap-2 px-4 py-2 border border-surface-container-highest bg-surface-container-low text-brand-primary text-sm font-bold rounded-lg hover:bg-surface-container transition-colors"><Code2 className="w-4 h-4" />Deploy</button>
               <button onClick={() => deleteAgent(selectedAgent.id)} disabled={isSaving} className="flex items-center justify-center gap-2 px-4 py-2 border border-rose-200 bg-rose-50 text-rose-700 text-sm font-bold rounded-lg hover:bg-rose-100 transition-colors"><Trash2 className="w-4 h-4" />Delete</button>
               <button onClick={saveAgent} disabled={isSaving || !editName.trim()} className="flex items-center justify-center gap-2 px-6 py-2 bg-brand-primary text-brand-on-primary text-sm font-bold rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50">{isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}Save</button>
             </div>
@@ -694,7 +652,6 @@ export default function Agents() {
                 {[
                   ['playground', 'Playground'],
                   ['sources', 'Sources'],
-                  ['deploy', 'Deploy'],
                 ].map(([value, label]) => (
                   <button key={value} onClick={() => setAgentTab(value as AgentTab)} className={cn('flex-1 rounded-md px-3 py-2 text-xs font-black uppercase tracking-widest transition-colors', agentTab === value ? 'bg-brand-primary text-brand-on-primary' : 'text-on-surface-variant hover:text-brand-primary')}>
                     {label}
@@ -722,22 +679,6 @@ export default function Agents() {
                       ))}
                     </select>
                   </label>
-
-                  <div className="rounded-lg border border-surface-container-highest bg-surface p-4">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-bold text-brand-primary">Voice Mode</span>
-                      <span className="rounded-full bg-brand-primary px-2 py-0.5 text-[10px] font-black uppercase text-brand-on-primary">Beta</span>
-                    </div>
-                    <div className="mt-4 h-6 w-12 rounded-full bg-surface-container-highest p-1"><div className="h-4 w-4 rounded-full bg-white shadow-sm" /></div>
-                  </div>
-
-                  <div className="rounded-lg border border-surface-container-highest bg-surface p-4">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-bold text-brand-primary">AI Actions</span>
-                      <Wand2 className="h-4 w-4 text-on-surface-variant" />
-                    </div>
-                    <button className="mt-4 h-10 w-full rounded-lg border border-surface-container-highest bg-surface-container-lowest text-sm font-bold text-on-surface-variant hover:text-brand-primary">Add your first action</button>
-                  </div>
 
                   <label className="block space-y-2">
                     <span className="text-xs font-black uppercase tracking-widest text-on-surface-variant">Instructions (System prompt)</span>
@@ -801,39 +742,6 @@ export default function Agents() {
                         </div>
                       </div>
                     ))}
-                  </div>
-                </section>
-              )}
-
-              {agentTab === 'deploy' && (
-                <section className="mx-auto max-w-5xl space-y-6">
-                  <div className="rounded-xl bg-surface-container-lowest border border-surface-container-highest p-6">
-                    <h2 className="text-xl font-bold text-brand-primary">Deploy {selectedAgent.name}</h2>
-                    <p className="mt-1 text-sm text-on-surface-variant">Choose where this agent will live. These are UI-ready placeholders for now.</p>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                    {[
-                      { title: 'Chat widget', icon: Code2, status: 'Available', copy: 'Embed this agent on your website.' },
-                      { title: 'ChatGPT style page', icon: MessageCircle, status: 'Preview', copy: 'A hosted full-page chat experience.' },
-                      { title: 'Email', icon: Mail, status: 'Coming soon', copy: 'Reply to support emails with your agent.' },
-                      { title: 'WhatsApp', icon: Smartphone, status: 'Coming soon', copy: 'Connect the agent to WhatsApp conversations.' },
-                    ].map((option) => (
-                      <div key={option.title} className="rounded-xl border border-surface-container-highest bg-surface-container-lowest p-6">
-                        <div className="flex items-center justify-between">
-                          <option.icon className="h-6 w-6 text-brand-primary" />
-                          <span className="rounded-full bg-surface-container-low px-3 py-1 text-[10px] font-black uppercase tracking-widest text-on-surface-variant">{option.status}</span>
-                        </div>
-                        <h3 className="mt-5 text-lg font-bold text-brand-primary">{option.title}</h3>
-                        <p className="mt-2 text-sm text-on-surface-variant">{option.copy}</p>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="rounded-xl bg-surface-container-lowest border border-surface-container-highest p-6">
-                    <div className="flex items-center justify-between gap-4">
-                      <h3 className="text-sm font-black uppercase tracking-widest text-brand-primary">Website embed</h3>
-                      <button onClick={() => navigator.clipboard?.writeText(embedCode)} className="flex items-center gap-2 rounded-lg bg-brand-primary px-4 py-2 text-xs font-bold text-brand-on-primary"><Copy className="h-4 w-4" />Copy</button>
-                    </div>
-                    <pre className="mt-4 overflow-x-auto rounded-lg bg-black p-4 text-xs text-white"><code>{embedCode}</code></pre>
                   </div>
                 </section>
               )}

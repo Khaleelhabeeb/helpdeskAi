@@ -1,10 +1,8 @@
-import json
 import os
 import uuid
-from typing import Iterable, Iterator, List
+from typing import Callable, Iterable, Iterator, List, Optional
 
 from litellm import completion, embedding
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from services.vector_store import format_context, search as milvus_search, upsert_texts
@@ -39,33 +37,31 @@ def _vector_literal(vector: List[float]) -> str:
     return "[" + ",".join(f"{value:.8f}" for value in vector) + "]"
 
 
-def index_kb_text(db: Session, user_id: int, agent_id: str, kb_id: str, namespace: str, text_value: str) -> int:
+def index_kb_text(
+    db: Session,
+    user_id: int,
+    agent_id: str,
+    kb_id: str,
+    namespace: str,
+    text_value: str,
+    batch_size: int = 32,
+    on_batch: Optional[Callable[[int, int], None]] = None,
+) -> int:
     chunks = chunk_text(text_value)
-    vectors = embed_texts(chunks)
-    ids = [str(uuid.uuid4()) for _ in chunks]
-    upsert_texts(namespace, kb_id, agent_id, chunks, vectors, ids=ids)
-    db.execute(text("DELETE FROM documents WHERE kb_id = CAST(:kb_id AS uuid)"), {"kb_id": kb_id})
-    for i, chunk in enumerate(chunks):
-        db.execute(
-            text(
-                """
-                INSERT INTO documents (id, user_id, agent_id, kb_id, chunk_index, content, embedding, metadata)
-                VALUES (CAST(:id AS uuid), :user_id, CAST(:agent_id AS uuid), CAST(:kb_id AS uuid),
-                        :chunk_index, :content, CAST(:embedding AS vector), CAST(:metadata AS jsonb))
-                """
-            ),
-            {
-                "id": ids[i],
-                "user_id": user_id,
-                "agent_id": agent_id,
-                "kb_id": kb_id,
-                "chunk_index": i,
-                "content": chunk,
-                "embedding": _vector_literal(vectors[i]),
-                "metadata": json.dumps({"namespace": namespace}),
-            },
-        )
-    return len(chunks)
+    total_chunks = len(chunks)
+    if total_chunks == 0:
+        return 0
+
+    for start in range(0, total_chunks, batch_size):
+        end = min(start + batch_size, total_chunks)
+        batch = chunks[start:end]
+        vectors = embed_texts(batch)
+        ids = [str(uuid.uuid4()) for _ in batch]
+        upsert_texts(namespace, kb_id, agent_id, batch, vectors, ids=ids)
+        if on_batch:
+            on_batch(end, total_chunks)
+
+    return total_chunks
 
 
 def retrieve_context(db: Session, namespace: str, agent_id: str, query: str, top_k: int = 4) -> str:

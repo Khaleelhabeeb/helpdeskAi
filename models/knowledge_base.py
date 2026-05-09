@@ -15,8 +15,7 @@ class KnowledgeBase(Base):
     source_uri = Column(Text, nullable=True)
     title = Column(String, nullable=True)
     status = Column(SQLAlchemyEnum(KBStatus), default=KBStatus.pending, nullable=False, index=True)
-    
-    # S3 Storage fields
+    # Legacy storage fields retained for old rows only.
     s3_original_key = Column(String, nullable=True)
     s3_extracted_key = Column(String, nullable=True)
     original_filename = Column(String, nullable=True)
@@ -39,6 +38,8 @@ class KBIngestJob(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     kb_id = Column(UUID(as_uuid=True), ForeignKey("knowledge_bases.id"), nullable=False, index=True)
     state = Column(SQLAlchemyEnum(JobState), default=JobState.queued, nullable=False, index=True)
+    total_chunks = Column(Integer, nullable=True)
+    processed_chunks = Column(Integer, nullable=True)
     error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

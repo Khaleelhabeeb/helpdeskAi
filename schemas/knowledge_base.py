@@ -20,6 +20,8 @@ class KnowledgeBaseOut(BaseModel):
     title: Optional[str]
     status: KBStatus
     tokens_estimate: Optional[int]
+    extracted_size_bytes: Optional[int] = None
+    chunk_count: Optional[int] = None
     created_at: datetime
     updated_at: datetime
 
@@ -31,6 +33,8 @@ class KBIngestJobOut(BaseModel):
     id: UUID
     kb_id: UUID
     state: JobState
+    total_chunks: Optional[int] = None
+    processed_chunks: Optional[int] = None
     error: Optional[str]
     created_at: datetime
     updated_at: datetime

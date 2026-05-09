@@ -1,13 +1,9 @@
-import os
 from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from db.database import SessionLocal
 from db import models
-from services.file_parser import extract_text_from_pdf_file, extract_text_from_txt_file
 from services.rag_service import index_kb_text
-from services.cloudflare_storage import download_text_from_url
-from services.s3_storage import download_text_from_s3
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,8 +18,7 @@ def process_kb_ingest_job(job_id: str, transient_text: Optional[str] = None) -> 
     - Does NOT store chunks or embeddings in Postgres
     - Does NOT perform retrieval; this is a scaffold
 
-    transient_text: when source_type == text, use this inline payload for processing;
-                    do not persist to DB.
+    transient_text: extracted source text supplied for one-time embedding.
     """
     db: Session = SessionLocal()
     try:
@@ -39,6 +34,8 @@ def process_kb_ingest_job(job_id: str, transient_text: Optional[str] = None) -> 
 
         # Mark running
         job.state = models.JobState.running
+        job.processed_chunks = 0
+        job.total_chunks = None
         db.commit()
 
         # Read minimal info for vector upsert
@@ -46,43 +43,22 @@ def process_kb_ingest_job(job_id: str, transient_text: Optional[str] = None) -> 
         config = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == kb.agent_id).first()
         namespace = config.vector_store_namespace if config else None
 
-        # Download extracted text from S3 (all types store extracted text there)
         text_content: Optional[str] = None
         
         if transient_text is not None and len(transient_text.strip()) > 0:
             text_content = transient_text
-        elif kb.s3_extracted_key:
-            # Use cached extracted text from worker URL or legacy S3.
-            if str(kb.s3_extracted_key).startswith(("http://", "https://")):
-                import anyio
-                text_content = anyio.run(download_text_from_url, kb.s3_extracted_key)
-            else:
-                text_content = download_text_from_s3(kb.s3_extracted_key)
-            if not text_content:
-                raise ValueError("Failed to download extracted text")
-        else:
-            # Fallback: shouldn't happen with new uploads, but handle legacy
-            if kb.source_type in (models.KBSourceType.upload_pdf, models.KBSourceType.upload_txt, models.KBSourceType.other):
-                if not kb.source_uri or not os.path.exists(kb.source_uri):
-                    raise FileNotFoundError("KB source file not found and no S3 backup")
-                lower = kb.source_uri.lower()
-                if lower.endswith(".pdf"):
-                    with open(kb.source_uri, "rb") as rf:
-                        text_content = extract_text_from_pdf_file(rf)
-                elif lower.endswith(".txt"):
-                    with open(kb.source_uri, "rb") as rf:
-                        text_content = extract_text_from_txt_file(rf)
-                else:
-                    with open(kb.source_uri, "rb") as rf:
-                        text_content = rf.read().decode("utf-8", errors="ignore")
-            elif kb.source_type == models.KBSourceType.text:
-                raise ValueError("No transient text provided for text KB")
 
         if not text_content or len(text_content.strip()) == 0:
             raise ValueError("No text content extracted for KB")
 
         if not namespace:
             raise ValueError("Missing vector store namespace")
+        def update_progress(done_chunks: int, total_chunks: int) -> None:
+            job.total_chunks = total_chunks
+            job.processed_chunks = done_chunks
+            kb.chunk_count = done_chunks
+            db.commit()
+
         chunk_count = index_kb_text(
             db=db,
             user_id=agent.user_id,
@@ -90,6 +66,7 @@ def process_kb_ingest_job(job_id: str, transient_text: Optional[str] = None) -> 
             kb_id=str(kb.id),
             namespace=namespace,
             text_value=text_content,
+            on_batch=update_progress,
         )
 
         # Update KB with chunk count
