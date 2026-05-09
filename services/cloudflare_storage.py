@@ -53,8 +53,11 @@ async def upload_to_worker(
     }
 
     timeout = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(worker_url, headers=headers, data=data, files=files)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(worker_url.strip(), headers=headers, data=data, files=files)
+    except httpx.HTTPError as exc:
+        raise WorkerUploadError(f"Cloudflare worker upload request failed: {exc}") from exc
 
     if response.status_code >= 400:
         response_preview = response.text[:500] if response.text else ""

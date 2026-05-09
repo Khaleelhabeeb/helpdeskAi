@@ -10,6 +10,7 @@ from api.auth import auth, password_reset
 from api.scrape import scrape
 from api.storage import storage, upload
 from api.users import users
+from api import models as model_catalog
 from db.database import Base, engine
 from api.analystics import analytic
 from fastapi.staticfiles import StaticFiles
@@ -64,6 +65,7 @@ app.include_router(users.router, prefix="/users", tags=["users"])
 app.include_router(storage.router, prefix="/users", tags=["Storage"])
 app.include_router(scrape.router, prefix="/scrape", tags=["Scrape"])
 app.include_router(analytic.router, tags=["KPI"])
+app.include_router(model_catalog.router, prefix="/models", tags=["Models"])
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 

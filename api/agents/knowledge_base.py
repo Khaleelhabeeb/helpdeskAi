@@ -31,10 +31,12 @@ async def try_upload_extracted_text(text: str, filename: str) -> Optional[str]:
     try:
         upload = await upload_extracted_text(text, filename)
         return upload.url
-    except WorkerUploadError as exc:
+    except Exception as exc:
+        status_code = getattr(exc, "status_code", None)
+        response_text = getattr(exc, "response_text", None)
         print(
             "[WARN /kb/add] Extracted text worker upload failed "
-            f"status={exc.status_code} detail={exc.response_text or str(exc)}"
+            f"status={status_code} detail={response_text or str(exc)}"
         )
         return None
 
