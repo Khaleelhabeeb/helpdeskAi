@@ -45,6 +45,7 @@ class AgentSettingsUpdate(BaseModel):
     widget_color: Optional[str] = Field(None, pattern="^#[0-9A-Fa-f]{6}$")
     widget_position: Optional[str] = Field(None, pattern="^(bottom-right|bottom-left|top-right|top-left)$")
     widget_greeting: Optional[str] = Field(None, max_length=200)
+    widget_use_color_header: Optional[bool] = None
 
 
 class WidgetConfig(BaseModel):
@@ -53,6 +54,7 @@ class WidgetConfig(BaseModel):
     color: str
     position: str
     greeting: str
+    use_color_header: bool
 
 
 class EmbedConfig(BaseModel):

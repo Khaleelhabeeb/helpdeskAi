@@ -1,6 +1,5 @@
 import {
   User,
-  MessageSquare,
   Slack,
   Smartphone,
   Globe,
@@ -142,48 +141,6 @@ export default function Settings() {
                       <option value="professional">Professional</option>
                       <option value="friendly">Friendly</option>
                       <option value="casual">Casual</option>
-                    </select>
-                  </div>
-                </div>
-              </section>
-
-              <section className="bg-surface-container-lowest border border-surface-container-highest p-8 rounded-xl shadow-sm">
-                <div className="flex flex-col gap-1 mb-8 pb-4 border-b border-surface-container-highest">
-                  <h2 className="text-lg font-bold text-brand-primary flex items-center gap-2"><MessageSquare className="w-5 h-5" /> Widget Defaults</h2>
-                  <p className="text-xs text-on-surface-variant font-bold uppercase tracking-widest">Used by the web chat widget and agent embeds.</p>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Theme</label>
-                    <select value={settings.widget_theme} onChange={(event) => updateSetting('widget_theme', event.target.value)} className="w-full h-11 px-4 bg-surface-container-low border border-surface-container-highest rounded-lg text-sm focus:outline-none focus:border-brand-primary">
-                      <option value="default">Default</option>
-                      <option value="light">Light</option>
-                      <option value="dark">Dark</option>
-                    </select>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Accent Color</label>
-                    <div className="flex gap-3">
-                      <input type="color" value={settings.widget_color} onChange={(event) => updateSetting('widget_color', event.target.value)} className="h-11 w-14 rounded-lg border border-surface-container-highest bg-surface-container-low" />
-                      <input type="text" value={settings.widget_color} onChange={(event) => updateSetting('widget_color', event.target.value)} className="flex-1 h-11 px-4 bg-surface-container-low border border-surface-container-highest rounded-lg text-sm font-mono focus:outline-none focus:border-brand-primary" />
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Position</label>
-                    <select value={settings.widget_position} onChange={(event) => updateSetting('widget_position', event.target.value)} className="w-full h-11 px-4 bg-surface-container-low border border-surface-container-highest rounded-lg text-sm focus:outline-none focus:border-brand-primary">
-                      <option value="bottom-right">Bottom right</option>
-                      <option value="bottom-left">Bottom left</option>
-                      <option value="top-right">Top right</option>
-                      <option value="top-left">Top left</option>
-                    </select>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Size</label>
-                    <select value={settings.widget_size} onChange={(event) => updateSetting('widget_size', event.target.value)} className="w-full h-11 px-4 bg-surface-container-low border border-surface-container-highest rounded-lg text-sm focus:outline-none focus:border-brand-primary">
-                      <option value="small">Small</option>
-                      <option value="medium">Medium</option>
-                      <option value="large">Large</option>
                     </select>
                   </div>
                 </div>

@@ -45,10 +45,11 @@ def get_agent_settings(
     
     # Get widget configuration (from AgentConfig or use defaults)
     widget_config = {
-        "theme": getattr(config, 'widget_theme', 'light') if config else 'light',
-        "color": getattr(config, 'widget_color', '#4a6cf7') if config else '#4a6cf7',
-        "position": getattr(config, 'widget_position', 'bottom-right') if config else 'bottom-right',
-        "greeting": getattr(config, 'widget_greeting', f'Hi! How can {agent.name} help you today?') if config else f'Hi! How can {agent.name} help you today?'
+        "theme": (getattr(config, 'widget_theme', None) if config else None) or 'light',
+        "color": (getattr(config, 'widget_color', None) if config else None) or '#4a6cf7',
+        "position": (getattr(config, 'widget_position', None) if config else None) or 'bottom-right',
+        "greeting": (getattr(config, 'widget_greeting', None) if config else None) or f'Hi! How can {agent.name} help you today?',
+        "use_color_header": bool(getattr(config, 'widget_use_color_header', False)) if config else False,
     }
     
     # Generate embed script
@@ -144,6 +145,10 @@ def update_agent_settings(
     if settings.widget_greeting is not None:
         config.widget_greeting = settings.widget_greeting
         updates.append("widget_greeting")
+
+    if settings.widget_use_color_header is not None:
+        config.widget_use_color_header = settings.widget_use_color_header
+        updates.append("widget_use_color_header")
     
     # Update timestamp
     config.updated_at = datetime.utcnow()
@@ -200,6 +205,7 @@ def reset_widget_settings(
     config.widget_color = '#4a6cf7'
     config.widget_position = 'bottom-right'
     config.widget_greeting = f'Hi! How can {agent.name} help you today?'
+    config.widget_use_color_header = False
     config.updated_at = datetime.utcnow()
     
     try:
@@ -213,7 +219,8 @@ def reset_widget_settings(
                 "theme": config.widget_theme,
                 "color": config.widget_color,
                 "position": config.widget_position,
-                "greeting": config.widget_greeting
+                "greeting": config.widget_greeting,
+                "use_color_header": config.widget_use_color_header
             }
         }
     except Exception as e:

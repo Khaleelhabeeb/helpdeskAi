@@ -1,13 +1,14 @@
 import os
 from typing import Any, List, Optional
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from pymilvus import MilvusClient
 
 load_dotenv()
 
-MILVUS_COLLECTION = os.getenv("MILVUS_COLLECTION", "documents")
-VECTOR_DIM = int(os.getenv("EMBEDDING_DIMENSION", "1536"))
+MILVUS_COLLECTION = os.getenv("JINA_MILVUS_COLLECTION", "documents_jina")
+VECTOR_DIM = int(os.getenv("JINA_EMBEDDING_DIMENSION", "1024"))
 
 _client: Optional[MilvusClient] = None
 
@@ -19,6 +20,9 @@ def get_milvus_client() -> MilvusClient:
         token = os.getenv("ZILLIZ_TOKEN") or os.getenv("MILVUS_TOKEN")
         if not uri or not token:
             raise RuntimeError("ZILLIZ_URI and ZILLIZ_TOKEN must be set")
+        uri = uri.strip()
+        if uri and not urlparse(uri).scheme and not uri.endswith(".db"):
+            uri = f"https://{uri}"
         _client = MilvusClient(uri=uri, token=token)
     return _client
 
@@ -27,6 +31,7 @@ def ensure_collection() -> None:
     client = get_milvus_client()
     if client.has_collection(MILVUS_COLLECTION):
         return
+    print(f"[milvus] creating collection {MILVUS_COLLECTION} with dimension {VECTOR_DIM}")
     client.create_collection(
         collection_name=MILVUS_COLLECTION,
         dimension=VECTOR_DIM,

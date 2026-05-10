@@ -1,6 +1,8 @@
 import {
   ArrowRight,
   Bot,
+  Check,
+  ChevronDown,
   ChevronLeft,
   Code2,
   FileText,
@@ -53,6 +55,7 @@ type AgentSettingsResponse = {
     color: string;
     position: string;
     greeting: string;
+    use_color_header: boolean;
   };
 };
 
@@ -60,6 +63,8 @@ type ModelOption = {
   id: string;
   label: string;
   provider: string;
+  logo?: string;
+  locked?: boolean;
 };
 
 type AgentTab = 'playground' | 'sources';
@@ -117,6 +122,61 @@ function AgentInitials({ name, image }: { name: string; image?: string | null })
     return <img src={image} alt="" className="h-full w-full object-cover" />;
   }
   return <span className="text-sm font-black">{name.slice(0, 2).toUpperCase() || 'AI'}</span>;
+}
+
+function ModelLogo({ logo }: { logo?: string }) {
+  const key = (logo || 'groq').toLowerCase();
+  if (key === 'meta') return <span className="text-xl font-black text-blue-600">∞</span>;
+  if (key === 'deepseek') return <span className="text-xl font-black text-indigo-600">DS</span>;
+  if (key === 'qwen') return <span className="text-xl font-black text-purple-600">Q</span>;
+  if (key === 'google') return <span className="text-xl font-black text-red-500">G</span>;
+  if (key === 'openai') return <span className="text-xl font-black text-zinc-800">◎</span>;
+  return <span className="text-xl font-black text-emerald-600">G</span>;
+}
+
+function ModelSelect({ value, options, onChange }: { value: string; options: ModelOption[]; onChange: (value: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const items = options.length ? options : [{ id: defaultModel, label: defaultModel.replace('groq/', ''), provider: 'groq', logo: 'groq' }];
+  const selected = items.find((model) => model.id === value) ?? items[0];
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="flex h-12 w-full items-center gap-3 rounded-lg border border-surface-container-highest bg-surface px-4 text-left text-sm font-bold text-brand-primary transition-colors hover:bg-surface-container-low focus:border-brand-primary focus:outline-none"
+      >
+        <span className="grid h-7 w-7 place-items-center rounded-md bg-white shadow-sm"><ModelLogo logo={selected.logo} /></span>
+        <span className="min-w-0 flex-1 truncate">{selected.label}</span>
+        <ChevronDown className={cn('h-4 w-4 text-on-surface-variant transition-transform', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <div className="absolute z-30 mt-2 max-h-80 w-full overflow-y-auto rounded-xl border border-surface-container-highest bg-surface-container-lowest p-2 shadow-xl">
+          {items.map((model) => (
+            <button
+              type="button"
+              key={model.id}
+              disabled={model.locked}
+              onClick={() => {
+                if (model.locked) return;
+                onChange(model.id);
+                setOpen(false);
+              }}
+              className={cn(
+                'flex h-12 w-full items-center gap-3 rounded-lg px-3 text-left text-sm font-semibold transition-colors',
+                model.id === selected.id ? 'bg-surface-container-low text-brand-primary' : 'text-on-surface-variant hover:bg-surface-container-low hover:text-brand-primary',
+                model.locked && 'cursor-not-allowed opacity-40'
+              )}
+            >
+              <span className="grid h-7 w-7 place-items-center rounded-md bg-white shadow-sm"><ModelLogo logo={model.logo} /></span>
+              <span className="min-w-0 flex-1 truncate">{model.label}</span>
+              {model.id === selected.id && <Check className="h-4 w-4 text-brand-primary" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function Agents() {
@@ -179,6 +239,7 @@ export default function Agents() {
           ...current,
           theme: settingsData.widget.theme === 'dark' ? 'dark' : 'light',
           color: settingsData.widget.color,
+          useColorHeader: settingsData.widget.use_color_header,
         }));
       }
     } catch (err) {
@@ -271,6 +332,7 @@ export default function Agents() {
         body: JSON.stringify({
           widget_theme: wizard.theme,
           widget_color: wizard.color,
+          widget_use_color_header: wizard.useColorHeader,
           widget_greeting: `Hey, how can I help you today?`,
         }),
       });
@@ -299,6 +361,7 @@ export default function Agents() {
           model: editModel || defaultModel,
           widget_theme: wizard.theme,
           widget_color: wizard.color,
+          widget_use_color_header: wizard.useColorHeader,
           widget_greeting: `Hey, how can I help you today?`,
         }),
       });
@@ -322,11 +385,18 @@ export default function Agents() {
     setError('');
     setNotice('');
     try {
-      const updated = await apiFetch<Agent>(`/agents/${selectedAgent.id}/edit`, {
-        method: 'PUT',
-        body: JSON.stringify({ name: editName, instructions: editInstructions, model: editModel || defaultModel }),
+      const updated = await apiFetch<{ agent: Partial<Agent> }>(`/agents/${selectedAgent.id}/settings`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          name: editName,
+          instructions: editInstructions,
+          model: editModel || defaultModel,
+          widget_theme: wizard.theme,
+          widget_color: wizard.color,
+          widget_use_color_header: wizard.useColorHeader,
+        }),
       });
-      setAgents((current) => current.map((agent) => (agent.id === updated.id ? updated : agent)));
+      setAgents((current) => current.map((agent) => (agent.id === selectedAgent.id ? { ...agent, ...updated.agent } : agent)));
       setNotice('Agent settings saved.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save agent');
@@ -558,11 +628,7 @@ export default function Agents() {
 
                   <div className="space-y-2">
                     <label className="text-sm font-bold text-on-surface-variant">Model</label>
-                    <select value={editModel} onChange={(event) => setEditModel(event.target.value)} className="h-12 w-full rounded-lg border border-surface-container-highest bg-surface px-4 text-sm focus:border-brand-primary focus:outline-none focus:ring-1 focus:ring-brand-primary">
-                      {(models.length ? models : [{ id: defaultModel, label: defaultModel.replace('groq/', ''), provider: 'groq' }]).map((model) => (
-                        <option key={model.id} value={model.id}>{model.label}</option>
-                      ))}
-                    </select>
+                    <ModelSelect value={editModel} options={models} onChange={setEditModel} />
                   </div>
 
                   <div className="border-t border-surface-container-highest pt-8">
@@ -673,12 +739,29 @@ export default function Agents() {
 
                   <label className="block space-y-2">
                     <span className="text-xs font-black uppercase tracking-widest text-on-surface-variant">Model</span>
-                    <select value={editModel} onChange={(event) => setEditModel(event.target.value)} className="w-full h-11 px-4 bg-surface-container-low border border-surface-container-highest rounded-lg text-sm font-bold focus:outline-none focus:border-brand-primary">
-                      {(models.length ? models : [{ id: editModel, label: editModel.replace('groq/', ''), provider: 'groq' }]).map((model) => (
-                        <option key={model.id} value={model.id}>{model.label}</option>
-                      ))}
-                    </select>
+                    <ModelSelect value={editModel} options={models} onChange={setEditModel} />
                   </label>
+
+                  <div className="space-y-4 rounded-lg border border-surface-container-highest bg-surface-container-low p-4">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-black uppercase tracking-widest text-on-surface-variant">Agent UI</span>
+                      <div className="flex rounded-lg border border-surface-container-highest bg-surface p-1">
+                        <button type="button" onClick={() => setWizard((current) => ({ ...current, theme: 'light' }))} className={cn('grid h-8 w-10 place-items-center rounded-md', wizard.theme === 'light' && 'bg-white shadow-sm')} aria-label="Light appearance"><Sun className="h-4 w-4" /></button>
+                        <button type="button" onClick={() => setWizard((current) => ({ ...current, theme: 'dark' }))} className={cn('grid h-8 w-10 place-items-center rounded-md', wizard.theme === 'dark' && 'bg-white shadow-sm')} aria-label="Dark appearance"><Moon className="h-4 w-4" /></button>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <span className="text-sm font-bold text-on-surface-variant">Primary color</span>
+                      <label className="flex h-10 items-center gap-2 rounded-lg bg-surface px-2 font-mono text-xs font-bold">
+                        <input type="color" value={wizard.color} onChange={(event) => setWizard((current) => ({ ...current, color: event.target.value }))} className="h-7 w-7 rounded border border-surface-container-highest" />
+                        {wizard.color.toUpperCase()}
+                      </label>
+                    </div>
+                    <label className="flex items-center justify-between gap-4">
+                      <span className="text-sm font-bold text-on-surface-variant">Use color for header</span>
+                      <input type="checkbox" checked={wizard.useColorHeader} onChange={(event) => setWizard((current) => ({ ...current, useColorHeader: event.target.checked }))} className="h-5 w-5 accent-brand-primary" />
+                    </label>
+                  </div>
 
                   <label className="block space-y-2">
                     <span className="text-xs font-black uppercase tracking-widest text-on-surface-variant">Instructions (System prompt)</span>
@@ -691,26 +774,26 @@ export default function Agents() {
             <main className="min-h-[760px] rounded-xl border border-surface-container-highest bg-[radial-gradient(#d9d9db_1.5px,transparent_1.5px)] [background-size:28px_28px] p-4 md:p-8">
               {agentTab === 'playground' && (
                 <div className="mx-auto flex max-w-[560px] flex-col items-center gap-6">
-                  <div className="h-[680px] w-full overflow-hidden rounded-[28px] bg-black text-white shadow-2xl">
-                    <div className="flex h-20 items-center gap-4 bg-zinc-900 px-6">
-                      <div className="h-11 w-11 overflow-hidden rounded-full bg-white text-black flex items-center justify-center"><AgentInitials name={selectedAgent.name} image={selectedAgent.avatar_url} /></div>
-                      <div className="text-lg font-bold">{selectedAgent.name}</div>
+                  <div className={cn('h-[680px] w-full overflow-hidden rounded-[28px] shadow-2xl', wizard.theme === 'light' ? 'bg-white text-black' : 'bg-black text-white')}>
+                    <div className="flex h-20 items-center gap-4 px-6" style={{ backgroundColor: wizard.useColorHeader ? wizard.color : wizard.theme === 'light' ? '#f4f4f5' : '#18181b', color: wizard.useColorHeader && wizard.color.toLowerCase() === '#ffffff' ? '#111' : undefined }}>
+                      <div className="h-11 w-11 overflow-hidden rounded-full bg-white text-black flex items-center justify-center"><AgentInitials name={editName || selectedAgent.name} image={selectedAgent.avatar_url} /></div>
+                      <div className="text-lg font-bold">{editName || selectedAgent.name}</div>
                       <RefreshCw className="ml-auto h-5 w-5 text-zinc-300" />
                     </div>
                     <div className="flex h-[calc(100%-5rem)] flex-col p-6">
                       <div className="flex-1 overflow-y-auto">
-                        <div className="rounded-2xl bg-zinc-900 p-5 text-zinc-100">
+                        <div className={cn('rounded-2xl p-5', wizard.theme === 'light' ? 'bg-zinc-100 text-zinc-900' : 'bg-zinc-900 text-zinc-100')}>
                           <p className="whitespace-pre-wrap leading-relaxed">{playgroundAnswer}</p>
-                          <div className="mt-4 flex items-center gap-3 text-xs text-zinc-500">
+                          <div className="mt-4 flex items-center gap-3 text-xs opacity-50">
                             <span>Just now</span>
                             <span>|</span>
                             <span>Sources: {readySources}</span>
                           </div>
                         </div>
                       </div>
-                      <div className="mt-5 flex h-14 items-center gap-3 rounded-full border border-zinc-700 px-4">
-                        <input value={playgroundMessage} onChange={(event) => setPlaygroundMessage(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') testAgent(); }} placeholder="Message..." className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-zinc-500" />
-                        <button onClick={testAgent} disabled={isTesting} className="grid h-10 w-10 place-items-center rounded-full bg-white text-black disabled:opacity-50">{isTesting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button>
+                      <div className={cn('mt-5 flex h-14 items-center gap-3 rounded-full border px-4', wizard.theme === 'light' ? 'border-zinc-200' : 'border-zinc-700')}>
+                        <input value={playgroundMessage} onChange={(event) => setPlaygroundMessage(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') testAgent(); }} placeholder="Message..." className={cn('min-w-0 flex-1 bg-transparent text-sm outline-none', wizard.theme === 'light' ? 'text-black placeholder:text-zinc-400' : 'text-white placeholder:text-zinc-500')} />
+                        <button onClick={testAgent} disabled={isTesting} className="grid h-10 w-10 place-items-center rounded-full disabled:opacity-50" style={{ backgroundColor: wizard.color, color: wizard.color.toLowerCase() === '#ffffff' ? '#111' : '#fff' }}>{isTesting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button>
                       </div>
                     </div>
                   </div>

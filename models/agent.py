@@ -36,6 +36,7 @@ class AgentConfig(Base):
     widget_color = Column(String, default="#4a6cf7")
     widget_position = Column(String, default="bottom-right")
     widget_greeting = Column(Text, nullable=True)
+    widget_use_color_header = Column(Boolean, default=False)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

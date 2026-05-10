@@ -2,12 +2,15 @@ import os
 import uuid
 from typing import Callable, Iterable, Iterator, List, Optional
 
-from litellm import completion, embedding
+import httpx
+from litellm import completion
 from sqlalchemy.orm import Session
 
 from services.vector_store import format_context, search as milvus_search, upsert_texts
+from utils.env import get_secret
 
-EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "openai/text-embedding-3-small")
+JINA_EMBED_MODEL = os.getenv("JINA_EMBED_MODEL", "jina-embeddings-v5-text-small")
+JINA_EMBEDDING_URL = os.getenv("JINA_EMBEDDING_URL", "https://api.jina.ai/v1/embeddings")
 
 
 def chunk_text(text_value: str, size: int = 1000, overlap: int = 150) -> List[str]:
@@ -25,16 +28,28 @@ def chunk_text(text_value: str, size: int = 1000, overlap: int = 150) -> List[st
     return chunks
 
 
-def embed_texts(texts: Iterable[str]) -> List[List[float]]:
+def embed_texts(texts: Iterable[str], task: str = "retrieval.passage") -> List[List[float]]:
     values = list(texts)
     if not values:
         return []
-    response = embedding(model=EMBED_MODEL, input=values)
-    return [item["embedding"] if isinstance(item, dict) else item.embedding for item in response.data]
-
-
-def _vector_literal(vector: List[float]) -> str:
-    return "[" + ",".join(f"{value:.8f}" for value in vector) + "]"
+    api_key = get_secret("JINAAI_API_KEY", prefixes=("jina_",)) or get_secret("JINA_API_KEY", prefixes=("jina_",))
+    if not api_key:
+        raise RuntimeError("JINAAI_API_KEY is not set")
+    payload = {
+        "model": JINA_EMBED_MODEL,
+        "task": task,
+        "normalized": True,
+        "input": values,
+    }
+    with httpx.Client(timeout=60.0) as client:
+        response = client.post(
+            JINA_EMBEDDING_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+        )
+    response.raise_for_status()
+    data = response.json().get("data", [])
+    return [item["embedding"] for item in data]
 
 
 def index_kb_text(
@@ -55,7 +70,7 @@ def index_kb_text(
     for start in range(0, total_chunks, batch_size):
         end = min(start + batch_size, total_chunks)
         batch = chunks[start:end]
-        vectors = embed_texts(batch)
+        vectors = embed_texts(batch, task="retrieval.passage")
         ids = [str(uuid.uuid4()) for _ in batch]
         upsert_texts(namespace, kb_id, agent_id, batch, vectors, ids=ids)
         if on_batch:
@@ -65,40 +80,7 @@ def index_kb_text(
 
 
 def retrieve_context(db: Session, namespace: str, agent_id: str, query: str, top_k: int = 4) -> str:
-    qvec = embed_texts([query])[0]
-    rows = db.execute(
-        text(
-            """
-            WITH vector_ranked AS (
-                SELECT id, content, row_number() OVER (ORDER BY embedding <=> CAST(:embedding AS vector)) AS rank
-                FROM documents
-                WHERE agent_id = CAST(:agent_id AS uuid)
-                ORDER BY embedding <=> CAST(:embedding AS vector)
-                LIMIT :limit
-            ),
-            keyword_ranked AS (
-                SELECT id, content, row_number() OVER (ORDER BY similarity(content, :query) DESC) AS rank
-                FROM documents
-                WHERE agent_id = CAST(:agent_id AS uuid) AND content % :query
-                ORDER BY similarity(content, :query) DESC
-                LIMIT :limit
-            ),
-            fused AS (
-                SELECT id, content, 1.0 / (60 + rank) AS score FROM vector_ranked
-                UNION ALL
-                SELECT id, content, 1.0 / (60 + rank) AS score FROM keyword_ranked
-            )
-            SELECT content, sum(score) AS rrf_score
-            FROM fused
-            GROUP BY id, content
-            ORDER BY rrf_score DESC
-            LIMIT :top_k
-            """
-        ),
-        {"agent_id": agent_id, "embedding": _vector_literal(qvec), "query": query, "limit": top_k * 4, "top_k": top_k},
-    ).all()
-    if rows:
-        return "\n\n".join(row.content for row in rows)
+    qvec = embed_texts([query], task="retrieval.query")[0]
     return format_context(milvus_search(namespace, qvec, top_k=top_k))
 
 
@@ -110,11 +92,19 @@ def build_messages(system_prompt: str, context: str, message: str) -> list[dict[
 
 
 def generate_answer(model: str, messages: list[dict[str, str]]) -> str:
+    if model.startswith("groq/"):
+        groq_key = get_secret("GROQ_API_KEY", prefixes=("gsk_",))
+        if groq_key:
+            os.environ["GROQ_API_KEY"] = groq_key
     response = completion(model=model, messages=messages, temperature=0.2)
     return response.choices[0].message.content.strip()
 
 
 def stream_answer(model: str, messages: list[dict[str, str]]) -> Iterator[str]:
+    if model.startswith("groq/"):
+        groq_key = get_secret("GROQ_API_KEY", prefixes=("gsk_",))
+        if groq_key:
+            os.environ["GROQ_API_KEY"] = groq_key
     for chunk in completion(model=model, messages=messages, temperature=0.2, stream=True):
         delta = chunk.choices[0].delta
         content = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)
