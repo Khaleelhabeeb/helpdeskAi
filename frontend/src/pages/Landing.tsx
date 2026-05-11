@@ -168,7 +168,7 @@ export default function Landing() {
       <footer className="max-w-7xl mx-auto px-8 py-12 flex flex-col md:flex-row items-center justify-between border-t border-surface-container-highest text-sm text-on-surface-variant">
         <div className="flex items-center gap-3 mb-6 md:mb-0">
           <Logo />
-          <span className="ml-2 font-medium">© 2024 HelpDeskAI Inc.</span>
+          <span className="ml-2 font-medium">© 2026 HelpDeskAI</span>
         </div>
         <div className="flex items-center gap-8">
           <a href="#" className="hover:text-brand-primary transition-colors">Terms</a>
