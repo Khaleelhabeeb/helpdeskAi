@@ -57,6 +57,8 @@ def reset_credits(db: Session = Depends(get_db), user = Depends(get_current_user
     Manually reset a user's credits. In a production, this would be triggered
     by a scheduled job at the end of each billing cycle.
     """
+    if getattr(user, "user_type", "") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
     
     max_credits = user.get_max_credits()
     user.credits_remaining = max_credits

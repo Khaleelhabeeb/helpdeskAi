@@ -98,11 +98,11 @@ def build_messages(
 ) -> list[dict[str, str]]:
     content = f"{system_prompt}\n\n{CONCISE_RUNTIME_INSTRUCTION}".strip()
     if context:
-        content = f"{content}\n\nRelevant context:\n{context}"
+        content = f"{content}\n\nRelevant context:\n<context>\n{context}\n</context>"
     messages = [{"role": "system", "content": content}]
     if history:
         messages.extend(history)
-    messages.append({"role": "user", "content": message})
+    messages.append({"role": "user", "content": f"<user_query>\n{message}\n</user_query>"})
     return messages
 
 

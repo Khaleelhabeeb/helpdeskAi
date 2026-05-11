@@ -16,7 +16,29 @@ class ScrapeRequest(BaseModel):
     url: str
 
 
+import socket
+import ipaddress
+from urllib.parse import urlparse
+
+def is_safe_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        ip = socket.gethostbyname(hostname)
+        ip_obj = ipaddress.ip_address(ip)
+        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_multicast:
+            return False
+        return True
+    except Exception:
+        return False
+
 async def scrape_url_content(url: str) -> dict:
+    if not is_safe_url(url):
+        raise HTTPException(status_code=400, detail="Invalid or restricted URL provided")
     # Returns dict with 'text', 'title', and 'timestamp' for compatibility
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:

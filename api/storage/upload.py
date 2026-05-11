@@ -24,9 +24,16 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
     # Check quota limits
     check_files_quota(db, user)
 
-    # Read file content
-    file_content = await file.read()
-    file_size_bytes = len(file_content)
+    # Read file content with size limit
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB limit
+    file_size_bytes = 0
+    chunks = []
+    while chunk := await file.read(1024 * 1024):
+        file_size_bytes += len(chunk)
+        if file_size_bytes > MAX_FILE_SIZE:
+            raise HTTPException(status_code=413, detail="File too large. Maximum size is 10MB.")
+        chunks.append(chunk)
+    file_content = b"".join(chunks)
     
     # Check storage quota
     check_storage_quota(db, user, file_size_bytes)

@@ -113,10 +113,21 @@ def _visitor_hash(deployment_id: int, visitor_id: str, request: Request) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+MAX_RATE_BUCKETS = 10000
+
 def _check_rate_limit(deployment_public_id: str, visitor_id: str, request: Request) -> None:
     ip = request.client.host if request.client else "unknown"
     key = f"{deployment_public_id}:{ip}:{visitor_id}"
     now = time.time()
+
+    if len(_rate_buckets) > MAX_RATE_BUCKETS:
+        for k in list(_rate_buckets.keys()):
+            _rate_buckets[k] = [stamp for stamp in _rate_buckets[k] if now - stamp < RATE_LIMIT_WINDOW_SECONDS]
+            if not _rate_buckets[k]:
+                del _rate_buckets[k]
+        if len(_rate_buckets) > MAX_RATE_BUCKETS:
+            _rate_buckets.clear()
+
     bucket = [stamp for stamp in _rate_buckets.get(key, []) if now - stamp < RATE_LIMIT_WINDOW_SECONDS]
     if len(bucket) >= RATE_LIMIT_MAX_REQUESTS:
         raise HTTPException(status_code=429, detail="Too many messages. Please wait a moment.")

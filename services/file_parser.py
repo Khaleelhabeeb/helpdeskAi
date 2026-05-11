@@ -3,7 +3,7 @@ from typing import BinaryIO
 import re
 from io import BytesIO
 from zipfile import ZipFile
-from xml.etree import ElementTree
+import defusedxml.ElementTree as ElementTree
 
 def extract_text_from_pdf_file(file: BinaryIO) -> str:
     reader = PdfReader(file)

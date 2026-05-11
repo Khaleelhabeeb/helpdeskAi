@@ -71,3 +71,4 @@ zstandard==0.23.0
 slowapi
 sib-api-v3-sdk
 supabase
+defusedxml==0.7.1
