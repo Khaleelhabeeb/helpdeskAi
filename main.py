@@ -1,5 +1,6 @@
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request, status, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -40,6 +41,26 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={"detail": exc.errors()}
     )
 
+class PublicWidgetCORSMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path.startswith("/public/widget/"):
+            if request.method == "OPTIONS":
+                origin = request.headers.get("origin")
+                headers = {
+                    "Access-Control-Allow-Origin": origin or "*",
+                    "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+                    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                }
+                return Response(status_code=200, headers=headers)
+            
+            response = await call_next(request)
+            origin = request.headers.get("origin")
+            if origin:
+                response.headers["Access-Control-Allow-Origin"] = origin
+            return response
+            
+        return await call_next(request)
+
 # rate limiting middleware
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -53,6 +74,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(PublicWidgetCORSMiddleware)
 
 
 app.include_router(auth.router, prefix="/auth")

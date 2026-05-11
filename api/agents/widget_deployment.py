@@ -286,7 +286,7 @@ def get_public_widget_config(deployment_id: str, request: Request, db: Session =
 
 
 @public_router.post("/{deployment_id}/chat")
-async def public_widget_chat(deployment_id: str, payload: PublicChatRequest, request: Request, db: Session = Depends(get_db)):
+def public_widget_chat(deployment_id: str, payload: PublicChatRequest, request: Request, db: Session = Depends(get_db)):
     deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.deployment_id == deployment_id).first()
     if not deployment or not deployment.is_enabled:
         raise HTTPException(status_code=404, detail="Widget is not available")

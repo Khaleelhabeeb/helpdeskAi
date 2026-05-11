@@ -26,7 +26,7 @@ def _sse(event: str, data: dict) -> str:
 
 
 @router.post("/{agent_id}")
-async def chat_with_agent(
+def chat_with_agent(
     agent_id: str,
     chat: ChatRequest,
     background_tasks: BackgroundTasks,

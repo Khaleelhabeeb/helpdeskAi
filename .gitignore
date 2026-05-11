@@ -207,3 +207,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 downloads_organizer.py
+
+firebase.json
+.firebaserc
