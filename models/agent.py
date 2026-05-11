@@ -19,6 +19,7 @@ class Agent(Base):
     user = relationship("User", backref="agents")
     knowledge_bases = relationship("KnowledgeBase", back_populates="agent", cascade="all, delete-orphan")
     config = relationship("AgentConfig", back_populates="agent", uselist=False, cascade="all, delete-orphan")
+    widget_deployment = relationship("WidgetDeployment", back_populates="agent", uselist=False, cascade="all, delete-orphan")
 
 
 class AgentConfig(Base):

@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from api.agents import agents, chat, knowledge_base, settings
+from api.agents import agents, chat, knowledge_base, settings, widget_deployment
 from api.auth import auth, password_reset
 from api.scrape import scrape
 from api.storage import storage, upload
@@ -58,6 +58,8 @@ app.include_router(password_reset.router, prefix="/auth")
 
 app.include_router(agents.router, prefix="/agents", tags=["Agents"])
 app.include_router(settings.router, prefix="/agents", tags=["Agent Settings"])
+app.include_router(widget_deployment.router, prefix="/agents", tags=["Widget Deployment"])
+app.include_router(widget_deployment.public_router, prefix="/public/widget", tags=["Public Widget"])
 app.include_router(upload.router, prefix="/knowledge", tags=["Knowledge Upload"])
 app.include_router(knowledge_base.router, prefix="/kb", tags=["Knowledge Base"])
 app.include_router(chat.router, prefix="/chat", tags=["Chat"])

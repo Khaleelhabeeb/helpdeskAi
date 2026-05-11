@@ -11,6 +11,12 @@ from utils.env import get_secret
 
 JINA_EMBED_MODEL = os.getenv("JINA_EMBED_MODEL", "jina-embeddings-v5-text-small")
 JINA_EMBEDDING_URL = os.getenv("JINA_EMBEDDING_URL", "https://api.jina.ai/v1/embeddings")
+CONCISE_RUNTIME_INSTRUCTION = """### Response Style
+- Keep answers concise and easy to scan.
+- Prefer 1-3 short paragraphs.
+- Use bullets only when they genuinely make the answer clearer.
+- Ask one brief clarifying question if needed.
+- Do not include long explanations unless the user explicitly asks for detail."""
 
 
 def chunk_text(text_value: str, size: int = 1000, overlap: int = 150) -> List[str]:
@@ -84,11 +90,20 @@ def retrieve_context(db: Session, namespace: str, agent_id: str, query: str, top
     return format_context(milvus_search(namespace, qvec, top_k=top_k))
 
 
-def build_messages(system_prompt: str, context: str, message: str) -> list[dict[str, str]]:
-    content = system_prompt
+def build_messages(
+    system_prompt: str,
+    context: str,
+    message: str,
+    history: Optional[list[dict[str, str]]] = None,
+) -> list[dict[str, str]]:
+    content = f"{system_prompt}\n\n{CONCISE_RUNTIME_INSTRUCTION}".strip()
     if context:
         content = f"{content}\n\nRelevant context:\n{context}"
-    return [{"role": "system", "content": content}, {"role": "user", "content": message}]
+    messages = [{"role": "system", "content": content}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": message})
+    return messages
 
 
 def generate_answer(model: str, messages: list[dict[str, str]]) -> str:
@@ -96,7 +111,7 @@ def generate_answer(model: str, messages: list[dict[str, str]]) -> str:
         groq_key = get_secret("GROQ_API_KEY", prefixes=("gsk_",))
         if groq_key:
             os.environ["GROQ_API_KEY"] = groq_key
-    response = completion(model=model, messages=messages, temperature=0.2)
+    response = completion(model=model, messages=messages, temperature=0.2, max_tokens=700)
     return response.choices[0].message.content.strip()
 
 
@@ -105,7 +120,7 @@ def stream_answer(model: str, messages: list[dict[str, str]]) -> Iterator[str]:
         groq_key = get_secret("GROQ_API_KEY", prefixes=("gsk_",))
         if groq_key:
             os.environ["GROQ_API_KEY"] = groq_key
-    for chunk in completion(model=model, messages=messages, temperature=0.2, stream=True):
+    for chunk in completion(model=model, messages=messages, temperature=0.2, max_tokens=700, stream=True):
         delta = chunk.choices[0].delta
         content = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)
         if content:

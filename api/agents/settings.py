@@ -7,8 +7,32 @@ from utils.jwt import get_current_user
 from typing import Optional
 from uuid import UUID
 from datetime import datetime
+from models.widget_deployment import new_deployment_id
 
 router = APIRouter()
+
+
+def _get_or_create_widget_deployment(db: Session, agent: models.Agent) -> models.WidgetDeployment:
+    deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.agent_id == agent.id).first()
+    if deployment:
+        return deployment
+    deployment = models.WidgetDeployment(
+        agent_id=agent.id,
+        deployment_id=new_deployment_id(),
+        display_name=agent.name,
+        logo_url=agent.avatar_url,
+        initial_messages=[f"Hi! How can {agent.name} help you today?"],
+        theme="dark",
+        primary_color="#ffffff",
+        allowed_domains=["localhost", "127.0.0.1"],
+        is_enabled=True,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(deployment)
+    db.commit()
+    db.refresh(deployment)
+    return deployment
 
 
 @router.get("/{agent_id}/settings", response_model=schemas.AgentSettingsOut)
@@ -54,12 +78,11 @@ def get_agent_settings(
     
     # Generate embed script
     base_url = str(request.base_url).rstrip('/')
+    deployment = _get_or_create_widget_deployment(db, agent)
     embed_script = f'''<!-- {agent.name} Chat Widget -->
 <script
     src="{base_url}/static/widget.js"
-    data-agent-id="{agent_id}"
-    display-name="{agent.name}"
-    main-color="{widget_config['color']}"
+    data-deployment-id="{deployment.deployment_id}"
     defer
 ></script>'''
     
@@ -262,12 +285,11 @@ def get_embed_code(
     
     # Generate embed script
     base_url = str(request.base_url).rstrip('/')
+    deployment = _get_or_create_widget_deployment(db, agent)
     embed_script = f'''<!-- {agent.name} Chat Widget -->
 <script
     src="{base_url}/static/widget.js"
-    data-agent-id="{agent_id}"
-    display-name="{agent.name}"
-    main-color="{widget_color}"
+    data-deployment-id="{deployment.deployment_id}"
     defer
 ></script>'''
     

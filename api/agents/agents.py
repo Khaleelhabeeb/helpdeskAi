@@ -15,6 +15,7 @@ from services.ingest_worker import process_kb_ingest_job
 from services.vector_store import delete_namespace
 from services.storage_quota import check_storage_quota, check_files_quota, increment_storage_usage
 from api.scrape.scrape import scrape_url_content
+from services.image_upload import ImageUploadError, upload_avatar_image
 import json
 
 router = APIRouter()
@@ -67,7 +68,26 @@ async def update_agent_avatar(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
-    raise HTTPException(status_code=410, detail="Avatar upload storage is disabled")
+    agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    file_bytes = await avatar.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Avatar file is empty")
+
+    try:
+        result = await upload_avatar_image(file_bytes, avatar.filename or "avatar", avatar.content_type)
+    except ImageUploadError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    agent.avatar_url = result.url
+    deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.agent_id == agent.id).first()
+    if deployment:
+        deployment.logo_url = result.url
+    db.commit()
+    db.refresh(agent)
+    return agent
 
 
 @router.get("/", response_model=list[schemas.AgentOut])

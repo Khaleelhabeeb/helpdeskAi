@@ -18,6 +18,12 @@ def default_system_prompt(agent_name: str) -> str:
 - If multiple sources conflict, prefer the most specific and recent source.
 - If the answer is not supported by the available source context, use the fallback response.
 
+### Response Style
+- Keep answers concise and useful.
+- Prefer 1-3 short paragraphs.
+- Use bullets only when they improve clarity.
+- Ask one brief clarifying question if needed.
+
 ### Fallback Response
 I do not have enough information to answer that accurately. Please contact the support team for help."""
 
@@ -45,8 +51,8 @@ def send_message_to_groq(system_prompt: str, user_message: str) -> str:
     response = completion(
         model="groq/openai/gpt-oss-20b",
         messages=messages,
-        temperature=1,
-        max_tokens=8192,
+        temperature=0.2,
+        max_tokens=700,
     )
 
     return response.choices[0].message.content.strip()
