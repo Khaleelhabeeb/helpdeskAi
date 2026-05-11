@@ -24,10 +24,12 @@ import {
 } from 'lucide-react';
 import { AppLayout } from '../components/Layout';
 import { cn } from '../lib/utils';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
 import { Agent, apiFetch, formatRelative, KnowledgeBase } from '../lib/api';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 const defaultModel = 'groq/openai/gpt-oss-20b';
 
@@ -68,6 +70,46 @@ type ModelOption = {
 };
 
 type AgentTab = 'playground' | 'sources';
+
+type ChatMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  status?: 'streaming';
+};
+
+function buildMessageId() {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+const markdownComponents = {
+  h1: ({ children }: { children: React.ReactNode }) => <h1 className="text-lg font-bold text-brand-primary">{children}</h1>,
+  h2: ({ children }: { children: React.ReactNode }) => <h2 className="text-base font-bold text-brand-primary">{children}</h2>,
+  h3: ({ children }: { children: React.ReactNode }) => <h3 className="text-sm font-bold text-brand-primary">{children}</h3>,
+  p: ({ children }: { children: React.ReactNode }) => <p className="text-sm leading-relaxed text-on-surface-variant">{children}</p>,
+  ul: ({ children }: { children: React.ReactNode }) => <ul className="ml-5 list-disc space-y-2 text-sm text-on-surface-variant">{children}</ul>,
+  ol: ({ children }: { children: React.ReactNode }) => <ol className="ml-5 list-decimal space-y-2 text-sm text-on-surface-variant">{children}</ol>,
+  li: ({ children }: { children: React.ReactNode }) => <li className="leading-relaxed">{children}</li>,
+  a: ({ children, href }: { children: React.ReactNode; href?: string }) => (
+    <a href={href} className="font-semibold text-brand-primary underline decoration-brand-primary/40 underline-offset-4" target="_blank" rel="noreferrer">
+      {children}
+    </a>
+  ),
+  strong: ({ children }: { children: React.ReactNode }) => <strong className="font-semibold text-brand-primary">{children}</strong>,
+  code: ({ children }: { children: React.ReactNode }) => <code className="rounded bg-surface-container-low px-1.5 py-0.5 text-xs font-semibold text-brand-primary">{children}</code>,
+  pre: ({ children }: { children: React.ReactNode }) => <pre className="overflow-x-auto rounded-lg bg-surface-container-low p-3 text-xs text-on-surface-variant">{children}</pre>,
+  blockquote: ({ children }: { children: React.ReactNode }) => <blockquote className="border-l-2 border-brand-primary/40 pl-3 text-sm text-on-surface-variant">{children}</blockquote>,
+  table: ({ children }: { children: React.ReactNode }) => <table className="w-full border-collapse text-left text-xs">{children}</table>,
+  thead: ({ children }: { children: React.ReactNode }) => <thead className="bg-surface-container-high text-[11px] uppercase tracking-widest text-on-surface-variant">{children}</thead>,
+  tbody: ({ children }: { children: React.ReactNode }) => <tbody className="divide-y divide-surface-container-highest">{children}</tbody>,
+  tr: ({ children }: { children: React.ReactNode }) => <tr className="divide-x divide-surface-container-highest">{children}</tr>,
+  th: ({ children }: { children: React.ReactNode }) => <th className="px-3 py-2 font-semibold text-on-surface-variant">{children}</th>,
+  td: ({ children }: { children: React.ReactNode }) => <td className="px-3 py-2 text-on-surface-variant">{children}</td>,
+  hr: () => <hr className="my-3 border-surface-container-highest" />,
+};
 
 function initialWizard(): WizardState {
   return {
@@ -196,10 +238,17 @@ export default function Agents() {
   const [models, setModels] = useState<ModelOption[]>([]);
   const [agentTab, setAgentTab] = useState<AgentTab>('playground');
   const [playgroundMessage, setPlaygroundMessage] = useState('What can you help me with?');
-  const [playgroundAnswer, setPlaygroundAnswer] = useState('Ask a test question to preview how this agent responds using its instructions and sources.');
+  const [playgroundMessages, setPlaygroundMessages] = useState<ChatMessage[]>([
+    {
+      id: 'intro',
+      role: 'assistant',
+      content: 'Ask a test question to preview how this agent responds using its instructions and sources.',
+    },
+  ]);
   const [isTesting, setTesting] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const playgroundEndRef = useRef<HTMLDivElement | null>(null);
 
   const selectedAgent = useMemo(() => agents.find((agent) => agent.id === selectedId) ?? null, [agents, selectedId]);
 
@@ -258,9 +307,19 @@ export default function Agents() {
     setEditInstructions(selectedAgent.instructions ?? '');
     setEditModel(selectedAgent.model);
     setAgentTab('playground');
-    setPlaygroundAnswer('Ask a test question to preview how this agent responds using its instructions and sources.');
+    setPlaygroundMessages([
+      {
+        id: 'intro',
+        role: 'assistant',
+        content: 'Ask a test question to preview how this agent responds using its instructions and sources.',
+      },
+    ]);
     loadAgentDetails(selectedAgent.id);
   }, [selectedAgent?.id]);
+
+  useEffect(() => {
+    playgroundEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [playgroundMessages]);
 
   function startCreate() {
     setWizard(initialWizard());
@@ -445,7 +504,15 @@ export default function Agents() {
   async function testAgent() {
     if (!selectedAgent || !playgroundMessage.trim()) return;
     setTesting(true);
-    setPlaygroundAnswer('');
+    const userMessage = playgroundMessage.trim();
+    const userId = buildMessageId();
+    const assistantId = buildMessageId();
+    setPlaygroundMessages((current) => [
+      ...current,
+      { id: userId, role: 'user', content: userMessage },
+      { id: assistantId, role: 'assistant', content: '', status: 'streaming' },
+    ]);
+    setPlaygroundMessage('');
     setError('');
     try {
       const response = await fetch(`${import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'}/chat/${selectedAgent.id}`, {
@@ -454,7 +521,7 @@ export default function Agents() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${localStorage.getItem('helpdeskai.access_token') ?? ''}`,
         },
-        body: JSON.stringify({ message: playgroundMessage }),
+        body: JSON.stringify({ message: userMessage }),
       });
       if (!response.ok || !response.body) throw new Error('Could not test this agent');
 
@@ -474,13 +541,25 @@ export default function Agents() {
           if (!dataLine) continue;
           const payload = JSON.parse(dataLine.replace('data: ', ''));
           answer += payload.content ?? '';
-          setPlaygroundAnswer(answer);
+          setPlaygroundMessages((current) => current.map((message) => (
+            message.id === assistantId ? { ...message, content: answer, status: 'streaming' } : message
+          )));
         }
       }
-      if (!answer) setPlaygroundAnswer('The agent did not return a response.');
+      if (!answer) {
+        setPlaygroundMessages((current) => current.map((message) => (
+          message.id === assistantId ? { ...message, content: 'The agent did not return a response.' } : message
+        )));
+      } else {
+        setPlaygroundMessages((current) => current.map((message) => (
+          message.id === assistantId ? { ...message, status: undefined } : message
+        )));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not test this agent');
-      setPlaygroundAnswer('The playground could not reach the chat endpoint.');
+      setPlaygroundMessages((current) => current.map((message) => (
+        message.status === 'streaming' ? { ...message, content: 'The playground could not reach the chat endpoint.', status: undefined } : message
+      )));
     } finally {
       setTesting(false);
     }
@@ -780,19 +859,47 @@ export default function Agents() {
                       <div className="text-lg font-bold">{editName || selectedAgent.name}</div>
                       <RefreshCw className="ml-auto h-5 w-5 text-zinc-300" />
                     </div>
-                    <div className="flex h-[calc(100%-5rem)] flex-col p-6">
-                      <div className="flex-1 overflow-y-auto">
-                        <div className={cn('rounded-2xl p-5', wizard.theme === 'light' ? 'bg-zinc-100 text-zinc-900' : 'bg-zinc-900 text-zinc-100')}>
-                          <p className="whitespace-pre-wrap leading-relaxed">{playgroundAnswer}</p>
-                          <div className="mt-4 flex items-center gap-3 text-xs opacity-50">
-                            <span>Just now</span>
-                            <span>|</span>
-                            <span>Sources: {readySources}</span>
+                    <div className="flex h-[calc(100%-5rem)] flex-col">
+                      <div className="flex-1 space-y-4 overflow-y-auto px-6 py-5">
+                        {playgroundMessages.map((message) => (
+                          <div key={message.id} className={cn('flex', message.role === 'user' ? 'justify-end' : 'justify-start')}>
+                            <div className={cn(
+                              'max-w-[78%] rounded-2xl px-4 py-3 text-sm shadow-sm',
+                              message.role === 'user'
+                                ? 'bg-brand-primary text-brand-on-primary'
+                                : wizard.theme === 'light'
+                                  ? 'bg-zinc-100 text-zinc-900'
+                                  : 'bg-zinc-900 text-zinc-100'
+                            )}>
+                              {message.role === 'assistant' ? (
+                                <div className="space-y-3">
+                                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                                    {message.content || (message.status === 'streaming' ? 'Thinking...' : '')}
+                                  </ReactMarkdown>
+                                  {message.status !== 'streaming' && (
+                                    <div className="mt-2 flex items-center gap-3 text-[10px] uppercase tracking-widest opacity-50">
+                                      <span>Just now</span>
+                                      <span>|</span>
+                                      <span>Sources: {readySources}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <p className="whitespace-pre-wrap leading-relaxed">{message.content}</p>
+                              )}
+                            </div>
                           </div>
-                        </div>
+                        ))}
+                        <div ref={playgroundEndRef} />
                       </div>
-                      <div className={cn('mt-5 flex h-14 items-center gap-3 rounded-full border px-4', wizard.theme === 'light' ? 'border-zinc-200' : 'border-zinc-700')}>
-                        <input value={playgroundMessage} onChange={(event) => setPlaygroundMessage(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') testAgent(); }} placeholder="Message..." className={cn('min-w-0 flex-1 bg-transparent text-sm outline-none', wizard.theme === 'light' ? 'text-black placeholder:text-zinc-400' : 'text-white placeholder:text-zinc-500')} />
+                      <div className={cn('mx-6 mb-6 flex h-14 items-center gap-3 rounded-full border px-4', wizard.theme === 'light' ? 'border-zinc-200 bg-white' : 'border-zinc-700 bg-black')}>
+                        <input
+                          value={playgroundMessage}
+                          onChange={(event) => setPlaygroundMessage(event.target.value)}
+                          onKeyDown={(event) => { if (event.key === 'Enter') testAgent(); }}
+                          placeholder="Message..."
+                          className={cn('min-w-0 flex-1 bg-transparent text-sm outline-none', wizard.theme === 'light' ? 'text-black placeholder:text-zinc-400' : 'text-white placeholder:text-zinc-500')}
+                        />
                         <button onClick={testAgent} disabled={isTesting} className="grid h-10 w-10 place-items-center rounded-full disabled:opacity-50" style={{ backgroundColor: wizard.color, color: wizard.color.toLowerCase() === '#ffffff' ? '#111' : '#fff' }}>{isTesting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button>
                       </div>
                     </div>
