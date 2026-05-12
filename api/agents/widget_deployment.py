@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -15,7 +15,7 @@ from api.auth.auth import get_db
 from db import models
 from db.database import SessionLocal
 from models.widget_deployment import new_deployment_id
-from services.rag_service import build_messages, retrieve_context, stream_answer
+from services.rag_service import build_messages, aretrieve_context, astream_answer
 from utils.jwt import get_current_user
 
 router = APIRouter()
@@ -286,7 +286,13 @@ def get_public_widget_config(deployment_id: str, request: Request, db: Session =
 
 
 @public_router.post("/{deployment_id}/chat")
-def public_widget_chat(deployment_id: str, payload: PublicChatRequest, request: Request, db: Session = Depends(get_db)):
+async def public_widget_chat(
+    deployment_id: str,
+    payload: PublicChatRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
     deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.deployment_id == deployment_id).first()
     if not deployment or not deployment.is_enabled:
         raise HTTPException(status_code=404, detail="Widget is not available")
@@ -331,7 +337,7 @@ def public_widget_chat(deployment_id: str, payload: PublicChatRequest, request: 
     context = ""
     if use_retrieval and namespace:
         try:
-            context = retrieve_context(db, namespace, str(agent.id), payload.message, top_k=top_k)
+            context = await aretrieve_context(db, namespace, str(agent.id), payload.message, top_k=top_k)
         except Exception as exc:
             print(f"[public widget chat] retrieval failed: {exc}")
 
@@ -347,34 +353,47 @@ def public_widget_chat(deployment_id: str, payload: PublicChatRequest, request: 
     session.last_active_at = datetime.utcnow()
     db.commit()
 
-    def generate():
+    async def generate():
         answer_parts: list[str] = []
         yield _sse("meta", {"session_id": str(session_id_value)})
         try:
-            for token in stream_answer(agent_model, messages):
+            async for token in astream_answer(agent_model, messages):
                 answer_parts.append(token)
                 yield _sse("token", {"content": token})
             answer = "".join(answer_parts).strip()
-            stream_db = SessionLocal()
-            try:
-                stream_db.add(models.ChatMessage(session_id=session_id_value, role="assistant", content=answer, created_at=datetime.utcnow()))
-                stream_db.add(models.UsageLog(
-                    user_id=user_id_value,
-                    agent_id=agent_id_value,
-                    message_content=user_message,
-                    response_content=answer,
-                    credits_used=1,
-                    timestamp=datetime.utcnow(),
-                ))
-                stream_session = stream_db.query(models.ChatSession).filter(models.ChatSession.id == session_id_value).first()
-                if stream_session:
-                    stream_session.last_active_at = datetime.utcnow()
-                stream_db.commit()
-            finally:
-                stream_db.close()
+            
+            background_tasks.add_task(
+                _log_public_chat,
+                session_id=session_id_value,
+                user_id=user_id_value,
+                agent_id=agent_id_value,
+                user_message=user_message,
+                answer=answer
+            )
+            
             yield _sse("done", {"session_id": str(session_id_value)})
         except Exception as exc:
             print(f"[public widget chat] generation failed: {exc}")
             yield _sse("error", {"detail": "Sorry, I could not answer that right now."})
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers=_origin_headers(request))
+
+
+def _log_public_chat(session_id, user_id, agent_id, user_message, answer):
+    db = SessionLocal()
+    try:
+        db.add(models.ChatMessage(session_id=session_id, role="assistant", content=answer, created_at=datetime.utcnow()))
+        db.add(models.UsageLog(
+            user_id=user_id,
+            agent_id=agent_id,
+            message_content=user_message,
+            response_content=answer,
+            credits_used=1,
+            timestamp=datetime.utcnow(),
+        ))
+        session = db.query(models.ChatSession).filter(models.ChatSession.id == session_id).first()
+        if session:
+            session.last_active_at = datetime.utcnow()
+        db.commit()
+    finally:
+        db.close()

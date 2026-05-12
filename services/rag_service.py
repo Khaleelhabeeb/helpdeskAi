@@ -1,9 +1,8 @@
 import os
 import uuid
-from typing import Callable, Iterable, Iterator, List, Optional
-
 import httpx
-from litellm import completion
+from typing import Callable, Iterable, Iterator, List, Optional, AsyncIterator
+from litellm import completion, acompletion
 from sqlalchemy.orm import Session
 
 from services.vector_store import format_context, search as milvus_search, upsert_texts
@@ -58,6 +57,30 @@ def embed_texts(texts: Iterable[str], task: str = "retrieval.passage") -> List[L
     return [item["embedding"] for item in data]
 
 
+async def aembed_texts(texts: Iterable[str], task: str = "retrieval.passage") -> List[List[float]]:
+    values = list(texts)
+    if not values:
+        return []
+    api_key = get_secret("JINAAI_API_KEY", prefixes=("jina_",)) or get_secret("JINA_API_KEY", prefixes=("jina_",))
+    if not api_key:
+        raise RuntimeError("JINAAI_API_KEY is not set")
+    payload = {
+        "model": JINA_EMBED_MODEL,
+        "task": task,
+        "normalized": True,
+        "input": values,
+    }
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            JINA_EMBEDDING_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+        )
+    response.raise_for_status()
+    data = response.json().get("data", [])
+    return [item["embedding"] for item in data]
+
+
 def index_kb_text(
     db: Session,
     user_id: int,
@@ -88,6 +111,13 @@ def index_kb_text(
 def retrieve_context(db: Session, namespace: str, agent_id: str, query: str, top_k: int = 4) -> str:
     qvec = embed_texts([query], task="retrieval.query")[0]
     return format_context(milvus_search(namespace, qvec, top_k=top_k))
+
+
+async def aretrieve_context(db: Session, namespace: str, agent_id: str, query: str, top_k: int = 4) -> str:
+    qvecs = await aembed_texts([query], task="retrieval.query")
+    if not qvecs:
+        return ""
+    return format_context(milvus_search(namespace, qvecs[0], top_k=top_k))
 
 
 def build_messages(
@@ -121,6 +151,19 @@ def stream_answer(model: str, messages: list[dict[str, str]]) -> Iterator[str]:
         if groq_key:
             os.environ["GROQ_API_KEY"] = groq_key
     for chunk in completion(model=model, messages=messages, temperature=0.2, max_tokens=700, stream=True):
+        delta = chunk.choices[0].delta
+        content = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)
+        if content:
+            yield content
+
+
+async def astream_answer(model: str, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+    if model.startswith("groq/"):
+        groq_key = get_secret("GROQ_API_KEY", prefixes=("gsk_",))
+        if groq_key:
+            os.environ["GROQ_API_KEY"] = groq_key
+    response = await acompletion(model=model, messages=messages, temperature=0.2, max_tokens=700, stream=True)
+    async for chunk in response:
         delta = chunk.choices[0].delta
         content = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)
         if content:

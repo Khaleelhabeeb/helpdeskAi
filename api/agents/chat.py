@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from api.auth.auth import get_db
 from db import models
-from services.rag_service import build_messages, retrieve_context, stream_answer
+from db.database import SessionLocal
+from services.rag_service import build_messages, aretrieve_context, astream_answer
 from utils.jwt import get_current_user
 
 router = APIRouter()
@@ -26,7 +27,7 @@ def _sse(event: str, data: dict) -> str:
 
 
 @router.post("/{agent_id}")
-def chat_with_agent(
+async def chat_with_agent(
     agent_id: str,
     chat: ChatRequest,
     background_tasks: BackgroundTasks,
@@ -48,32 +49,45 @@ def chat_with_agent(
     namespace = cfg.vector_store_namespace if cfg else None
     context = ""
     if use_retrieval and namespace:
-        context = retrieve_context(db, namespace, str(agent.id), chat.message, top_k=top_k)
+        context = await aretrieve_context(db, namespace, str(agent.id), chat.message, top_k=top_k)
 
     unique_id = chat.unique_id or str(uuid.uuid4())
     messages = build_messages(agent.instructions or "", context, chat.message)
 
-    def generate():
+    async def generate():
         answer_parts: list[str] = []
         yield _sse("meta", {"unique_id": unique_id})
         try:
-            for token in stream_answer(agent.model, messages):
+            async for token in astream_answer(agent.model, messages):
                 answer_parts.append(token)
                 yield _sse("token", {"content": token})
 
             answer = "".join(answer_parts)
-            db.add(models.UsageLog(
+            background_tasks.add_task(
+                _log_usage,
                 user_id=user.id,
                 agent_id=agent.id,
                 message_content=chat.message,
-                response_content=answer,
-                credits_used=1,
-                timestamp=datetime.utcnow(),
-            ))
-            db.commit()
+                response_content=answer
+            )
             yield _sse("done", {"unique_id": unique_id})
         except Exception as exc:
-            db.rollback()
             yield _sse("error", {"detail": str(exc)})
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+def _log_usage(user_id, agent_id, message_content, response_content):
+    db = SessionLocal()
+    try:
+        db.add(models.UsageLog(
+            user_id=user_id,
+            agent_id=agent_id,
+            message_content=message_content,
+            response_content=response_content,
+            credits_used=1,
+            timestamp=datetime.utcnow(),
+        ))
+        db.commit()
+    finally:
+        db.close()
