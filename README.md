@@ -1,7 +1,7 @@
 ## Key Features
 
-### Generative AI with Groq
-HelpdeskAI utilizes Groq, a high-performance AI platform, to power its generative AI capabilities. This enables the system to:
+### Generative AI with multiple ai providers
+HelpdeskAI utilizes Litellm, a high-performance AI platform, to power its generative AI capabilities. This enables the system to:
 - Generate concise, context-aware responses.
 - Maintain a friendly, empathetic, and professional tone.
 - Adhere to strict guardrails to ensure accurate and relevant answers.
@@ -45,11 +45,6 @@ Static files, such as JavaScript widgets, are served to enable easy integration 
 ## Getting Started
 
 ### Prerequisites
-
-- Python 3.11+
-- A `.env` file with the following variables:
-  - `DATABASE_URL`: Connection string for the database.
-  - `GROQ_API_KEY`: API key for Groq integration.
 
 ### Installation
 
