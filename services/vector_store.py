@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Any, List, Optional
 from urllib.parse import urlparse
@@ -6,6 +7,7 @@ from dotenv import load_dotenv
 from pymilvus import MilvusClient
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 MILVUS_COLLECTION = os.getenv("JINA_MILVUS_COLLECTION", "documents_jina")
 VECTOR_DIM = int(os.getenv("JINA_EMBEDDING_DIMENSION", "1024"))
@@ -31,7 +33,7 @@ def ensure_collection() -> None:
     client = get_milvus_client()
     if client.has_collection(MILVUS_COLLECTION):
         return
-    print(f"[milvus] creating collection {MILVUS_COLLECTION} with dimension {VECTOR_DIM}")
+    logger.info("creating_milvus_collection collection=%s dimension=%s", MILVUS_COLLECTION, VECTOR_DIM)
     client.create_collection(
         collection_name=MILVUS_COLLECTION,
         dimension=VECTOR_DIM,

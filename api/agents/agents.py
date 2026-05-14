@@ -1,7 +1,6 @@
-from fastapi import UploadFile, File, Form, BackgroundTasks, Query
-import uuid as uuid_lib
+from fastapi import UploadFile, File, Form, Query
+import logging
 from db import models
-from services.file_parser import extract_text_from_pdf_file, extract_text_from_txt_file, extract_text_from_pdf, extract_text_from_txt
 from services.ai_prompt_builder import default_system_prompt
 from db import schemas
 from sqlalchemy.orm import Session
@@ -11,14 +10,11 @@ from typing import Optional
 from pydantic import BaseModel
 from utils.jwt import get_current_user
 from uuid import UUID
-from services.ingest_worker import process_kb_ingest_job
 from services.vector_store import delete_namespace
-from services.storage_quota import check_storage_quota, check_files_quota, increment_storage_usage
-from api.scrape.scrape import scrape_url_content
 from services.image_upload import ImageUploadError, upload_avatar_image
-import json
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 @router.post("/create", response_model=schemas.AgentOut)
 async def create_agent(
@@ -145,7 +141,7 @@ def delete_agent(agent_id: UUID, db: Session = Depends(get_db), user = Depends(g
         try:
             delete_namespace(cfg.vector_store_namespace)
         except Exception:
-            pass
+            logger.exception("failed_to_delete_agent_vectors agent_id=%s", agent_id)
     
     db.delete(agent)
     db.commit()

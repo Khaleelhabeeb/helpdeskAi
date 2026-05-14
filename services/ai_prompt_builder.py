@@ -1,3 +1,5 @@
+import os
+
 from litellm import completion
 
 def default_system_prompt(agent_name: str) -> str:

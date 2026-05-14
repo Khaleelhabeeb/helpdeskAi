@@ -1,17 +1,21 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from typing import Optional, List
 from sqlalchemy.orm import Session
 from db import schemas
 from api.auth.auth import get_db
 from db import models
 from utils.jwt import get_current_user
+import anyio
+import logging
 import uuid as uuid_lib
-from services.ingest_worker import process_kb_ingest_job
+from services.ingest_queue import enqueue_kb_ingest
+from services.kb_limits import PayloadTooLargeError, enforce_text_limit, read_upload_limited
 from services.vector_store import delete_for_kb
 from services.file_parser import extract_text_from_file
 from api.scrape.scrape import scrape_url_content
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def validate_uuid(uuid_str: str) -> bool:
@@ -30,19 +34,15 @@ async def add_knowledge_base(
     url: Optional[str] = Form(None),
     structured_text: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
-    background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):  
     agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
     if not agent:
-        print(f"[DEBUG /kb/add] ERROR: Agent not found - agent_id: {agent_id}, user_id: {user.id}")
         raise HTTPException(status_code=404, detail="Agent not found")
 
     provided = [bool(url), bool(structured_text), bool(file)]
-    print(f"[DEBUG /kb/add] Source validation - url: {bool(url)}, structured_text: {bool(structured_text)}, file: {bool(file)}")
     if sum(provided) != 1:
-        print(f"[DEBUG /kb/add] ERROR: Invalid source count - {sum(provided)} sources provided")
         raise HTTPException(status_code=400, detail="Provide exactly one of: url, structured_text, file")
 
     source_uri = None
@@ -56,14 +56,19 @@ async def add_knowledge_base(
         if not file:
             raise HTTPException(status_code=400, detail="File is required for upload_* source types")
         
-        # Read file content
-        file_content = await file.read()
+        try:
+            file_content = await read_upload_limited(file)
+        except PayloadTooLargeError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
         file_size_bytes = len(file_content)
         
         kb_id = str(uuid_lib.uuid4())
         original_filename = file.filename or f"upload-{kb_id}"
-        extracted_text = extract_text_from_file(file_content, original_filename)
-        extracted_size_bytes = len(extracted_text.encode('utf-8'))
+        try:
+            extracted_text = await anyio.to_thread.run_sync(extract_text_from_file, file_content, original_filename)
+            extracted_size_bytes = enforce_text_limit(extracted_text)
+        except PayloadTooLargeError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
         source_uri = original_filename
         
     # Handle URL scraping
@@ -74,7 +79,10 @@ async def add_knowledge_base(
         # Scrape URL content
         scraped_data = await scrape_url_content(url)
         extracted_text = scraped_data.get("text", "")
-        extracted_size_bytes = len(extracted_text.encode('utf-8'))
+        try:
+            extracted_size_bytes = enforce_text_limit(extracted_text)
+        except PayloadTooLargeError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
         
         kb_id = str(uuid_lib.uuid4())
         source_uri = url
@@ -85,7 +93,10 @@ async def add_knowledge_base(
         if not structured_text:
             raise HTTPException(status_code=400, detail="structured_text is required for source_type=text")
         
-        extracted_size_bytes = len(structured_text.encode('utf-8'))
+        try:
+            extracted_size_bytes = enforce_text_limit(structured_text)
+        except PayloadTooLargeError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
         
         kb_id = str(uuid_lib.uuid4())
         extracted_text = structured_text
@@ -110,8 +121,6 @@ async def add_knowledge_base(
     db.commit()
     db.refresh(kb)
 
-    print(f"[DEBUG /kb/add] KB created successfully - kb_id: {kb.id}, agent_id: {agent_id}")
-
     # Create ingest job
     job = models.KBIngestJob(
         kb_id=kb.id,
@@ -120,15 +129,9 @@ async def add_knowledge_base(
     db.add(job)
     db.commit()
 
-    print(f"[DEBUG /kb/add] Ingest job created - job_id: {job.id}")
+    if not enqueue_kb_ingest(str(job.id), extracted_text):
+        raise HTTPException(status_code=503, detail="Knowledge ingestion queue is full. Please try again shortly.")
 
-    if background_tasks is not None:
-        background_tasks.add_task(process_kb_ingest_job, str(job.id), extracted_text)
-        print(f"[DEBUG /kb/add] Background task added for job_id: {job.id}")
-    else:
-        process_kb_ingest_job(str(job.id), extracted_text)
-
-    print(f"[DEBUG /kb/add] SUCCESS - Returning KB response")
     return kb
 
 
@@ -165,13 +168,13 @@ def delete_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(get_curr
     if not agent:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    # Delete from Qdrant vector store
+    # Delete from vector store
     cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
     if cfg and cfg.vector_store_namespace:
         try:
             delete_for_kb(cfg.vector_store_namespace, str(kb.id))
         except Exception:
-            pass
+            logger.exception("failed_to_delete_kb_vectors kb_id=%s", kb_id)
     
     db.delete(kb)
     db.commit()
@@ -179,7 +182,7 @@ def delete_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(get_curr
 
 
 @router.post("/{kb_id}/reindex", response_model=schemas.KBIngestJobOut)
-def reindex_kb(kb_id: str, background_tasks: BackgroundTasks = None, db: Session = Depends(get_db), user = Depends(get_current_user)):
+async def reindex_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
     if not validate_uuid(kb_id):
         raise HTTPException(status_code=400, detail="Invalid KB ID format")
     
@@ -192,9 +195,12 @@ def reindex_kb(kb_id: str, background_tasks: BackgroundTasks = None, db: Session
 
     transient_text = None
     if kb.source_type == models.KBSourceType.url and kb.source_uri:
-        import anyio
-        scraped_data = anyio.run(scrape_url_content, kb.source_uri)
+        scraped_data = await scrape_url_content(kb.source_uri)
         transient_text = scraped_data.get("text", "")
+        try:
+            enforce_text_limit(transient_text)
+        except PayloadTooLargeError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
     elif kb.source_type != models.KBSourceType.url:
         raise HTTPException(status_code=400, detail="File/text sources must be uploaded again to retrain because raw source text is not stored.")
 
@@ -203,8 +209,8 @@ def reindex_kb(kb_id: str, background_tasks: BackgroundTasks = None, db: Session
     db.add(job)
     db.commit()
     db.refresh(job)
-    if background_tasks is not None:
-        background_tasks.add_task(process_kb_ingest_job, str(job.id), transient_text)
+    if not enqueue_kb_ingest(str(job.id), transient_text or ""):
+        raise HTTPException(status_code=503, detail="Knowledge ingestion queue is full. Please try again shortly.")
     return job
 
 

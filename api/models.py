@@ -1,10 +1,12 @@
 import httpx
+import logging
 from fastapi import APIRouter, Depends
 
 from utils.jwt import get_current_user
 from utils.env import get_secret
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 FALLBACK_GROQ_MODELS = [
     "groq/openai/gpt-oss-120b",
@@ -68,8 +70,8 @@ async def available_models(user=Depends(get_current_user)):
                 for item in payload.get("data", [])
                 if item.get("id")
             ]
-        except Exception as exc:
-            print(f"[WARN /models/available] Failed to fetch Groq models: {exc}")
+        except Exception:
+            logger.exception("failed_to_fetch_groq_models")
 
     if not models:
         models = FALLBACK_GROQ_MODELS

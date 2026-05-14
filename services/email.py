@@ -1,7 +1,9 @@
 import os
+import logging
 import sib_api_v3_sdk
 from sib_api_v3_sdk.rest import ApiException
-from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 # Configure API key
 configuration = sib_api_v3_sdk.Configuration()
@@ -22,6 +24,6 @@ def send_email(subject, html_content, to_email, to_name=None):
     try:
         api_instance.send_transac_email(email)
         return True
-    except ApiException as e:
-        print("Brevo email error:", e)
+    except ApiException:
+        logger.exception("brevo_email_failed to_email=%s subject=%s", to_email, subject)
         return False

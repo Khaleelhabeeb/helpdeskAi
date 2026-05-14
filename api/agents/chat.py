@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -15,6 +16,7 @@ from services.rag_service import build_messages, aretrieve_context, astream_answ
 from utils.jwt import get_current_user
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class ChatRequest(BaseModel):
@@ -49,7 +51,10 @@ async def chat_with_agent(
     namespace = cfg.vector_store_namespace if cfg else None
     context = ""
     if use_retrieval and namespace:
-        context = await aretrieve_context(db, namespace, str(agent.id), chat.message, top_k=top_k)
+        try:
+            context = await aretrieve_context(db, namespace, str(agent.id), chat.message, top_k=top_k)
+        except Exception:
+            logger.exception("chat_retrieval_failed agent_id=%s user_id=%s", agent.id, user.id)
 
     unique_id = chat.unique_id or str(uuid.uuid4())
     messages = build_messages(agent.instructions or "", context, chat.message)
@@ -72,7 +77,8 @@ async def chat_with_agent(
             )
             yield _sse("done", {"unique_id": unique_id})
         except Exception as exc:
-            yield _sse("error", {"detail": str(exc)})
+            logger.exception("chat_generation_failed agent_id=%s user_id=%s unique_id=%s", agent_id, user.id, unique_id)
+            yield _sse("error", {"detail": "Sorry, I could not answer that right now."})
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -89,5 +95,8 @@ def _log_usage(user_id, agent_id, message_content, response_content):
             timestamp=datetime.utcnow(),
         ))
         db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("usage_log_failed user_id=%s agent_id=%s", user_id, agent_id)
     finally:
         db.close()

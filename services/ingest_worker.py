@@ -1,3 +1,5 @@
+import logging
+from pathlib import Path
 from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
@@ -7,18 +9,23 @@ from services.rag_service import index_kb_text
 from dotenv import load_dotenv
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 
-def process_kb_ingest_job(job_id: str, transient_text: Optional[str] = None) -> None:
+def process_kb_ingest_job(
+    job_id: str,
+    transient_text: Optional[str] = None,
+    transient_text_path: Optional[str] = None,
+) -> None:
     """
-    Background task to process a KB ingest job.
+    Worker function to process a KB ingest job.
     - Looks up the job and KB
     - Marks job running, then succeeded/failed
     - Sets KB status accordingly
     - Does NOT store chunks or embeddings in Postgres
-    - Does NOT perform retrieval; this is a scaffold
+    - Writes embeddings to the configured vector store
 
-    transient_text: extracted source text supplied for one-time embedding.
+    transient_text_path: temporary spool file supplied by the ingest queue.
     """
     db: Session = SessionLocal()
     try:
@@ -45,14 +52,19 @@ def process_kb_ingest_job(job_id: str, transient_text: Optional[str] = None) -> 
 
         text_content: Optional[str] = None
         
-        if transient_text is not None and len(transient_text.strip()) > 0:
+        if transient_text_path:
+            text_content = Path(transient_text_path).read_text(encoding="utf-8")
+        elif transient_text is not None and len(transient_text.strip()) > 0:
             text_content = transient_text
 
         if not text_content or len(text_content.strip()) == 0:
             raise ValueError("No text content extracted for KB")
 
+        if not agent:
+            raise ValueError("Agent not found for KB")
         if not namespace:
             raise ValueError("Missing vector store namespace")
+
         def update_progress(done_chunks: int, total_chunks: int) -> None:
             job.total_chunks = total_chunks
             job.processed_chunks = done_chunks
@@ -78,6 +90,7 @@ def process_kb_ingest_job(job_id: str, transient_text: Optional[str] = None) -> 
         job.error = None
         db.commit()
     except Exception as e:
+        logger.exception("kb_ingest_job_failed job_id=%s", job_id)
         try:
             job = db.query(models.KBIngestJob).filter(models.KBIngestJob.id == job_id).first()
             if job:
@@ -90,4 +103,9 @@ def process_kb_ingest_job(job_id: str, transient_text: Optional[str] = None) -> 
         except SQLAlchemyError:
             db.rollback()
     finally:
+        if transient_text_path:
+            try:
+                Path(transient_text_path).unlink(missing_ok=True)
+            except Exception:
+                logger.warning("failed_to_remove_ingest_spool path=%s", transient_text_path)
         db.close()

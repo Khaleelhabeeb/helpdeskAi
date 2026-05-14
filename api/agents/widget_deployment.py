@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import time
 import uuid
 from datetime import datetime
@@ -20,6 +21,7 @@ from utils.jwt import get_current_user
 
 router = APIRouter()
 public_router = APIRouter()
+logger = logging.getLogger(__name__)
 
 DEFAULT_INITIAL_MESSAGES = ["Hi! What can I help you with?"]
 DEFAULT_ALLOWED_DOMAINS = ["localhost", "127.0.0.1"]
@@ -338,8 +340,8 @@ async def public_widget_chat(
     if use_retrieval and namespace:
         try:
             context = await aretrieve_context(db, namespace, str(agent.id), payload.message, top_k=top_k)
-        except Exception as exc:
-            print(f"[public widget chat] retrieval failed: {exc}")
+        except Exception:
+            logger.exception("public_widget_retrieval_failed deployment_id=%s agent_id=%s", deployment_id, agent.id)
 
     history = _history_for_prompt(db, session.id)
     messages = build_messages(agent.instructions or "", context, payload.message, history=history)
@@ -372,8 +374,8 @@ async def public_widget_chat(
             )
             
             yield _sse("done", {"session_id": str(session_id_value)})
-        except Exception as exc:
-            print(f"[public widget chat] generation failed: {exc}")
+        except Exception:
+            logger.exception("public_widget_generation_failed deployment_id=%s session_id=%s", deployment_id, session_id_value)
             yield _sse("error", {"detail": "Sorry, I could not answer that right now."})
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers=_origin_headers(request))
@@ -395,5 +397,8 @@ def _log_public_chat(session_id, user_id, agent_id, user_message, answer):
         if session:
             session.last_active_at = datetime.utcnow()
         db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("public_chat_log_failed session_id=%s agent_id=%s", session_id, agent_id)
     finally:
         db.close()

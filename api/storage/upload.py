@@ -1,20 +1,22 @@
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 import uuid as uuid_lib
+import anyio
 from services.file_parser import extract_text_from_file
 from services.ai_prompt_builder import generate_system_prompt_from_text
 from api.auth.auth import get_db
 from db import models
 from sqlalchemy.orm import Session
 from utils.jwt import get_current_user
-from services.ingest_worker import process_kb_ingest_job
+from services.ingest_queue import enqueue_kb_ingest
+from services.kb_limits import PayloadTooLargeError, enforce_text_limit, read_upload_limited
 from services.storage_quota import check_storage_quota, check_files_quota, increment_storage_usage
 
 router = APIRouter()
 
 @router.post("/upload")
 async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), legacy_prompt_update: bool = Form(False),
-                background_tasks: BackgroundTasks = None,
                 db: Session = Depends(get_db), user=Depends(get_current_user)):
+    filename = file.filename or "upload"
 
     # Check agent ownership
     agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
@@ -24,21 +26,20 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
     # Check quota limits
     check_files_quota(db, user)
 
-    # Read file content with size limit
-    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB limit
-    file_size_bytes = 0
-    chunks = []
-    while chunk := await file.read(1024 * 1024):
-        file_size_bytes += len(chunk)
-        if file_size_bytes > MAX_FILE_SIZE:
-            raise HTTPException(status_code=413, detail="File too large. Maximum size is 10MB.")
-        chunks.append(chunk)
-    file_content = b"".join(chunks)
+    try:
+        file_content = await read_upload_limited(file)
+    except PayloadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    file_size_bytes = len(file_content)
     
     # Check storage quota
     check_storage_quota(db, user, file_size_bytes)
 
-    extracted_text = extract_text_from_file(file_content, file.filename or "upload")
+    try:
+        extracted_text = await anyio.to_thread.run_sync(extract_text_from_file, file_content, filename)
+        extracted_size_bytes = enforce_text_limit(extracted_text)
+    except PayloadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
 
     if legacy_prompt_update:
         cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
@@ -53,21 +54,20 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
     kb_id = str(uuid_lib.uuid4())
     
     # Determine source type and file extension
-    if file.filename.lower().endswith(".pdf"):
+    if filename.lower().endswith(".pdf"):
         source_type = models.KBSourceType.upload_pdf
-    elif file.filename.lower().endswith(".txt"):
+    elif filename.lower().endswith(".txt"):
         source_type = models.KBSourceType.upload_txt
     else:
         source_type = models.KBSourceType.other
-    extracted_size_bytes = len(extracted_text.encode('utf-8'))
 
     kb = models.KnowledgeBase(
         id=kb_id,
         agent_id=agent.id,
         source_type=source_type,
-        source_uri=file.filename,
+        source_uri=filename,
         status=models.KBStatus.pending,
-        original_filename=file.filename,
+        original_filename=filename,
         file_size_bytes=file_size_bytes,
         extracted_size_bytes=extracted_size_bytes
     )
@@ -82,8 +82,7 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
     db.add(job)
     db.commit()
 
-    # Schedule background ingest (scaffold only)
-    if background_tasks is not None:
-        background_tasks.add_task(process_kb_ingest_job, str(job.id), extracted_text)
+    if not enqueue_kb_ingest(str(job.id), extracted_text):
+        raise HTTPException(status_code=503, detail="Knowledge ingestion queue is full. Please try again shortly.")
 
     return {"message": "Knowledge base added and ingest queued", "kb_id": str(kb.id)}

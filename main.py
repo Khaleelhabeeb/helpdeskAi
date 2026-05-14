@@ -1,3 +1,8 @@
+import logging
+import os
+import time
+import uuid
+
 from fastapi import FastAPI, Request, status, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -17,8 +22,61 @@ from api.analystics import analytic
 from fastapi.staticfiles import StaticFiles
 
 
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger("helpdeskai.api")
 limiter = Limiter(key_func=get_remote_address)
-app = FastAPI()
+is_prod = os.getenv("ENV") == "production"
+app = FastAPI(
+    docs_url=None if is_prod else "/docs",
+    redoc_url=None if is_prod else "/redoc",
+    openapi_url=None if is_prod else "/openapi.json",
+)
+frontend_url = os.getenv("FRONTEND_URL")
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    request.state.request_id = request_id
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = (time.perf_counter() - start) * 1000
+    response.headers["X-Request-ID"] = request_id
+    if not request.url.path.startswith(("/health", "/healthz")):
+        logger.info(
+            "request_completed request_id=%s method=%s path=%s status=%s duration_ms=%.2f",
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration_ms,
+        )
+    return response
+
+
+@app.get("/health", include_in_schema=False)
+@app.get("/healthz", include_in_schema=False)
+def health_check():
+    return {"status": "ok"}
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    request_id = getattr(request.state, "request_id", uuid.uuid4().hex)
+    logger.exception(
+        "unhandled_exception request_id=%s method=%s path=%s",
+        request_id,
+        request.method,
+        request.url.path,
+    )
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        headers={"X-Request-ID": request_id},
+        content={"detail": "Internal server error", "request_id": request_id},
+    )
 
 # Custom exception handler for 422 validation errors
 @app.exception_handler(RequestValidationError)
@@ -26,15 +84,20 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     # Extract form data safely
     try:
         body_str = str(exc.body) if exc.body else "No body"
-    except:
+    except Exception:
         body_str = "Could not serialize body"
+    if len(body_str) > 2000:
+        body_str = f"{body_str[:2000]}...<truncated>"
     
-    print(f"\n{'='*80}")
-    print(f"[VALIDATION ERROR] 422 Unprocessable Entity")
-    print(f"Endpoint: {request.method} {request.url.path}")
-    print(f"Errors: {exc.errors()}")
-    print(f"Body: {body_str}")
-    print(f"{'='*80}\n")
+    request_id = getattr(request.state, "request_id", "-")
+    logger.warning(
+        "validation_error request_id=%s method=%s path=%s errors=%s body=%s",
+        request_id,
+        request.method,
+        request.url.path,
+        exc.errors(),
+        body_str,
+    )
     
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -64,8 +127,6 @@ class PublicWidgetCORSMiddleware(BaseHTTPMiddleware):
 # rate limiting middleware
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-import os
 
 app.add_middleware(
     CORSMiddleware,

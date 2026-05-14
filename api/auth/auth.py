@@ -4,10 +4,9 @@ from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 import os
 from datetime import timedelta
-from db.database import SessionLocal
 from db import schemas
 from db import models
-from services.supabase_auth import get_supabase_client, upsert_local_user, verify_supabase_token
+from services.supabase_auth import get_db, get_supabase_client, upsert_local_user, verify_supabase_token
 from dotenv import load_dotenv
 from datetime import datetime
 from pydantic import BaseModel
@@ -31,13 +30,6 @@ def supabase_config():
     if not url or not anon_key:
         raise HTTPException(status_code=500, detail="Supabase config is missing")
     return {"url": url, "anon_key": anon_key}
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 @router.post("/signup")
 @limiter.limit("5/minute")

@@ -1,7 +1,9 @@
 import os
 import uuid
+import anyio
 import httpx
 from typing import Callable, Iterable, Iterator, List, Optional, AsyncIterator
+
 from litellm import completion, acompletion
 from sqlalchemy.orm import Session
 
@@ -117,7 +119,8 @@ async def aretrieve_context(db: Session, namespace: str, agent_id: str, query: s
     qvecs = await aembed_texts([query], task="retrieval.query")
     if not qvecs:
         return ""
-    return format_context(milvus_search(namespace, qvecs[0], top_k=top_k))
+    results = await anyio.to_thread.run_sync(lambda: milvus_search(namespace, qvecs[0], top_k=top_k))
+    return format_context(results)
 
 
 def build_messages(
