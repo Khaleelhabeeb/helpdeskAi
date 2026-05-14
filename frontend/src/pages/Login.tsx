@@ -34,6 +34,7 @@ export default function Login() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [isSubmitting, setSubmitting] = useState(false);
+  const [isGoogleLoading, setGoogleLoading] = useState(false);
   const navigate = useNavigate();
   const { signIn, signUp } = useAuth();
 
@@ -64,6 +65,7 @@ export default function Login() {
   const handleGoogleLogin = async () => {
     setError('');
     setNotice('');
+    setGoogleLoading(true);
     try {
       const config = await apiFetch<{ url: string; anon_key: string }>('/auth/supabase-config', { auth: false });
       const redirectTo = `${window.location.origin}/auth/callback`;
@@ -77,6 +79,7 @@ export default function Login() {
       window.location.assign(authorizeUrl.toString());
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not start Google sign-in.');
+      setGoogleLoading(false);
     }
   };
 
@@ -95,10 +98,11 @@ export default function Login() {
         <div className="space-y-4 mb-8">
           <button 
             onClick={handleGoogleLogin}
-            className="w-full flex items-center justify-center gap-3 bg-surface border border-surface-container-highest h-11 rounded-lg text-sm font-bold text-brand-primary hover:bg-surface-container-low transition-all"
+            disabled={isGoogleLoading}
+            className="w-full flex items-center justify-center gap-3 bg-surface border border-surface-container-highest h-11 rounded-lg text-sm font-bold text-brand-primary hover:bg-surface-container-low transition-all disabled:cursor-not-allowed disabled:opacity-70"
           >
             <img src="https://www.google.com/favicon.ico" alt="Google" className="w-4 h-4" />
-            Sign in with Google
+            {isGoogleLoading ? 'Connecting...' : 'Sign in with Google'}
           </button>
           
           <div className="relative">
