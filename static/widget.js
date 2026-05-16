@@ -459,12 +459,17 @@
     let moved = false;
     launcher.setPointerCapture?.(event.pointerId);
 
-    function onMove(moveEvent) {
-      const dx = Math.abs(moveEvent.clientX - startX);
-      const dy = Math.abs(moveEvent.clientY - startY);
-      if (dx > 4 || dy > 4) moved = true;
-      if (!moved) return;
-      moveEvent.preventDefault();
+  let rafId = null;
+  function onMove(moveEvent) {
+    const dx = Math.abs(moveEvent.clientX - startX);
+    const dy = Math.abs(moveEvent.clientY - startY);
+    if (dx > 4 || dy > 4) moved = true;
+    if (!moved) return;
+    moveEvent.preventDefault();
+
+    if (rafId) return;
+
+    rafId = requestAnimationFrame(() => {
       launcher.classList.add("hdai-dragging");
       const left = Math.max(8, Math.min(moveEvent.clientX - offsetX, window.innerWidth - launcher.offsetWidth - 8));
       const top = Math.max(8, Math.min(moveEvent.clientY - offsetY, window.innerHeight - launcher.offsetHeight - 8));
@@ -473,29 +478,39 @@
       launcher.style.right = "auto";
       launcher.style.bottom = "auto";
       if (state.open) positionPanelNearLauncher();
+      rafId = null;
+    });
+  }
+
+  function onUp() {
+    document.removeEventListener("pointermove", onMove);
+    document.removeEventListener("pointerup", onUp);
+    document.removeEventListener("pointercancel", onUp);
+    if (rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
     }
-
-    function onUp() {
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", onUp);
-      document.removeEventListener("pointercancel", onUp);
-      launcher.classList.remove("hdai-dragging");
-      if (moved) {
-        const nextRect = launcher.getBoundingClientRect();
-        savePosition(nextRect.left, nextRect.top);
-        state.dragMoved = true;
-      }
+    launcher.classList.remove("hdai-dragging");
+    if (moved) {
+      const nextRect = launcher.getBoundingClientRect();
+      savePosition(nextRect.left, nextRect.top);
+      state.dragMoved = true;
     }
+  }
 
-    document.addEventListener("pointermove", onMove, { passive: false });
-    document.addEventListener("pointerup", onUp);
-    document.addEventListener("pointercancel", onUp);
-  });
+  document.addEventListener("pointermove", onMove, { passive: false });
+  document.addEventListener("pointerup", onUp);
+  document.addEventListener("pointercancel", onUp);
+});
 
-  window.addEventListener("resize", function () {
+let resizeTimeout;
+window.addEventListener("resize", function () {
+  if (resizeTimeout) clearTimeout(resizeTimeout);
+  resizeTimeout = setTimeout(() => {
     applySavedLauncherPosition();
     if (state.open) positionPanelNearLauncher();
-  });
+  }, 100);
+});
 
   window.HelpdeskAIWidget = {
     open: function () {
