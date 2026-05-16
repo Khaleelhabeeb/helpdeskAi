@@ -83,7 +83,7 @@ async def aembed_texts(texts: Iterable[str], task: str = "retrieval.passage") ->
     return [item["embedding"] for item in data]
 
 
-def index_kb_text(
+async def aindex_kb_text(
     db: Session,
     user_id: int,
     agent_id: str,
@@ -101,9 +101,12 @@ def index_kb_text(
     for start in range(0, total_chunks, batch_size):
         end = min(start + batch_size, total_chunks)
         batch = chunks[start:end]
-        vectors = embed_texts(batch, task="retrieval.passage")
+        vectors = await aembed_texts(batch, task="retrieval.passage")
         ids = [str(uuid.uuid4()) for _ in batch]
-        upsert_texts(namespace, kb_id, agent_id, batch, vectors, ids=ids)
+        # Upsert is blocking, run in thread
+        await anyio.to_thread.run_sync(
+            lambda: upsert_texts(namespace, kb_id, agent_id, batch, vectors, ids=ids)
+        )
         if on_batch:
             on_batch(end, total_chunks)
 

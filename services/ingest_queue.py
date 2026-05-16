@@ -68,8 +68,9 @@ def _release_slot(future: Future) -> None:
         _slots.release()
 
 
+import asyncio
 def _run_job(job_id: str, spool_path: str) -> None:
-    process_kb_ingest_job(job_id, transient_text_path=spool_path)
+    asyncio.run(process_kb_ingest_job(job_id, transient_text_path=spool_path))
 
 
 def enqueue_kb_ingest(job_id: str, transient_text: str) -> bool:

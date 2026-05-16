@@ -5,14 +5,14 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from db.database import SessionLocal
 from db import models
-from services.rag_service import index_kb_text
+from services.rag_service import aindex_kb_text
 from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-def process_kb_ingest_job(
+async def process_kb_ingest_job(
     job_id: str,
     transient_text: Optional[str] = None,
     transient_text_path: Optional[str] = None,
@@ -71,7 +71,7 @@ def process_kb_ingest_job(
             kb.chunk_count = done_chunks
             db.commit()
 
-        chunk_count = index_kb_text(
+        chunk_count = await aindex_kb_text(
             db=db,
             user_id=agent.user_id,
             agent_id=str(agent.id),
