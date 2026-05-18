@@ -1,13 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy.orm import Session
-from db import schemas
-from api.auth.auth import get_db
-from db import models
-from utils.jwt import get_current_user
+from datetime import datetime
 from typing import Optional
 from uuid import UUID
-from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.orm import Session
+
+from api.auth.auth import get_db
+from db import models, schemas
 from models.widget_deployment import new_deployment_id
+from services import cache_keys
+from services.redis_client import cache_delete
+from utils.jwt import get_current_user
 
 router = APIRouter()
 
@@ -180,6 +183,7 @@ def update_agent_settings(
         db.commit()
         db.refresh(agent)
         db.refresh(config)
+        cache_delete(cache_keys.agent_runtime(agent.id))
         
         return {
             "success": True,
@@ -234,6 +238,7 @@ def reset_widget_settings(
     try:
         db.commit()
         db.refresh(config)
+        cache_delete(cache_keys.agent_runtime(agent.id))
         
         return {
             "success": True,

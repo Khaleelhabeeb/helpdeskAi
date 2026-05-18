@@ -71,6 +71,17 @@ Static files, such as JavaScript widgets, are served to enable easy integration 
 
 5. Access the API at `http://127.0.0.1:8000`.
 
+### Production Runtime
+
+Run the API and Celery worker as separate services:
+
+```bash
+gunicorn main:app -k uvicorn.workers.UvicornWorker --workers 2 --threads 1 --timeout 90
+celery -A services.celery_app worker --loglevel=INFO --concurrency=1 --prefetch-multiplier=1
+```
+
+Set `REDIS_URL`, `CELERY_BROKER_URL`, and `CELERY_RESULT_BACKEND` to the managed Redis instance.
+
 
 ## License
 

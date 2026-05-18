@@ -1,9 +1,12 @@
-import httpx
 import logging
+
+import httpx
 from fastapi import APIRouter, Depends
 
-from utils.jwt import get_current_user
+from services import cache_keys
+from services.redis_client import acache_get_json, acache_set_json
 from utils.env import get_secret
+from utils.jwt import get_current_user
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -19,6 +22,7 @@ FALLBACK_GROQ_MODELS = [
     "groq/qwen/qwen3-32b",
     "groq/gemma2-9b-it",
 ]
+
 
 def model_label(model: str) -> str:
     name = model.removeprefix("groq/")
@@ -53,6 +57,11 @@ def model_logo(model: str) -> str:
 
 @router.get("/available")
 async def available_models(user=Depends(get_current_user)):
+    cache_key = cache_keys.model_catalog()
+    cached = await acache_get_json(cache_key)
+    if cached:
+        return cached
+
     api_key = get_secret("GROQ_API_KEY", prefixes=("gsk_",))
     models = []
 
@@ -77,14 +86,16 @@ async def available_models(user=Depends(get_current_user)):
         models = FALLBACK_GROQ_MODELS
 
     groq_models = [
-            {
-                "id": model,
-                "label": model_label(model),
-                "provider": "groq",
-                "logo": model_logo(model),
-                "locked": False,
-            }
-            for model in sorted(set(models))
+        {
+            "id": model,
+            "label": model_label(model),
+            "provider": "groq",
+            "logo": model_logo(model),
+            "locked": False,
+        }
+        for model in sorted(set(models))
     ]
 
-    return {"models": groq_models}
+    response = {"models": groq_models}
+    await acache_set_json(cache_key, response, 3600)
+    return response

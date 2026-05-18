@@ -1,30 +1,33 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
-from typing import Optional, List
-from sqlalchemy.orm import Session
-from db import schemas
-from api.auth.auth import get_db
-from db import models
-from utils.jwt import get_current_user
 import anyio
 import logging
 import uuid as uuid_lib
+from typing import Optional
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from sqlalchemy.orm import Session
+
+from api.auth.auth import get_db
+from api.scrape.scrape import scrape_url_content
+from db import models, schemas
+from services import cache_keys
+from services.file_parser import extract_text_from_file
 from services.ingest_queue import enqueue_kb_ingest
 from services.kb_limits import PayloadTooLargeError, enforce_text_limit, read_upload_limited
+from services.redis_client import cache_delete
 from services.vector_store import delete_for_kb
-from services.file_parser import extract_text_from_file
-from api.scrape.scrape import scrape_url_content
+from utils.jwt import get_current_user
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
 def validate_uuid(uuid_str: str) -> bool:
-    # Validate if string is a valid UUID
     try:
         uuid_lib.UUID(uuid_str)
         return True
     except (ValueError, AttributeError):
         return False
+
 
 @router.post("/add", response_model=schemas.KnowledgeBaseOut)
 async def add_knowledge_base(
@@ -35,9 +38,13 @@ async def add_knowledge_base(
     structured_text: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
-    user = Depends(get_current_user)
-):  
-    agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
+    user=Depends(get_current_user),
+):
+    agent = (
+        db.query(models.Agent)
+        .filter(models.Agent.id == agent_id, models.Agent.user_id == user.id)
+        .first()
+    )
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
@@ -51,17 +58,16 @@ async def add_knowledge_base(
     extracted_size_bytes = 0
     extracted_text = ""
 
-    # Handle file upload (PDF/TXT)
     if source_type in (schemas.KBSourceType.upload_pdf, schemas.KBSourceType.upload_txt, schemas.KBSourceType.other):
         if not file:
             raise HTTPException(status_code=400, detail="File is required for upload_* source types")
-        
+
         try:
             file_content = await read_upload_limited(file)
         except PayloadTooLargeError as exc:
             raise HTTPException(status_code=413, detail=str(exc)) from exc
         file_size_bytes = len(file_content)
-        
+
         kb_id = str(uuid_lib.uuid4())
         original_filename = file.filename or f"upload-{kb_id}"
         try:
@@ -70,39 +76,36 @@ async def add_knowledge_base(
         except PayloadTooLargeError as exc:
             raise HTTPException(status_code=413, detail=str(exc)) from exc
         source_uri = original_filename
-        
-    # Handle URL scraping
+
     elif source_type == schemas.KBSourceType.url:
         if not url:
             raise HTTPException(status_code=400, detail="url is required for source_type=url")
-        
-        # Scrape URL content
+
         scraped_data = await scrape_url_content(url)
         extracted_text = scraped_data.get("text", "")
         try:
             extracted_size_bytes = enforce_text_limit(extracted_text)
         except PayloadTooLargeError as exc:
             raise HTTPException(status_code=413, detail=str(exc)) from exc
-        
+
         kb_id = str(uuid_lib.uuid4())
         source_uri = url
         original_filename = scraped_data.get("title", url)
-        
-    # Handle structured text
+
     elif source_type == schemas.KBSourceType.text:
         if not structured_text:
             raise HTTPException(status_code=400, detail="structured_text is required for source_type=text")
-        
+
         try:
             extracted_size_bytes = enforce_text_limit(structured_text)
         except PayloadTooLargeError as exc:
             raise HTTPException(status_code=413, detail=str(exc)) from exc
-        
+
         kb_id = str(uuid_lib.uuid4())
         extracted_text = structured_text
         source_uri = None
         original_filename = title or "Structured Text"
-        
+
     else:
         raise HTTPException(status_code=400, detail="Unsupported source_type")
 
@@ -115,38 +118,39 @@ async def add_knowledge_base(
         status=models.KBStatus.pending,
         original_filename=original_filename,
         file_size_bytes=file_size_bytes,
-        extracted_size_bytes=extracted_size_bytes
+        extracted_size_bytes=extracted_size_bytes,
     )
     db.add(kb)
     db.commit()
     db.refresh(kb)
 
-    # Create ingest job
-    job = models.KBIngestJob(
-        kb_id=kb.id,
-        state=models.JobState.queued
-    )
+    job = models.KBIngestJob(kb_id=kb.id, state=models.JobState.queued)
     db.add(job)
     db.commit()
 
     if not enqueue_kb_ingest(str(job.id), extracted_text):
-        raise HTTPException(status_code=503, detail="Knowledge ingestion queue is full. Please try again shortly.")
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge ingestion queue is full. Please try again shortly.",
+        )
+    cache_delete(cache_keys.dashboard_summary(user.id))
 
     return kb
 
 
-@router.get("/{agent_id}", response_model=List[schemas.KnowledgeBaseOut])
+@router.get("/{agent_id}", response_model=list[schemas.KnowledgeBaseOut])
 def list_kbs(
     agent_id: str,
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(100, ge=1, le=500, description="Max number of KBs to return"),
     db: Session = Depends(get_db),
-    user = Depends(get_current_user)
+    user=Depends(get_current_user),
 ):
-    agent = db.query(models.Agent).filter(
-        models.Agent.id == agent_id,
-        models.Agent.user_id == user.id
-    ).first()
+    agent = (
+        db.query(models.Agent)
+        .filter(models.Agent.id == agent_id, models.Agent.user_id == user.id)
+        .first()
+    )
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     return db.query(models.KnowledgeBase).filter(
@@ -155,41 +159,48 @@ def list_kbs(
 
 
 @router.delete("/{kb_id}")
-def delete_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+def delete_kb(kb_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
     if not validate_uuid(kb_id):
         raise HTTPException(status_code=400, detail="Invalid KB ID format")
-    
+
     kb = db.query(models.KnowledgeBase).filter(models.KnowledgeBase.id == kb_id).first()
     if not kb:
         raise HTTPException(status_code=404, detail="KB not found")
-    
-    # Check ownership via agent
-    agent = db.query(models.Agent).filter(models.Agent.id == kb.agent_id, models.Agent.user_id == user.id).first()
+
+    agent = (
+        db.query(models.Agent)
+        .filter(models.Agent.id == kb.agent_id, models.Agent.user_id == user.id)
+        .first()
+    )
     if not agent:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    # Delete from vector store
     cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
     if cfg and cfg.vector_store_namespace:
         try:
             delete_for_kb(cfg.vector_store_namespace, str(kb.id))
         except Exception:
             logger.exception("failed_to_delete_kb_vectors kb_id=%s", kb_id)
-    
+
     db.delete(kb)
     db.commit()
+    cache_delete(cache_keys.dashboard_summary(user.id))
     return {"message": "KB deleted"}
 
 
 @router.post("/{kb_id}/reindex", response_model=schemas.KBIngestJobOut)
-async def reindex_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+async def reindex_kb(kb_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
     if not validate_uuid(kb_id):
         raise HTTPException(status_code=400, detail="Invalid KB ID format")
-    
+
     kb = db.query(models.KnowledgeBase).filter(models.KnowledgeBase.id == kb_id).first()
     if not kb:
         raise HTTPException(status_code=404, detail="KB not found")
-    agent = db.query(models.Agent).filter(models.Agent.id == kb.agent_id, models.Agent.user_id == user.id).first()
+    agent = (
+        db.query(models.Agent)
+        .filter(models.Agent.id == kb.agent_id, models.Agent.user_id == user.id)
+        .first()
+    )
     if not agent:
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -202,7 +213,10 @@ async def reindex_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(g
         except PayloadTooLargeError as exc:
             raise HTTPException(status_code=413, detail=str(exc)) from exc
     elif kb.source_type != models.KBSourceType.url:
-        raise HTTPException(status_code=400, detail="File/text sources must be uploaded again to retrain because raw source text is not stored.")
+        raise HTTPException(
+            status_code=400,
+            detail="File/text sources must be uploaded again to retrain because raw source text is not stored.",
+        )
 
     kb.status = models.KBStatus.pending
     job = models.KBIngestJob(kb_id=kb.id, state=models.JobState.queued)
@@ -210,24 +224,31 @@ async def reindex_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(g
     db.commit()
     db.refresh(job)
     if not enqueue_kb_ingest(str(job.id), transient_text or ""):
-        raise HTTPException(status_code=503, detail="Knowledge ingestion queue is full. Please try again shortly.")
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge ingestion queue is full. Please try again shortly.",
+        )
+    cache_delete(cache_keys.dashboard_summary(user.id))
     return job
 
 
 @router.get("/{kb_id}/content")
-async def get_kb_content(kb_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
-    # Raw source text is intentionally not stored after embedding.
+async def get_kb_content(kb_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
     if not validate_uuid(kb_id):
         raise HTTPException(status_code=400, detail="Invalid KB ID format")
-    
+
     kb = db.query(models.KnowledgeBase).filter(models.KnowledgeBase.id == kb_id).first()
     if not kb:
         raise HTTPException(status_code=404, detail="KB not found")
-    
-    agent = db.query(models.Agent).filter(models.Agent.id == kb.agent_id, models.Agent.user_id == user.id).first()
+
+    agent = (
+        db.query(models.Agent)
+        .filter(models.Agent.id == kb.agent_id, models.Agent.user_id == user.id)
+        .first()
+    )
     if not agent:
         raise HTTPException(status_code=403, detail="Forbidden")
-    
+
     raise HTTPException(
         status_code=410,
         detail="Raw knowledge content is not stored after embedding. Only vectors and metadata are retained.",

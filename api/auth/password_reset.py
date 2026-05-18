@@ -1,12 +1,14 @@
+import os
+
 from fastapi import APIRouter, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-import os
 
 from db import schemas
+from services.rate_limit import limiter_storage_options
 from services.supabase_auth import get_supabase_client
 
-limiter = Limiter(key_func=get_remote_address)
+limiter = Limiter(key_func=get_remote_address, **limiter_storage_options())
 router = APIRouter()
 
 FRONTEND_URL = os.getenv("FRONTEND_URL")
@@ -38,5 +40,8 @@ async def reset_password(
 ):
     raise HTTPException(
         status_code=410,
-        detail="Password reset is handled by Supabase Auth. Use the Supabase recovery session on the frontend to update the password.",
+        detail=(
+            "Password reset is handled by Supabase Auth. Use the Supabase recovery session "
+            "on the frontend to update the password."
+        ),
     )
