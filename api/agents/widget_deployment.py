@@ -1,13 +1,14 @@
 import hashlib
 import json
 import logging
+import threading
 import time
 import uuid
 from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -27,8 +28,6 @@ DEFAULT_INITIAL_MESSAGES = ["Hi! What can I help you with?"]
 DEFAULT_ALLOWED_DOMAINS = ["localhost", "127.0.0.1"]
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 30
-_rate_buckets: dict[str, list[float]] = {}
-
 
 class WidgetDeploymentUpdate(BaseModel):
     display_name: Optional[str] = Field(None, min_length=1, max_length=120)
@@ -115,26 +114,50 @@ def _visitor_hash(deployment_id: int, visitor_id: str, request: Request) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-MAX_RATE_BUCKETS = 10000
+# High-performance Sliding Window Counter Rate Limiter
+_rate_limit_lock = threading.Lock()
+_rate_limit_data = {
+    "current_window": {},
+    "previous_window": {},
+    "last_window_start": 0
+}
+
 
 def _check_rate_limit(deployment_public_id: str, visitor_id: str, request: Request) -> None:
-    ip = request.client.host if request.client else "unknown"
-    key = f"{deployment_public_id}:{ip}:{visitor_id}"
     now = time.time()
-
-    if len(_rate_buckets) > MAX_RATE_BUCKETS:
-        for k in list(_rate_buckets.keys()):
-            _rate_buckets[k] = [stamp for stamp in _rate_buckets[k] if now - stamp < RATE_LIMIT_WINDOW_SECONDS]
-            if not _rate_buckets[k]:
-                del _rate_buckets[k]
-        if len(_rate_buckets) > MAX_RATE_BUCKETS:
-            _rate_buckets.clear()
-
-    bucket = [stamp for stamp in _rate_buckets.get(key, []) if now - stamp < RATE_LIMIT_WINDOW_SECONDS]
-    if len(bucket) >= RATE_LIMIT_MAX_REQUESTS:
-        raise HTTPException(status_code=429, detail="Too many messages. Please wait a moment.")
-    bucket.append(now)
-    _rate_buckets[key] = bucket
+    # Calculate the start of the current 60-second window
+    window_start = int(now / RATE_LIMIT_WINDOW_SECONDS) * RATE_LIMIT_WINDOW_SECONDS
+    
+    with _rate_limit_lock:
+        if window_start > _rate_limit_data["last_window_start"]:
+            # Rotate windows
+            if window_start > _rate_limit_data["last_window_start"] + RATE_LIMIT_WINDOW_SECONDS:
+                # If more than one window passed, clear both
+                _rate_limit_data["previous_window"] = {}
+            else:
+                _rate_limit_data["previous_window"] = _rate_limit_data["current_window"]
+            
+            _rate_limit_data["current_window"] = {}
+            _rate_limit_data["last_window_start"] = window_start
+            
+        ip = request.client.host if request.client else "unknown"
+        key = f"{deployment_public_id}:{ip}:{visitor_id}"
+        
+        # Sliding window approximation: 
+        # count = current_window_count + previous_window_count * (remaining_time_in_prev_window / total_time)
+        current_count = _rate_limit_data["current_window"].get(key, 0)
+        prev_count = _rate_limit_data["previous_window"].get(key, 0)
+        
+        elapsed = now - window_start
+        weight = (RATE_LIMIT_WINDOW_SECONDS - elapsed) / RATE_LIMIT_WINDOW_SECONDS
+        
+        estimated_count = current_count + (prev_count * weight)
+        
+        if estimated_count >= RATE_LIMIT_MAX_REQUESTS:
+            logger.warning("rate_limit_exceeded key=%s ip=%s", key, ip)
+            raise HTTPException(status_code=429, detail="Too many messages. Please wait a moment.")
+            
+        _rate_limit_data["current_window"][key] = current_count + 1
 
 
 def _deployment_out(deployment: models.WidgetDeployment, request: Request) -> dict:
@@ -268,14 +291,26 @@ def regenerate_widget_deployment(
 
 @public_router.get("/{deployment_id}/config")
 def get_public_widget_config(deployment_id: str, request: Request, db: Session = Depends(get_db)):
+    # Quick lookup for deployment metadata
     deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.deployment_id == deployment_id).first()
     if not deployment or not deployment.is_enabled:
         raise HTTPException(status_code=404, detail="Widget is not available")
+    
+    # ETag based on updated_at
+    etag = f'W/"{int(deployment.updated_at.timestamp())}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=_origin_headers(request))
+
     host = _origin_host(request)
     if not _host_allowed(host, deployment.allowed_domains or []):
         raise HTTPException(status_code=403, detail="This domain is not allowed to use this widget")
+        
+    headers = _origin_headers(request)
+    headers["ETag"] = etag
+    headers["Cache-Control"] = "public, max-age=60" # Cache for 60s
+    
     return JSONResponse(
-        headers=_origin_headers(request),
+        headers=headers,
         content={
             "deployment_id": deployment.deployment_id,
             "display_name": deployment.display_name,
