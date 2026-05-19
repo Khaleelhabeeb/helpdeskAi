@@ -1,6 +1,4 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 import os
 from datetime import timedelta
@@ -10,8 +8,9 @@ from services.supabase_auth import get_db, get_supabase_client, upsert_local_use
 from dotenv import load_dotenv
 from datetime import datetime
 from pydantic import BaseModel
+from utils.rate_limit import create_limiter
 
-limiter = Limiter(key_func=get_remote_address)
+limiter = create_limiter()
 router = APIRouter()
 
 load_dotenv()
@@ -21,6 +20,25 @@ class OAuthCodeExchange(BaseModel):
     code: str
     code_verifier: str
     redirect_to: str | None = None
+
+
+class RefreshTokenPayload(BaseModel):
+    refresh_token: str
+
+
+def _read_attr(obj, name: str, default=None):
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _extract_session_data(response):
+    session = _read_attr(response, "session", response)
+    access_token = _read_attr(session, "access_token")
+    refresh_token = _read_attr(session, "refresh_token")
+    return access_token, refresh_token
 
 
 @router.get("/supabase-config")
@@ -90,6 +108,27 @@ def google_callback(request: Request, code: str, db: Session = Depends(get_db)):
 @router.get("/verify")
 def verify_auth(user = Depends(verify_supabase_token)):
     return {"status": "valid", "user_id": user.id, "email": user.email}
+
+
+@router.post("/refresh")
+def refresh_session(payload: RefreshTokenPayload):
+    try:
+        response = get_supabase_client().auth.refresh_session(payload.refresh_token)
+    except Exception:
+        try:
+            response = get_supabase_client().auth.refresh_session({"refresh_token": payload.refresh_token})
+        except Exception as exc:
+            raise HTTPException(status_code=401, detail="Could not refresh session") from exc
+
+    access_token, refresh_token = _extract_session_data(response)
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Could not refresh session")
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+    }
 
 
 @router.post("/oauth/exchange")

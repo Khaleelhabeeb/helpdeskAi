@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from typing import Optional, List
+from datetime import datetime
 from sqlalchemy.orm import Session
 from db import schemas
 from api.auth.auth import get_db
@@ -12,7 +13,6 @@ from services.ingest_queue import enqueue_kb_ingest
 from services.kb_limits import PayloadTooLargeError, enforce_text_limit, read_upload_limited
 from services.vector_store import delete_for_kb
 from services.file_parser import extract_text_from_file
-from api.scrape.scrape import scrape_url_content
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -76,17 +76,9 @@ async def add_knowledge_base(
         if not url:
             raise HTTPException(status_code=400, detail="url is required for source_type=url")
         
-        # Scrape URL content
-        scraped_data = await scrape_url_content(url)
-        extracted_text = scraped_data.get("text", "")
-        try:
-            extracted_size_bytes = enforce_text_limit(extracted_text)
-        except PayloadTooLargeError as exc:
-            raise HTTPException(status_code=413, detail=str(exc)) from exc
-        
         kb_id = str(uuid_lib.uuid4())
         source_uri = url
-        original_filename = scraped_data.get("title", url)
+        original_filename = title or url
         
     # Handle structured text
     elif source_type == schemas.KBSourceType.text:
@@ -129,7 +121,8 @@ async def add_knowledge_base(
     db.add(job)
     db.commit()
 
-    if not enqueue_kb_ingest(str(job.id), extracted_text):
+    queue_text = extracted_text if source_type != schemas.KBSourceType.url else None
+    if not enqueue_kb_ingest(str(job.id), queue_text):
         raise HTTPException(status_code=503, detail="Knowledge ingestion queue is full. Please try again shortly.")
 
     return kb
@@ -193,23 +186,16 @@ async def reindex_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(g
     if not agent:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    transient_text = None
-    if kb.source_type == models.KBSourceType.url and kb.source_uri:
-        scraped_data = await scrape_url_content(kb.source_uri)
-        transient_text = scraped_data.get("text", "")
-        try:
-            enforce_text_limit(transient_text)
-        except PayloadTooLargeError as exc:
-            raise HTTPException(status_code=413, detail=str(exc)) from exc
-    elif kb.source_type != models.KBSourceType.url:
+    if kb.source_type != models.KBSourceType.url:
         raise HTTPException(status_code=400, detail="File/text sources must be uploaded again to retrain because raw source text is not stored.")
 
     kb.status = models.KBStatus.pending
+    kb.updated_at = datetime.utcnow()
     job = models.KBIngestJob(kb_id=kb.id, state=models.JobState.queued)
     db.add(job)
     db.commit()
     db.refresh(job)
-    if not enqueue_kb_ingest(str(job.id), transient_text or ""):
+    if not enqueue_kb_ingest(str(job.id), None):
         raise HTTPException(status_code=503, detail="Knowledge ingestion queue is full. Please try again shortly.")
     return job
 

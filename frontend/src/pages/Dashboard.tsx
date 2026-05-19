@@ -10,7 +10,7 @@ import {
 import { AppLayout } from '../components/Layout';
 import { cn } from '../lib/utils';
 import { useEffect, useMemo, useState } from 'react';
-import { Agent, apiFetch, CreditsInfo, formatRelative, KnowledgeBase } from '../lib/api';
+import { Agent, apiFetch, CreditsInfo, formatRelative } from '../lib/api';
 
 type Activity = {
   timestamp: string;
@@ -54,25 +54,9 @@ export default function Dashboard() {
       setLoading(true);
       setError('');
       try {
-        const [agents, credits, interactions, activity] = await Promise.all([
-          apiFetch<Agent[]>('/agents/'),
-          apiFetch<CreditsInfo>('/users/credits').catch(() => null),
-          apiFetch<DashboardData['interactions']>('/kpi/agent-interactions').catch(() => null),
-          apiFetch<DashboardData['activity']>('/kpi/activity-timeline').catch(() => null),
-        ]);
-
-        const kbLists = await Promise.all(
-          agents.slice(0, 25).map((agent) => apiFetch<KnowledgeBase[]>(`/kb/${agent.id}`).catch(() => [])),
-        );
-
+        const summary = await apiFetch<DashboardData>('/dashboard/summary');
         if (!cancelled) {
-          setData({
-            agents,
-            credits,
-            interactions,
-            activity,
-            knowledgeCount: kbLists.reduce((sum, list) => sum + list.length, 0),
-          });
+          setData(summary);
         }
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load dashboard');

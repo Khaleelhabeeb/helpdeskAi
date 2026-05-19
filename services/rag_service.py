@@ -1,17 +1,25 @@
+import hashlib
 import os
 import uuid
 import anyio
 import httpx
 from typing import Callable, Iterable, Iterator, List, Optional, AsyncIterator
 
-from litellm import completion, acompletion
 from sqlalchemy.orm import Session
 
+from services.http_client import default_timeout, get_async_http_client
+from services.redis_client import aredis_get_json, aredis_set_json, cache_key
 from services.vector_store import format_context, search as milvus_search, upsert_texts
 from utils.env import get_secret
 
 JINA_EMBED_MODEL = os.getenv("JINA_EMBED_MODEL", "jina-embeddings-v5-text-small")
 JINA_EMBEDDING_URL = os.getenv("JINA_EMBEDDING_URL", "https://api.jina.ai/v1/embeddings")
+JINA_EMBED_MAX_CONCURRENCY = int(os.getenv("JINA_EMBED_MAX_CONCURRENCY", "4"))
+LLM_STREAM_MAX_CONCURRENCY = int(os.getenv("LLM_STREAM_MAX_CONCURRENCY", "8"))
+RAG_CONTEXT_CACHE_TTL_SECONDS = int(os.getenv("RAG_CONTEXT_CACHE_TTL_SECONDS", "180"))
+RAG_RETRIEVAL_TIMEOUT_SECONDS = float(os.getenv("RAG_RETRIEVAL_TIMEOUT_SECONDS", "15"))
+_embed_semaphore = anyio.Semaphore(JINA_EMBED_MAX_CONCURRENCY)
+_llm_semaphore = anyio.Semaphore(LLM_STREAM_MAX_CONCURRENCY)
 CONCISE_RUNTIME_INSTRUCTION = """### Response Style
 - Keep answers concise and easy to scan.
 - Prefer 1-3 short paragraphs.
@@ -48,7 +56,7 @@ def embed_texts(texts: Iterable[str], task: str = "retrieval.passage") -> List[L
         "normalized": True,
         "input": values,
     }
-    with httpx.Client(timeout=60.0) as client:
+    with httpx.Client(timeout=default_timeout()) as client:
         response = client.post(
             JINA_EMBEDDING_URL,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -72,7 +80,8 @@ async def aembed_texts(texts: Iterable[str], task: str = "retrieval.passage") ->
         "normalized": True,
         "input": values,
     }
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with _embed_semaphore:
+        client = await get_async_http_client()
         response = await client.post(
             JINA_EMBEDDING_URL,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -119,11 +128,21 @@ def retrieve_context(db: Session, namespace: str, agent_id: str, query: str, top
 
 
 async def aretrieve_context(db: Session, namespace: str, agent_id: str, query: str, top_k: int = 4) -> str:
-    qvecs = await aembed_texts([query], task="retrieval.query")
-    if not qvecs:
-        return ""
-    results = await anyio.to_thread.run_sync(lambda: milvus_search(namespace, qvecs[0], top_k=top_k))
-    return format_context(results)
+    query_hash = hashlib.sha256(query.strip().lower().encode("utf-8")).hexdigest()
+    cache_id = cache_key("rag", "context", namespace, top_k, query_hash)
+    cached_context = await aredis_get_json(cache_id)
+    if isinstance(cached_context, str):
+        return cached_context
+
+    with anyio.fail_after(RAG_RETRIEVAL_TIMEOUT_SECONDS):
+        qvecs = await aembed_texts([query], task="retrieval.query")
+        if not qvecs:
+            return ""
+        results = await anyio.to_thread.run_sync(lambda: milvus_search(namespace, qvecs[0], top_k=top_k))
+        context = format_context(results)
+    if context:
+        await aredis_set_json(cache_id, context, RAG_CONTEXT_CACHE_TTL_SECONDS)
+    return context
 
 
 def build_messages(
@@ -143,6 +162,8 @@ def build_messages(
 
 
 def generate_answer(model: str, messages: list[dict[str, str]]) -> str:
+    from litellm import completion
+
     if model.startswith("groq/"):
         groq_key = get_secret("GROQ_API_KEY", prefixes=("gsk_",))
         if groq_key:
@@ -152,6 +173,8 @@ def generate_answer(model: str, messages: list[dict[str, str]]) -> str:
 
 
 def stream_answer(model: str, messages: list[dict[str, str]]) -> Iterator[str]:
+    from litellm import completion
+
     if model.startswith("groq/"):
         groq_key = get_secret("GROQ_API_KEY", prefixes=("gsk_",))
         if groq_key:
@@ -164,13 +187,16 @@ def stream_answer(model: str, messages: list[dict[str, str]]) -> Iterator[str]:
 
 
 async def astream_answer(model: str, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+    from litellm import acompletion
+
     if model.startswith("groq/"):
         groq_key = get_secret("GROQ_API_KEY", prefixes=("gsk_",))
         if groq_key:
             os.environ["GROQ_API_KEY"] = groq_key
-    response = await acompletion(model=model, messages=messages, temperature=0.2, max_tokens=700, stream=True)
-    async for chunk in response:
-        delta = chunk.choices[0].delta
-        content = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)
-        if content:
-            yield content
+    async with _llm_semaphore:
+        response = await acompletion(model=model, messages=messages, temperature=0.2, max_tokens=700, stream=True)
+        async for chunk in response:
+            delta = chunk.choices[0].delta
+            content = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)
+            if content:
+                yield content

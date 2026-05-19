@@ -1,80 +1,21 @@
-from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile
-from typing import Optional
-from sqlalchemy.orm import Session
-from db import database
-from db import models
-from db import schemas
-from utils.jwt import get_current_user
-import httpx
-from bs4 import BeautifulSoup
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
+from services.web_scraper import scrape_url_content
+from utils.jwt import get_current_user
+from utils.rate_limit import create_limiter
+
+
 router = APIRouter()
+limiter = create_limiter()
 
 
 class ScrapeRequest(BaseModel):
     url: str
 
 
-import socket
-import ipaddress
-from urllib.parse import urlparse
-
-def is_safe_url(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return False
-        hostname = parsed.hostname
-        if not hostname:
-            return False
-        ip = socket.gethostbyname(hostname)
-        ip_obj = ipaddress.ip_address(ip)
-        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_multicast:
-            return False
-        return True
-    except Exception:
-        return False
-
-async def scrape_url_content(url: str) -> dict:
-    if not is_safe_url(url):
-        raise HTTPException(status_code=400, detail="Invalid or restricted URL provided")
-    # Returns dict with 'text', 'title', and 'timestamp' for compatibility
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Extract title
-        title_tag = soup.find('title')
-        title = title_tag.get_text(strip=True) if title_tag else url
-        
-        # Extract content
-        content = []
-        for tag in soup.find_all(['h1', 'h2', 'h3', 'p', 'li']):
-            text = tag.get_text(strip=True)
-            if text:
-                if tag.name in ['h1', 'h2', 'h3']:
-                    content.append(f"\n{tag.name.upper()}: {text}\n")
-                else:
-                    content.append(text)
-        structured_text = '\n'.join(content)
-        if not structured_text:
-            raise ValueError("No content extracted from URL")
-        
-        from datetime import datetime
-        return {
-            "text": structured_text,
-            "title": title,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to scrape URL: {str(e)}")
-
 @router.post("/scrape")
-async def scrape_url(request: ScrapeRequest):
-    # logger.debug(f"Received scrape request for URL: {request.url}")
-    result = await scrape_url_content(request.url)
+@limiter.limit("10/minute")
+async def scrape_url(request: Request, body: ScrapeRequest, user=Depends(get_current_user)):
+    result = await scrape_url_content(body.url)
     return {"structured_text": result["text"], "title": result.get("title", "")}
-

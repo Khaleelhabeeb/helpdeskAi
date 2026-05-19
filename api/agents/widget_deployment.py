@@ -17,6 +17,13 @@ from api.auth.auth import get_db
 from db import models
 from db.database import SessionLocal
 from models.widget_deployment import new_deployment_id
+from services.redis_client import (
+    cache_key,
+    get_async_redis,
+    redis_delete,
+    redis_get_json,
+    redis_set_json,
+)
 from services.rag_service import build_messages, aretrieve_context, astream_answer
 from utils.jwt import get_current_user
 
@@ -28,6 +35,8 @@ DEFAULT_INITIAL_MESSAGES = ["Hi! What can I help you with?"]
 DEFAULT_ALLOWED_DOMAINS = ["localhost", "127.0.0.1"]
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 30
+WIDGET_CONFIG_CACHE_TTL_SECONDS = 300
+FALLBACK_RATE_LIMIT_MAX_KEYS = 5000
 
 class WidgetDeploymentUpdate(BaseModel):
     display_name: Optional[str] = Field(None, min_length=1, max_length=120)
@@ -123,7 +132,29 @@ _rate_limit_data = {
 }
 
 
-def _check_rate_limit(deployment_public_id: str, visitor_id: str, request: Request) -> None:
+async def _check_rate_limit(deployment_public_id: str, visitor_id: str, request: Request) -> None:
+    ip = request.client.host if request.client else "unknown"
+    redis_client = get_async_redis()
+    redis_key = cache_key(
+        "ratelimit",
+        "widget",
+        deployment_public_id,
+        hashlib.sha256(ip.encode("utf-8")).hexdigest(),
+    )
+    if redis_client:
+        try:
+            count = await redis_client.incr(redis_key)
+            if count == 1:
+                await redis_client.expire(redis_key, RATE_LIMIT_WINDOW_SECONDS)
+            if count > RATE_LIMIT_MAX_REQUESTS:
+                logger.warning("rate_limit_exceeded deployment_id=%s ip=%s", deployment_public_id, ip)
+                raise HTTPException(status_code=429, detail="Too many messages. Please wait a moment.")
+            return
+        except HTTPException:
+            raise
+        except Exception:
+            logger.warning("redis_rate_limit_failed deployment_id=%s", deployment_public_id, exc_info=True)
+
     now = time.time()
     # Calculate the start of the current 60-second window
     window_start = int(now / RATE_LIMIT_WINDOW_SECONDS) * RATE_LIMIT_WINDOW_SECONDS
@@ -140,8 +171,7 @@ def _check_rate_limit(deployment_public_id: str, visitor_id: str, request: Reque
             _rate_limit_data["current_window"] = {}
             _rate_limit_data["last_window_start"] = window_start
             
-        ip = request.client.host if request.client else "unknown"
-        key = f"{deployment_public_id}:{ip}:{visitor_id}"
+        key = f"{deployment_public_id}:{ip}"
         
         # Sliding window approximation: 
         # count = current_window_count + previous_window_count * (remaining_time_in_prev_window / total_time)
@@ -158,6 +188,8 @@ def _check_rate_limit(deployment_public_id: str, visitor_id: str, request: Reque
             raise HTTPException(status_code=429, detail="Too many messages. Please wait a moment.")
             
         _rate_limit_data["current_window"][key] = current_count + 1
+        if len(_rate_limit_data["current_window"]) > FALLBACK_RATE_LIMIT_MAX_KEYS:
+            _rate_limit_data["current_window"].pop(next(iter(_rate_limit_data["current_window"])), None)
 
 
 def _deployment_out(deployment: models.WidgetDeployment, request: Request) -> dict:
@@ -177,6 +209,39 @@ def _deployment_out(deployment: models.WidgetDeployment, request: Request) -> di
         "is_enabled": deployment.is_enabled,
         "embed_script": embed_script,
     }
+
+
+def _widget_config_cache_key(deployment_id: str) -> str:
+    return cache_key("widget", "config", deployment_id)
+
+
+def invalidate_widget_config_cache(deployment_id: str) -> None:
+    redis_delete(_widget_config_cache_key(deployment_id))
+
+
+def _public_widget_config_payload(db: Session, deployment_id: str) -> Optional[dict]:
+    cache_id = _widget_config_cache_key(deployment_id)
+    cached = redis_get_json(cache_id)
+    if isinstance(cached, dict):
+        return cached
+
+    deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.deployment_id == deployment_id).first()
+    if not deployment or not deployment.is_enabled:
+        return None
+
+    updated_at = deployment.updated_at or datetime.utcnow()
+    payload = {
+        "deployment_id": deployment.deployment_id,
+        "display_name": deployment.display_name,
+        "logo_url": deployment.logo_url or "",
+        "initial_messages": deployment.initial_messages or DEFAULT_INITIAL_MESSAGES,
+        "theme": deployment.theme,
+        "primary_color": deployment.primary_color,
+        "allowed_domains": deployment.allowed_domains or [],
+        "etag": f'W/"{int(updated_at.timestamp())}"',
+    }
+    redis_set_json(cache_id, payload, WIDGET_CONFIG_CACHE_TTL_SECONDS)
+    return payload
 
 
 def _get_or_create_deployment(db: Session, agent: models.Agent) -> models.WidgetDeployment:
@@ -268,6 +333,7 @@ def update_widget_deployment(
     deployment.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(deployment)
+    invalidate_widget_config_cache(deployment.deployment_id)
     return _deployment_out(deployment, request)
 
 
@@ -282,29 +348,33 @@ def regenerate_widget_deployment(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     deployment = _get_or_create_deployment(db, agent)
+    old_deployment_id = deployment.deployment_id
     deployment.deployment_id = new_deployment_id()
     deployment.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(deployment)
+    invalidate_widget_config_cache(old_deployment_id)
+    invalidate_widget_config_cache(deployment.deployment_id)
     return _deployment_out(deployment, request)
 
 
 @public_router.get("/{deployment_id}/config")
 def get_public_widget_config(deployment_id: str, request: Request, db: Session = Depends(get_db)):
-    # Quick lookup for deployment metadata
-    deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.deployment_id == deployment_id).first()
-    if not deployment or not deployment.is_enabled:
+    config = _public_widget_config_payload(db, deployment_id)
+    if not config:
         raise HTTPException(status_code=404, detail="Widget is not available")
-    
-    # ETag based on updated_at
-    etag = f'W/"{int(deployment.updated_at.timestamp())}"'
-    if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers=_origin_headers(request))
 
     host = _origin_host(request)
-    if not _host_allowed(host, deployment.allowed_domains or []):
+    if not _host_allowed(host, config.get("allowed_domains") or []):
         raise HTTPException(status_code=403, detail="This domain is not allowed to use this widget")
-        
+
+    etag = str(config.get("etag") or "")
+    if request.headers.get("if-none-match") == etag:
+        headers = _origin_headers(request)
+        headers["ETag"] = etag
+        headers["Cache-Control"] = "public, max-age=60"
+        return Response(status_code=304, headers=headers)
+
     headers = _origin_headers(request)
     headers["ETag"] = etag
     headers["Cache-Control"] = "public, max-age=60" # Cache for 60s
@@ -312,12 +382,12 @@ def get_public_widget_config(deployment_id: str, request: Request, db: Session =
     return JSONResponse(
         headers=headers,
         content={
-            "deployment_id": deployment.deployment_id,
-            "display_name": deployment.display_name,
-            "logo_url": deployment.logo_url or "",
-            "initial_messages": deployment.initial_messages or DEFAULT_INITIAL_MESSAGES,
-            "theme": deployment.theme,
-            "primary_color": deployment.primary_color,
+            "deployment_id": config["deployment_id"],
+            "display_name": config["display_name"],
+            "logo_url": config["logo_url"],
+            "initial_messages": config["initial_messages"],
+            "theme": config["theme"],
+            "primary_color": config["primary_color"],
         },
     )
 
@@ -338,7 +408,7 @@ async def public_widget_chat(
         raise HTTPException(status_code=403, detail="This domain is not allowed to use this widget")
 
     visitor_id = payload.visitor_id or "anonymous"
-    _check_rate_limit(deployment.deployment_id, visitor_id, request)
+    await _check_rate_limit(deployment.deployment_id, visitor_id, request)
 
     agent = deployment.agent
     if not agent or not agent.instructions:

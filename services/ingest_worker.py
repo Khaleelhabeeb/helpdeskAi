@@ -6,6 +6,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from db.database import SessionLocal
 from db import models
 from services.rag_service import aindex_kb_text
+from services.kb_limits import enforce_text_limit
+from services.web_scraper import scrape_url_content
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -56,6 +58,12 @@ async def process_kb_ingest_job(
             text_content = Path(transient_text_path).read_text(encoding="utf-8")
         elif transient_text is not None and len(transient_text.strip()) > 0:
             text_content = transient_text
+        elif kb.source_type == models.KBSourceType.url and kb.source_uri:
+            scraped_data = await scrape_url_content(kb.source_uri)
+            text_content = scraped_data.get("text", "")
+            kb.title = kb.title or scraped_data.get("title")
+            kb.extracted_size_bytes = enforce_text_limit(text_content)
+            db.commit()
 
         if not text_content or len(text_content.strip()) == 0:
             raise ValueError("No text content extracted for KB")

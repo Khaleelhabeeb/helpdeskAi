@@ -1,7 +1,3 @@
-import os
-
-from litellm import completion
-
 def default_system_prompt(agent_name: str) -> str:
     return f"""### Role
 - Primary Function: You are {agent_name}, a customer support agent here to assist users based on specific training data provided. Your main objective is to inform, clarify, and answer questions strictly related to this training data and your role.
@@ -45,6 +41,8 @@ def generate_system_prompt_from_text(training_text: str, agent_name: str) -> str
 
 
 def send_message_to_groq(system_prompt: str, user_message: str) -> str:
+    from litellm import completion
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message}

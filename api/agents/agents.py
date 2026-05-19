@@ -12,9 +12,14 @@ from utils.jwt import get_current_user
 from uuid import UUID
 from services.vector_store import delete_namespace
 from services.image_upload import ImageUploadError, upload_avatar_image
+from services.kb_limits import PayloadTooLargeError, read_upload_limited
+from services.redis_client import cache_key, redis_delete
+import os
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+MAX_AVATAR_BYTES = int(os.getenv("MAX_AVATAR_BYTES", str(2 * 1024 * 1024)))
+ALLOWED_AVATAR_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 
 @router.post("/create", response_model=schemas.AgentOut)
 async def create_agent(
@@ -68,7 +73,12 @@ async def update_agent_avatar(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    file_bytes = await avatar.read()
+    if avatar.content_type and avatar.content_type not in ALLOWED_AVATAR_TYPES:
+        raise HTTPException(status_code=400, detail="Avatar must be a PNG, JPEG, WebP, or GIF image")
+    try:
+        file_bytes = await read_upload_limited(avatar, max_bytes=MAX_AVATAR_BYTES)
+    except PayloadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Avatar file is empty")
 
@@ -81,6 +91,7 @@ async def update_agent_avatar(
     deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.agent_id == agent.id).first()
     if deployment:
         deployment.logo_url = result.url
+        redis_delete(cache_key("widget", "config", deployment.deployment_id))
     db.commit()
     db.refresh(agent)
     return agent

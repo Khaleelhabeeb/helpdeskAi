@@ -5,11 +5,11 @@ import uuid
 
 from fastapi import FastAPI, Request, status, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from api.agents import agents, chat, knowledge_base, settings, widget_deployment
 from api.auth import auth, password_reset
@@ -20,6 +20,9 @@ from api import models as model_catalog
 from db.database import Base, engine
 from api.analystics import analytic
 from fastapi.staticfiles import StaticFiles
+from services.http_client import close_http_clients
+from services.redis_client import close_redis_clients
+from utils.rate_limit import create_limiter
 
 
 logging.basicConfig(
@@ -27,7 +30,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger("helpdeskai.api")
-limiter = Limiter(key_func=get_remote_address)
+limiter = create_limiter()
 is_prod = os.getenv("ENV") == "production"
 app = FastAPI(
     docs_url=None if is_prod else "/docs",
@@ -135,7 +138,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(PublicWidgetCORSMiddleware)
+
+
+@app.on_event("shutdown")
+async def close_shared_clients():
+    await close_http_clients(close_all=True)
+    await close_redis_clients(close_all=True)
 
 
 app.include_router(auth.router, prefix="/auth")

@@ -1,12 +1,11 @@
 from fastapi import APIRouter, HTTPException, Request
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 import os
 
 from db import schemas
 from services.supabase_auth import get_supabase_client
+from utils.rate_limit import create_limiter
 
-limiter = Limiter(key_func=get_remote_address)
+limiter = create_limiter()
 router = APIRouter()
 
 FRONTEND_URL = os.getenv("FRONTEND_URL")

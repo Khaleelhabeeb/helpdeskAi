@@ -1,6 +1,6 @@
-from litellm import completion
-
 def send_message_to_groq(system_prompt: str, user_message: str) -> str:
+    from litellm import completion
+
     response = completion(
         model="groq/openai/gpt-oss-20b",
         messages=[

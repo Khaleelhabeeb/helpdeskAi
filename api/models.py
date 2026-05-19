@@ -1,12 +1,14 @@
-import httpx
 import logging
 from fastapi import APIRouter, Depends
 
+from services.http_client import get_async_http_client
+from services.redis_client import aredis_get_json, aredis_set_json, cache_key
 from utils.jwt import get_current_user
 from utils.env import get_secret
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+MODELS_CACHE_TTL_SECONDS = 60 * 60
 
 FALLBACK_GROQ_MODELS = [
     "groq/openai/gpt-oss-120b",
@@ -53,16 +55,22 @@ def model_logo(model: str) -> str:
 
 @router.get("/available")
 async def available_models(user=Depends(get_current_user)):
+    cache_id = cache_key("models", "available", "groq")
+    cached = await aredis_get_json(cache_id)
+    if isinstance(cached, list) and cached:
+        return {"models": cached}
+
     api_key = get_secret("GROQ_API_KEY", prefixes=("gsk_",))
     models = []
 
     if api_key:
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    "https://api.groq.com/openai/v1/models",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                )
+            client = await get_async_http_client()
+            response = await client.get(
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=10.0,
+            )
             response.raise_for_status()
             payload = response.json()
             models = [
@@ -86,5 +94,6 @@ async def available_models(user=Depends(get_current_user)):
             }
             for model in sorted(set(models))
     ]
+    await aredis_set_json(cache_id, groq_models, MODELS_CACHE_TTL_SECONDS)
 
     return {"models": groq_models}

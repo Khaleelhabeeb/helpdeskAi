@@ -1,16 +1,17 @@
-from PyPDF2 import PdfReader
 from typing import BinaryIO
 import re
 from io import BytesIO
 from zipfile import ZipFile
-import defusedxml.ElementTree as ElementTree
 
 def extract_text_from_pdf_file(file: BinaryIO) -> str:
+    from PyPDF2 import PdfReader
+
     reader = PdfReader(file)
-    text = ""
+    pages: list[str] = []
     for page in reader.pages:
         page_text = page.extract_text() or ""
-        text += page_text + " "
+        pages.append(page_text)
+    text = " ".join(pages)
     
     text = re.sub(r'\n+', '\n', text)
     text = re.sub(r'\s+', ' ', text)   
@@ -34,6 +35,8 @@ def extract_text_from_txt(file_bytes: bytes) -> str:
 
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
+    import defusedxml.ElementTree as ElementTree
+
     with ZipFile(BytesIO(file_bytes)) as docx:
         xml = docx.read("word/document.xml")
     root = ElementTree.fromstring(xml)

@@ -5,10 +5,13 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from threading import BoundedSemaphore
+from typing import Optional
 
 from db import models
 from db.database import SessionLocal
+from services.http_client import close_http_clients
 from services.ingest_worker import process_kb_ingest_job
+from services.redis_client import close_redis_clients
 
 
 logger = logging.getLogger(__name__)
@@ -69,20 +72,28 @@ def _release_slot(future: Future) -> None:
 
 
 import asyncio
-def _run_job(job_id: str, spool_path: str) -> None:
-    asyncio.run(process_kb_ingest_job(job_id, transient_text_path=spool_path))
+def _run_job(job_id: str, spool_path: Optional[str]) -> None:
+    async def runner() -> None:
+        try:
+            await process_kb_ingest_job(job_id, transient_text_path=spool_path)
+        finally:
+            await close_http_clients()
+            await close_redis_clients()
+
+    asyncio.run(runner())
 
 
-def enqueue_kb_ingest(job_id: str, transient_text: str) -> bool:
+def enqueue_kb_ingest(job_id: str, transient_text: Optional[str] = None) -> bool:
     if not _slots.acquire(blocking=False):
         message = "Knowledge ingestion queue is full. Please try again shortly."
         _mark_job_failed(job_id, message)
         logger.warning("ingest_queue_full job_id=%s", job_id)
         return False
 
-    spool_path = ""
+    spool_path: Optional[str] = None
     try:
-        spool_path = _write_spool_file(job_id, transient_text)
+        if transient_text is not None:
+            spool_path = _write_spool_file(job_id, transient_text)
         future = _executor.submit(_run_job, job_id, spool_path)
         future.add_done_callback(_release_slot)
         logger.info("ingest_job_enqueued job_id=%s", job_id)

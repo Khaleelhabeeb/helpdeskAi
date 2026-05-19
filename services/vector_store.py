@@ -1,10 +1,12 @@
 import logging
 import os
-from typing import Any, List, Optional
+from typing import Any, List, Optional, TYPE_CHECKING
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from pymilvus import MilvusClient
+
+if TYPE_CHECKING:
+    from pymilvus import MilvusClient
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -12,12 +14,16 @@ logger = logging.getLogger(__name__)
 MILVUS_COLLECTION = os.getenv("JINA_MILVUS_COLLECTION", "documents_jina")
 VECTOR_DIM = int(os.getenv("JINA_EMBEDDING_DIMENSION", "1024"))
 
-_client: Optional[MilvusClient] = None
+MILVUS_TIMEOUT_SECONDS = float(os.getenv("MILVUS_TIMEOUT_SECONDS", "10"))
+
+_client: Optional["MilvusClient"] = None
 
 
-def get_milvus_client() -> MilvusClient:
+def get_milvus_client() -> "MilvusClient":
     global _client
     if _client is None:
+        from pymilvus import MilvusClient
+
         uri = os.getenv("ZILLIZ_URI") or os.getenv("MILVUS_URI")
         token = os.getenv("ZILLIZ_TOKEN") or os.getenv("MILVUS_TOKEN")
         if not uri or not token:
@@ -25,13 +31,13 @@ def get_milvus_client() -> MilvusClient:
         uri = uri.strip()
         if uri and not urlparse(uri).scheme and not uri.endswith(".db"):
             uri = f"https://{uri}"
-        _client = MilvusClient(uri=uri, token=token)
+        _client = MilvusClient(uri=uri, token=token, timeout=MILVUS_TIMEOUT_SECONDS)
     return _client
 
 
 def ensure_collection() -> None:
     client = get_milvus_client()
-    if client.has_collection(MILVUS_COLLECTION):
+    if client.has_collection(MILVUS_COLLECTION, timeout=MILVUS_TIMEOUT_SECONDS):
         return
     logger.info("creating_milvus_collection collection=%s dimension=%s", MILVUS_COLLECTION, VECTOR_DIM)
     client.create_collection(
@@ -44,6 +50,7 @@ def ensure_collection() -> None:
         auto_id=False,
         max_length=64,
         enable_dynamic_field=True,
+        timeout=MILVUS_TIMEOUT_SECONDS,
     )
 
 
@@ -77,7 +84,7 @@ def upsert_texts(
             }
         )
     if rows:
-        get_milvus_client().upsert(collection_name=MILVUS_COLLECTION, data=rows)
+        get_milvus_client().upsert(collection_name=MILVUS_COLLECTION, data=rows, timeout=MILVUS_TIMEOUT_SECONDS)
     return len(rows)
 
 
@@ -90,6 +97,7 @@ def search(namespace: str, query_vector: List[float], top_k: int = 4) -> List[tu
         limit=top_k,
         output_fields=["text"],
         anns_field="embedding",
+        timeout=MILVUS_TIMEOUT_SECONDS,
     )
     hits: List[tuple[str, float]] = []
     for hit in results[0] if results else []:
@@ -113,6 +121,7 @@ def delete_for_kb(namespace: str, kb_id: str) -> int:
     get_milvus_client().delete(
         collection_name=MILVUS_COLLECTION,
         filter=f'namespace == "{_quote(namespace)}" and kb_id == "{_quote(kb_id)}"',
+        timeout=MILVUS_TIMEOUT_SECONDS,
     )
     return 1
 
@@ -122,5 +131,6 @@ def delete_namespace(namespace: str) -> int:
     get_milvus_client().delete(
         collection_name=MILVUS_COLLECTION,
         filter=f'namespace == "{_quote(namespace)}"',
+        timeout=MILVUS_TIMEOUT_SECONDS,
     )
     return 1

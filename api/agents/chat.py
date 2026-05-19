@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -14,9 +14,11 @@ from db import models
 from db.database import SessionLocal
 from services.rag_service import build_messages, aretrieve_context, astream_answer
 from utils.jwt import get_current_user
+from utils.rate_limit import create_limiter
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+limiter = create_limiter()
 
 
 class ChatRequest(BaseModel):
@@ -29,7 +31,9 @@ def _sse(event: str, data: dict) -> str:
 
 
 @router.post("/{agent_id}")
+@limiter.limit("30/minute")
 async def chat_with_agent(
+    request: Request,
     agent_id: str,
     chat: ChatRequest,
     background_tasks: BackgroundTasks,

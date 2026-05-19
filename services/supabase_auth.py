@@ -17,6 +17,7 @@ from supabase import Client, create_client
 
 from db.database import SessionLocal
 from models import User
+from services.redis_client import cache_key, redis_delete, redis_get_json, redis_set_json
 
 load_dotenv()
 
@@ -90,6 +91,7 @@ def _token_expiry(token: str) -> Optional[int]:
 
 def _get_cached_user(db: Session, token: str) -> Optional[User]:
     key = _token_cache_key(token)
+    redis_key = cache_key("auth", "token", key)
     now = time.time()
     with _auth_cache_lock:
         cached = _auth_cache.get(key)
@@ -97,6 +99,17 @@ def _get_cached_user(db: Session, token: str) -> Optional[User]:
             _auth_cache.pop(key, None)
             cached = None
     if not cached:
+        redis_cached = redis_get_json(redis_key)
+        if isinstance(redis_cached, dict):
+            local_user_id = redis_cached.get("local_user_id")
+            if isinstance(local_user_id, int):
+                user = db.get(User, local_user_id)
+                if user:
+                    expires_at = now + min(_AUTH_CACHE_TTL_SECONDS, 30)
+                    with _auth_cache_lock:
+                        _auth_cache[key] = CachedAuthUser(local_user_id=user.id, expires_at=expires_at)
+                    return user
+                redis_delete(redis_key)
         return None
 
     user = db.get(User, cached.local_user_id)
@@ -105,6 +118,7 @@ def _get_cached_user(db: Session, token: str) -> Optional[User]:
 
     with _auth_cache_lock:
         _auth_cache.pop(key, None)
+    redis_delete(redis_key)
     return None
 
 
@@ -120,12 +134,17 @@ def _cache_user(token: str, user: User) -> None:
     key = _token_cache_key(token)
     with _auth_cache_lock:
         if len(_auth_cache) >= _AUTH_CACHE_MAX_SIZE:
-            expired = [cache_key for cache_key, value in _auth_cache.items() if value.expires_at <= now]
-            for cache_key in expired:
-                _auth_cache.pop(cache_key, None)
+            expired_keys = [entry_key for entry_key, value in _auth_cache.items() if value.expires_at <= now]
+            for entry_key in expired_keys:
+                _auth_cache.pop(entry_key, None)
             if len(_auth_cache) >= _AUTH_CACHE_MAX_SIZE:
                 _auth_cache.pop(next(iter(_auth_cache)), None)
         _auth_cache[key] = CachedAuthUser(local_user_id=user.id, expires_at=expires_at)
+    redis_set_json(
+        cache_key("auth", "token", key),
+        {"local_user_id": user.id},
+        max(1, int(expires_at - now)),
+    )
 
 
 def upsert_local_user(db: Session, supabase_user_id: str, email: str) -> User:

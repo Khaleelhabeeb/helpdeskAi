@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-import httpx
+from services.http_client import get_async_http_client
 
 
 @dataclass
@@ -46,15 +46,14 @@ async def upload_avatar_image(
         "x-api-key": image_worker_api_key,
     }
 
-    timeout = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            image_worker_url,
-            headers=headers,
-            data=data,
-            files=files,
-        )
+    client = await get_async_http_client()
+    response = await client.post(
+        image_worker_url,
+        headers=headers,
+        data=data,
+        files=files,
+        timeout=30.0,
+    )
 
     if response.status_code >= 400:
         raise ImageUploadError("Image worker upload failed")
