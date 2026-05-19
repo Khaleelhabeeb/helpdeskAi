@@ -10,23 +10,18 @@ import {
 import { AppLayout } from '../components/Layout';
 import { cn } from '../lib/utils';
 import { useEffect, useMemo, useState } from 'react';
-import { apiFetch, formatRelative } from '../lib/api';
+import { Agent, apiFetch, CreditsInfo, formatRelative, KnowledgeBase } from '../lib/api';
 
 type Activity = {
-  timestamp: string | null;
+  timestamp: string;
   agent_name: string;
   question?: string | null;
   response?: string | null;
 };
 
 type DashboardData = {
-  agents: { count: number };
-  credits: {
-    user_type: string;
-    credits_remaining: number;
-    max_credits: number;
-    credits_used: number;
-  } | null;
+  agents: Agent[];
+  credits: CreditsInfo | null;
   interactions: {
     total_questions: number;
     total_responses: number;
@@ -35,17 +30,19 @@ type DashboardData = {
   } | null;
   activity: {
     recent_activity: Activity[];
+    peak_usage_hour: number | null;
+    hourly_activity: Record<string, number>;
   } | null;
-  knowledge: { count: number };
+  knowledgeCount: number;
 };
 
 export default function Dashboard() {
   const [data, setData] = useState<DashboardData>({
-    agents: { count: 0 },
+    agents: [],
     credits: null,
     interactions: null,
     activity: null,
-    knowledge: { count: 0 },
+    knowledgeCount: 0,
   });
   const [isLoading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -57,9 +54,25 @@ export default function Dashboard() {
       setLoading(true);
       setError('');
       try {
-        const summary = await apiFetch<DashboardData>('/dashboard/summary');
+        const [agents, credits, interactions, activity] = await Promise.all([
+          apiFetch<Agent[]>('/agents/'),
+          apiFetch<CreditsInfo>('/users/credits').catch(() => null),
+          apiFetch<DashboardData['interactions']>('/kpi/agent-interactions').catch(() => null),
+          apiFetch<DashboardData['activity']>('/kpi/activity-timeline').catch(() => null),
+        ]);
+
+        const kbLists = await Promise.all(
+          agents.slice(0, 25).map((agent) => apiFetch<KnowledgeBase[]>(`/kb/${agent.id}`).catch(() => [])),
+        );
+
         if (!cancelled) {
-          setData(summary);
+          setData({
+            agents,
+            credits,
+            interactions,
+            activity,
+            knowledgeCount: kbLists.reduce((sum, list) => sum + list.length, 0),
+          });
         }
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load dashboard');
@@ -76,12 +89,12 @@ export default function Dashboard() {
 
   const metrics = useMemo(() => {
     const totalQuestions = data.interactions?.total_questions ?? 0;
-    const creditsUsed = data.credits?.credits_used ?? 0;
+    const creditsUsed = data.credits ? data.credits.max_credits - data.credits.credits_remaining : 0;
 
     return [
       { label: 'Messages this month', value: totalQuestions.toLocaleString(), icon: MessageSquare, sub: `${creditsUsed.toLocaleString()} requests tracked`, trend: totalQuestions > 0 ? 'up' : 'neutral' },
-      { label: 'Active Agents', value: data.agents.count.toLocaleString(), icon: Bot, sub: data.interactions?.most_active_agent ? `Top: ${data.interactions.most_active_agent}` : 'Ready to configure', trend: 'neutral' },
-      { label: 'Knowledge Sources', value: data.knowledge.count.toLocaleString(), icon: Database, sub: 'Across your agents', trend: 'neutral' },
+      { label: 'Active Agents', value: data.agents.length.toLocaleString(), icon: Bot, sub: data.interactions?.most_active_agent ? `Top: ${data.interactions.most_active_agent}` : 'Ready to configure', trend: 'neutral' },
+      { label: 'Knowledge Sources', value: data.knowledgeCount.toLocaleString(), icon: Database, sub: 'Across your agents', trend: 'neutral' },
       { label: 'Access', value: 'Full', icon: ShieldCheck, sub: 'No tier limits', trend: 'neutral' },
     ];
   }, [data]);
@@ -129,7 +142,7 @@ export default function Dashboard() {
               <div className="p-6 border-b border-surface-container-highest flex justify-between items-center">
                 <h3 className="text-lg font-bold text-brand-primary">Recent Conversations</h3>
                 <div className="text-xs font-bold uppercase tracking-widest text-on-surface-variant border border-surface-container-highest px-3 py-1.5 rounded-lg">
-                  {(data.interactions?.total_questions ?? 0).toLocaleString()} total
+                  {data.activity?.peak_usage_hour == null ? 'No peak yet' : `Peak ${data.activity.peak_usage_hour}:00`}
                 </div>
               </div>
               <div className="overflow-x-auto">

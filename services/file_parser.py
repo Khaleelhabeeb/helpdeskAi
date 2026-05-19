@@ -7,11 +7,10 @@ import defusedxml.ElementTree as ElementTree
 
 def extract_text_from_pdf_file(file: BinaryIO) -> str:
     reader = PdfReader(file)
-    pages: list[str] = []
+    text = ""
     for page in reader.pages:
         page_text = page.extract_text() or ""
-        pages.append(page_text)
-    text = " ".join(pages)
+        text += page_text + " "
     
     text = re.sub(r'\n+', '\n', text)
     text = re.sub(r'\s+', ' ', text)   

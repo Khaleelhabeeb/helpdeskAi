@@ -1,13 +1,14 @@
 import hashlib
 import json
 import logging
+import threading
 import time
 import uuid
 from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -16,15 +17,7 @@ from api.auth.auth import get_db
 from db import models
 from db.database import SessionLocal
 from models.widget_deployment import new_deployment_id
-from services import cache_keys
 from services.rag_service import build_messages, aretrieve_context, astream_answer
-from services.redis_client import (
-    cache_delete,
-    cache_get_json,
-    cache_set_json,
-    get_async_redis,
-    rate_limit_prefix,
-)
 from utils.jwt import get_current_user
 
 router = APIRouter()
@@ -35,9 +28,6 @@ DEFAULT_INITIAL_MESSAGES = ["Hi! What can I help you with?"]
 DEFAULT_ALLOWED_DOMAINS = ["localhost", "127.0.0.1"]
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 30
-PUBLIC_CHAT_MESSAGE_MAX_LENGTH = 4000
-WIDGET_CONFIG_CACHE_TTL_SECONDS = 60
-
 
 class WidgetDeploymentUpdate(BaseModel):
     display_name: Optional[str] = Field(None, min_length=1, max_length=120)
@@ -50,7 +40,7 @@ class WidgetDeploymentUpdate(BaseModel):
 
 
 class PublicChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=PUBLIC_CHAT_MESSAGE_MAX_LENGTH)
+    message: str = Field(..., min_length=1, max_length=4000)
     session_id: Optional[str] = None
     visitor_id: Optional[str] = Field(None, max_length=120)
 
@@ -99,11 +89,7 @@ def _origin_host(request: Request) -> str:
 def _host_allowed(host: str, allowed_domains: list[str]) -> bool:
     if not host:
         return False
-    allowed = []
-    for domain in allowed_domains:
-        cleaned = _clean_domain(domain)
-        if cleaned:
-            allowed.append(cleaned)
+    allowed = [_clean_domain(domain) for domain in allowed_domains if _clean_domain(domain)]
     if not allowed:
         return False
     for domain in allowed:
@@ -128,31 +114,50 @@ def _visitor_hash(deployment_id: int, visitor_id: str, request: Request) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-async def _check_rate_limit(deployment_public_id: str, visitor_id: str, request: Request) -> None:
+# High-performance Sliding Window Counter Rate Limiter
+_rate_limit_lock = threading.Lock()
+_rate_limit_data = {
+    "current_window": {},
+    "previous_window": {},
+    "last_window_start": 0
+}
+
+
+def _check_rate_limit(deployment_public_id: str, visitor_id: str, request: Request) -> None:
     now = time.time()
+    # Calculate the start of the current 60-second window
     window_start = int(now / RATE_LIMIT_WINDOW_SECONDS) * RATE_LIMIT_WINDOW_SECONDS
-    ip = request.client.host if request.client else "unknown"
-    key = cache_keys.widget_rate_limit(
-        rate_limit_prefix(),
-        deployment_public_id,
-        ip,
-        visitor_id,
-        window_start,
-    )
-    redis = get_async_redis()
-    if redis is None:
-        logger.warning("rate_limit_redis_unconfigured deployment_id=%s", deployment_public_id)
-        return
-    try:
-        count = await redis.incr(key)
-        if count == 1:
-            await redis.expire(key, RATE_LIMIT_WINDOW_SECONDS * 2)
-    except Exception:
-        logger.warning("rate_limit_redis_failed deployment_id=%s", deployment_public_id, exc_info=True)
-        return
-    if int(count) > RATE_LIMIT_MAX_REQUESTS:
-        logger.warning("rate_limit_exceeded key=%s ip=%s", key, ip)
-        raise HTTPException(status_code=429, detail="Too many messages. Please wait a moment.")
+    
+    with _rate_limit_lock:
+        if window_start > _rate_limit_data["last_window_start"]:
+            # Rotate windows
+            if window_start > _rate_limit_data["last_window_start"] + RATE_LIMIT_WINDOW_SECONDS:
+                # If more than one window passed, clear both
+                _rate_limit_data["previous_window"] = {}
+            else:
+                _rate_limit_data["previous_window"] = _rate_limit_data["current_window"]
+            
+            _rate_limit_data["current_window"] = {}
+            _rate_limit_data["last_window_start"] = window_start
+            
+        ip = request.client.host if request.client else "unknown"
+        key = f"{deployment_public_id}:{ip}:{visitor_id}"
+        
+        # Sliding window approximation: 
+        # count = current_window_count + previous_window_count * (remaining_time_in_prev_window / total_time)
+        current_count = _rate_limit_data["current_window"].get(key, 0)
+        prev_count = _rate_limit_data["previous_window"].get(key, 0)
+        
+        elapsed = now - window_start
+        weight = (RATE_LIMIT_WINDOW_SECONDS - elapsed) / RATE_LIMIT_WINDOW_SECONDS
+        
+        estimated_count = current_count + (prev_count * weight)
+        
+        if estimated_count >= RATE_LIMIT_MAX_REQUESTS:
+            logger.warning("rate_limit_exceeded key=%s ip=%s", key, ip)
+            raise HTTPException(status_code=429, detail="Too many messages. Please wait a moment.")
+            
+        _rate_limit_data["current_window"][key] = current_count + 1
 
 
 def _deployment_out(deployment: models.WidgetDeployment, request: Request) -> dict:
@@ -197,12 +202,7 @@ def _get_or_create_deployment(db: Session, agent: models.Agent) -> models.Widget
     return deployment
 
 
-def _history_for_prompt(
-    db: Session,
-    session_id: uuid.UUID,
-    max_messages: int = 8,
-    max_chars: int = 3000,
-) -> list[dict[str, str]]:
+def _history_for_prompt(db: Session, session_id: uuid.UUID, max_messages: int = 8, max_chars: int = 3000) -> list[dict[str, str]]:
     rows = (
         db.query(models.ChatMessage)
         .filter(models.ChatMessage.session_id == session_id)
@@ -232,11 +232,7 @@ def get_widget_deployment(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    agent = (
-        db.query(models.Agent)
-        .filter(models.Agent.id == agent_id, models.Agent.user_id == user.id)
-        .first()
-    )
+    agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     deployment = _get_or_create_deployment(db, agent)
@@ -251,11 +247,7 @@ def update_widget_deployment(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    agent = (
-        db.query(models.Agent)
-        .filter(models.Agent.id == agent_id, models.Agent.user_id == user.id)
-        .first()
-    )
+    agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     deployment = _get_or_create_deployment(db, agent)
@@ -276,7 +268,6 @@ def update_widget_deployment(
     deployment.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(deployment)
-    cache_delete(cache_keys.widget_config(deployment.deployment_id))
     return _deployment_out(deployment, request)
 
 
@@ -287,93 +278,47 @@ def regenerate_widget_deployment(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    agent = (
-        db.query(models.Agent)
-        .filter(models.Agent.id == agent_id, models.Agent.user_id == user.id)
-        .first()
-    )
+    agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     deployment = _get_or_create_deployment(db, agent)
-    old_deployment_id = deployment.deployment_id
     deployment.deployment_id = new_deployment_id()
     deployment.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(deployment)
-    cache_delete(cache_keys.widget_config(old_deployment_id))
-    cache_delete(cache_keys.widget_config(deployment.deployment_id))
     return _deployment_out(deployment, request)
 
 
 @public_router.get("/{deployment_id}/config")
-def get_public_widget_config(
-    deployment_id: str,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    cached = cache_get_json(cache_keys.widget_config(deployment_id))
-    if cached:
-        if not cached.get("is_enabled"):
-            raise HTTPException(status_code=404, detail="Widget is not available")
-        etag = cached.get("etag", "")
-        if request.headers.get("if-none-match") == etag:
-            return Response(status_code=304, headers=_origin_headers(request))
-        host = _origin_host(request)
-        if not _host_allowed(host, cached.get("allowed_domains") or []):
-            raise HTTPException(
-                status_code=403,
-                detail="This domain is not allowed to use this widget",
-            )
-        headers = _origin_headers(request)
-        headers["ETag"] = etag
-        headers["Cache-Control"] = f"public, max-age={WIDGET_CONFIG_CACHE_TTL_SECONDS}"
-        return JSONResponse(headers=headers, content=cached["content"])
-
-    deployment = (
-        db.query(models.WidgetDeployment)
-        .filter(models.WidgetDeployment.deployment_id == deployment_id)
-        .first()
-    )
+def get_public_widget_config(deployment_id: str, request: Request, db: Session = Depends(get_db)):
+    # Quick lookup for deployment metadata
+    deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.deployment_id == deployment_id).first()
     if not deployment or not deployment.is_enabled:
         raise HTTPException(status_code=404, detail="Widget is not available")
-
+    
+    # ETag based on updated_at
     etag = f'W/"{int(deployment.updated_at.timestamp())}"'
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=_origin_headers(request))
 
     host = _origin_host(request)
     if not _host_allowed(host, deployment.allowed_domains or []):
-        raise HTTPException(
-            status_code=403,
-            detail="This domain is not allowed to use this widget",
-        )
-
-    content = {
-        "deployment_id": deployment.deployment_id,
-        "display_name": deployment.display_name,
-        "logo_url": deployment.logo_url or "",
-        "initial_messages": deployment.initial_messages or DEFAULT_INITIAL_MESSAGES,
-        "theme": deployment.theme,
-        "primary_color": deployment.primary_color,
-    }
-    cache_set_json(
-        cache_keys.widget_config(deployment_id),
-        {
-            "is_enabled": deployment.is_enabled,
-            "allowed_domains": deployment.allowed_domains or [],
-            "etag": etag,
-            "content": content,
-        },
-        WIDGET_CONFIG_CACHE_TTL_SECONDS,
-    )
-
+        raise HTTPException(status_code=403, detail="This domain is not allowed to use this widget")
+        
     headers = _origin_headers(request)
     headers["ETag"] = etag
-    headers["Cache-Control"] = f"public, max-age={WIDGET_CONFIG_CACHE_TTL_SECONDS}"
-
+    headers["Cache-Control"] = "public, max-age=60" # Cache for 60s
+    
     return JSONResponse(
         headers=headers,
-        content=content,
+        content={
+            "deployment_id": deployment.deployment_id,
+            "display_name": deployment.display_name,
+            "logo_url": deployment.logo_url or "",
+            "initial_messages": deployment.initial_messages or DEFAULT_INITIAL_MESSAGES,
+            "theme": deployment.theme,
+            "primary_color": deployment.primary_color,
+        },
     )
 
 
@@ -383,26 +328,19 @@ async def public_widget_chat(
     payload: PublicChatRequest,
     request: Request,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db)
 ):
-    deployment = (
-        db.query(models.WidgetDeployment)
-        .filter(models.WidgetDeployment.deployment_id == deployment_id)
-        .first()
-    )
+    deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.deployment_id == deployment_id).first()
     if not deployment or not deployment.is_enabled:
         raise HTTPException(status_code=404, detail="Widget is not available")
     host = _origin_host(request)
     if not _host_allowed(host, deployment.allowed_domains or []):
-        raise HTTPException(
-            status_code=403,
-            detail="This domain is not allowed to use this widget",
-        )
+        raise HTTPException(status_code=403, detail="This domain is not allowed to use this widget")
 
     visitor_id = payload.visitor_id or "anonymous"
-    await _check_rate_limit(deployment.deployment_id, visitor_id, request)
+    _check_rate_limit(deployment.deployment_id, visitor_id, request)
 
-    agent = db.query(models.Agent).filter(models.Agent.id == deployment.agent_id).first()
+    agent = deployment.agent
     if not agent or not agent.instructions:
         raise HTTPException(status_code=404, detail="Widget is not available")
 
@@ -412,10 +350,7 @@ async def public_widget_chat(
             session_uuid = uuid.UUID(payload.session_id)
             session = (
                 db.query(models.ChatSession)
-                .filter(
-                    models.ChatSession.id == session_uuid,
-                    models.ChatSession.deployment_id == deployment.id,
-                )
+                .filter(models.ChatSession.id == session_uuid, models.ChatSession.deployment_id == deployment.id)
                 .first()
             )
         except ValueError:
@@ -441,11 +376,7 @@ async def public_widget_chat(
         try:
             context = await aretrieve_context(db, namespace, str(agent.id), payload.message, top_k=top_k)
         except Exception:
-            logger.exception(
-                "public_widget_retrieval_failed deployment_id=%s agent_id=%s",
-                deployment_id,
-                agent.id,
-            )
+            logger.exception("public_widget_retrieval_failed deployment_id=%s agent_id=%s", deployment_id, agent.id)
 
     history = _history_for_prompt(db, session.id)
     messages = build_messages(agent.instructions or "", context, payload.message, history=history)
@@ -455,18 +386,9 @@ async def public_widget_chat(
     agent_model = agent.model
     user_message = payload.message
 
-    db.add(
-        models.ChatMessage(
-            session_id=session_id_value,
-            role="user",
-            content=user_message,
-            created_at=datetime.utcnow(),
-        )
-    )
+    db.add(models.ChatMessage(session_id=session_id_value, role="user", content=user_message, created_at=datetime.utcnow()))
     session.last_active_at = datetime.utcnow()
     db.commit()
-    headers = _origin_headers(request)
-    db.close()
 
     async def generate():
         answer_parts: list[str] = []
@@ -476,54 +398,40 @@ async def public_widget_chat(
                 answer_parts.append(token)
                 yield _sse("token", {"content": token})
             answer = "".join(answer_parts).strip()
-
+            
             background_tasks.add_task(
                 _log_public_chat,
                 session_id=session_id_value,
                 user_id=user_id_value,
                 agent_id=agent_id_value,
                 user_message=user_message,
-                answer=answer,
+                answer=answer
             )
-
+            
             yield _sse("done", {"session_id": str(session_id_value)})
         except Exception:
-            logger.exception(
-                "public_widget_generation_failed deployment_id=%s session_id=%s",
-                deployment_id,
-                session_id_value,
-            )
+            logger.exception("public_widget_generation_failed deployment_id=%s session_id=%s", deployment_id, session_id_value)
             yield _sse("error", {"detail": "Sorry, I could not answer that right now."})
 
-    return StreamingResponse(generate(), media_type="text/event-stream", headers=headers)
+    return StreamingResponse(generate(), media_type="text/event-stream", headers=_origin_headers(request))
 
 
-def _log_public_chat(session_id, user_id, agent_id, user_message: str, answer: str) -> None:
+def _log_public_chat(session_id, user_id, agent_id, user_message, answer):
     db = SessionLocal()
     try:
-        db.add(
-            models.ChatMessage(
-                session_id=session_id,
-                role="assistant",
-                content=answer,
-                created_at=datetime.utcnow(),
-            )
-        )
-        db.add(
-            models.UsageLog(
-                user_id=user_id,
-                agent_id=agent_id,
-                message_content=user_message,
-                response_content=answer,
-                credits_used=1,
-                timestamp=datetime.utcnow(),
-            )
-        )
+        db.add(models.ChatMessage(session_id=session_id, role="assistant", content=answer, created_at=datetime.utcnow()))
+        db.add(models.UsageLog(
+            user_id=user_id,
+            agent_id=agent_id,
+            message_content=user_message,
+            response_content=answer,
+            credits_used=1,
+            timestamp=datetime.utcnow(),
+        ))
         session = db.query(models.ChatSession).filter(models.ChatSession.id == session_id).first()
         if session:
             session.last_active_at = datetime.utcnow()
         db.commit()
-        cache_delete(cache_keys.dashboard_summary(user_id))
     except Exception:
         db.rollback()
         logger.exception("public_chat_log_failed session_id=%s agent_id=%s", session_id, agent_id)

@@ -1,91 +1,13 @@
-from datetime import datetime, timedelta
-
-from fastapi import APIRouter, Depends
-from sqlalchemy import Date, cast, extract, func
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
-
-from api.auth.auth import get_db
+from sqlalchemy import func, cast, Date, extract
 from db import models
-from services import cache_keys
-from services.redis_client import cache_get_json, cache_set_json
+from api.auth.auth import get_db
 from utils.jwt import get_current_user
+from datetime import datetime, timedelta
+from typing import List, Dict
 
 router = APIRouter()
-DASHBOARD_SUMMARY_CACHE_TTL_SECONDS = 60
-
-
-@router.get("/dashboard/summary")
-def get_dashboard_summary(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    cache_key = cache_keys.dashboard_summary(user.id)
-    cached = cache_get_json(cache_key)
-    if cached:
-        return cached
-
-    agent_count = db.query(models.Agent).filter(models.Agent.user_id == user.id).count()
-    knowledge_count = (
-        db.query(func.count(models.KnowledgeBase.id))
-        .join(models.Agent, models.KnowledgeBase.agent_id == models.Agent.id)
-        .filter(models.Agent.user_id == user.id)
-        .scalar()
-        or 0
-    )
-
-    agent_counts_query = (
-        db.query(models.Agent.name, func.count(models.UsageLog.id).label("count"))
-        .join(models.UsageLog, models.Agent.id == models.UsageLog.agent_id)
-        .filter(models.UsageLog.user_id == user.id)
-        .group_by(models.Agent.name)
-        .all()
-    )
-    agent_counts = {name: count for name, count in agent_counts_query}
-    total_questions = sum(agent_counts.values())
-    most_active_agent = max(agent_counts, key=agent_counts.get) if agent_counts else None
-
-    recent_logs = (
-        db.query(
-            models.UsageLog.timestamp,
-            models.UsageLog.message_content,
-            models.UsageLog.response_content,
-            models.Agent.name.label("agent_name"),
-        )
-        .join(models.Agent, models.Agent.id == models.UsageLog.agent_id)
-        .filter(models.UsageLog.user_id == user.id)
-        .order_by(models.UsageLog.timestamp.desc())
-        .limit(20)
-        .all()
-    )
-    recent_activity = [
-        {
-            "timestamp": log.timestamp.isoformat() if log.timestamp else None,
-            "agent_name": log.agent_name or "Unknown",
-            "question": log.message_content,
-            "response": log.response_content,
-        }
-        for log in recent_logs
-    ]
-
-    response = {
-        "agents": {"count": agent_count},
-        "knowledge": {"count": knowledge_count},
-        "credits": {
-            "user_type": user.user_type,
-            "credits_remaining": user.credits_remaining,
-            "max_credits": user.get_max_credits(),
-            "credits_used": max(user.get_max_credits() - user.credits_remaining, 0),
-        },
-        "interactions": {
-            "total_questions": total_questions,
-            "total_responses": total_questions,
-            "most_active_agent": most_active_agent,
-            "agent_interaction_counts": agent_counts,
-        },
-        "activity": {
-            "recent_activity": recent_activity,
-        },
-    }
-    cache_set_json(cache_key, response, DASHBOARD_SUMMARY_CACHE_TTL_SECONDS)
-    return response
-
 
 @router.get("/kpi/credits")
 def get_credits_kpi(db: Session = Depends(get_db), user=Depends(get_current_user)):

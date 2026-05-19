@@ -1,5 +1,4 @@
 import os
-from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -13,7 +12,6 @@ def _clean(value: Optional[str]) -> Optional[str]:
     return cleaned
 
 
-@lru_cache(maxsize=128)
 def get_secret(name: str, *, prefixes: tuple[str, ...] = ()) -> Optional[str]:
     env_value = _clean(os.getenv(name))
     if env_value and (not prefixes or env_value.startswith(prefixes)):

@@ -1,19 +1,17 @@
-import os
-from datetime import datetime, timedelta
-
-from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Depends, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
-
-from db import models
+import os
+from datetime import timedelta
 from db import schemas
-from services.rate_limit import limiter_storage_options
+from db import models
 from services.supabase_auth import get_db, get_supabase_client, upsert_local_user, verify_supabase_token
+from dotenv import load_dotenv
+from datetime import datetime
+from pydantic import BaseModel
 
-limiter = Limiter(key_func=get_remote_address, **limiter_storage_options())
+limiter = Limiter(key_func=get_remote_address)
 router = APIRouter()
 
 load_dotenv()
@@ -86,10 +84,7 @@ def login(request: Request, user: schemas.UserLogin, db: Session = Depends(get_d
 def google_callback(request: Request, code: str, db: Session = Depends(get_db)):
     raise HTTPException(
         status_code=410,
-        detail=(
-            "Google OAuth callback moved to Supabase Auth. Configure Google in Supabase and use "
-            "the Supabase callback flow."
-        ),
+        detail="Google OAuth callback moved to Supabase Auth. Configure Google in Supabase and use the Supabase callback flow.",
     )
 
 @router.get("/verify")

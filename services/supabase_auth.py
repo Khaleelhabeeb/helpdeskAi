@@ -1,8 +1,11 @@
 import base64
+import hashlib
 import json
 import logging
 import os
+import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from dotenv import load_dotenv
@@ -14,8 +17,6 @@ from supabase import Client, create_client
 
 from db.database import SessionLocal
 from models import User
-from services import cache_keys
-from services.redis_client import get_sync_redis
 
 load_dotenv()
 
@@ -24,7 +25,16 @@ _supabase: Optional[Client] = None
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class CachedAuthUser:
+    local_user_id: int
+    expires_at: float
+
+
 _AUTH_CACHE_TTL_SECONDS = int(os.getenv("AUTH_CACHE_TTL_SECONDS", "120"))
+_AUTH_CACHE_MAX_SIZE = int(os.getenv("AUTH_CACHE_MAX_SIZE", "2048"))
+_auth_cache: dict[str, CachedAuthUser] = {}
+_auth_cache_lock = threading.Lock()
 
 
 def get_supabase_client() -> Client:
@@ -64,7 +74,7 @@ def _normalize_supabase_user(response: Any) -> tuple[str, str]:
 
 
 def _token_cache_key(token: str) -> str:
-    return cache_keys.auth_token(token)
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _token_expiry(token: str) -> Optional[int]:
@@ -80,26 +90,21 @@ def _token_expiry(token: str) -> Optional[int]:
 
 def _get_cached_user(db: Session, token: str) -> Optional[User]:
     key = _token_cache_key(token)
-    redis = get_sync_redis()
-    if redis is None:
+    now = time.time()
+    with _auth_cache_lock:
+        cached = _auth_cache.get(key)
+        if cached and cached.expires_at <= now:
+            _auth_cache.pop(key, None)
+            cached = None
+    if not cached:
         return None
-    try:
-        user_id = redis.get(key)
-    except Exception:
-        logger.warning("auth_cache_read_failed", exc_info=True)
-        return None
-    if not user_id:
-        return None
-    try:
-        user = db.get(User, int(user_id))
-    except (TypeError, ValueError):
-        user = None
+
+    user = db.get(User, cached.local_user_id)
     if user:
         return user
-    try:
-        redis.delete(key)
-    except Exception:
-        logger.warning("auth_cache_delete_failed", exc_info=True)
+
+    with _auth_cache_lock:
+        _auth_cache.pop(key, None)
     return None
 
 
@@ -113,13 +118,14 @@ def _cache_user(token: str, user: User) -> None:
         return
 
     key = _token_cache_key(token)
-    redis = get_sync_redis()
-    if redis is None:
-        return
-    try:
-        redis.setex(key, max(1, int(expires_at - now)), str(user.id))
-    except Exception:
-        logger.warning("auth_cache_write_failed", exc_info=True)
+    with _auth_cache_lock:
+        if len(_auth_cache) >= _AUTH_CACHE_MAX_SIZE:
+            expired = [cache_key for cache_key, value in _auth_cache.items() if value.expires_at <= now]
+            for cache_key in expired:
+                _auth_cache.pop(cache_key, None)
+            if len(_auth_cache) >= _AUTH_CACHE_MAX_SIZE:
+                _auth_cache.pop(next(iter(_auth_cache)), None)
+        _auth_cache[key] = CachedAuthUser(local_user_id=user.id, expires_at=expires_at)
 
 
 def upsert_local_user(db: Session, supabase_user_id: str, email: str) -> User:
