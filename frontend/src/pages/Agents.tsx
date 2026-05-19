@@ -85,6 +85,12 @@ function buildMessageId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function formatModelLabel(model?: string) {
+  if (!model) return 'Default model';
+  const parts = model.split('/');
+  return parts[parts.length - 1] || model;
+}
+
 const markdownComponents = {
   h1: ({ children }: { children: React.ReactNode }) => <h1 className="text-lg font-bold text-brand-primary">{children}</h1>,
   h2: ({ children }: { children: React.ReactNode }) => <h2 className="text-base font-bold text-brand-primary">{children}</h2>,
@@ -956,7 +962,20 @@ export default function Agents() {
         {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">{error}</div>}
 
         {isLoading ? (
-          <div className="min-h-[240px] flex items-center justify-center text-on-surface-variant"><Loader2 className="w-5 h-5 animate-spin mr-2" />Loading agents...</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+            {Array.from({ length: 6 }).map((_, index) => (
+              <div key={`agent-skeleton-${index}`} className="overflow-hidden rounded-2xl border border-surface-container-highest bg-surface-container-lowest shadow-sm">
+                <div className="h-40 bg-surface-container-low">
+                  <div className="h-full w-full animate-pulse bg-[radial-gradient(circle_at_top,#e4e4e7_1px,transparent_1px)] [background-size:16px_16px]" />
+                </div>
+                <div className="space-y-3 p-5">
+                  <div className="h-4 w-2/3 rounded-full bg-surface-container-high animate-pulse" />
+                  <div className="h-3 w-1/2 rounded-full bg-surface-container-high animate-pulse" />
+                  <div className="h-10 w-full rounded-xl bg-surface-container-high animate-pulse" />
+                </div>
+              </div>
+            ))}
+          </div>
         ) : agents.length === 0 ? (
           <div className="border border-surface-container-highest bg-surface-container-lowest rounded-xl p-10 text-center">
             <Bot className="w-10 h-10 mx-auto text-on-surface-variant mb-4" />
@@ -967,28 +986,38 @@ export default function Agents() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
             {agents.map((agent) => (
-              <motion.div key={agent.id} whileHover={{ y: -4 }} onClick={() => setSelectedId(agent.id)} className="bg-surface-container-lowest border border-surface-container-highest rounded-xl overflow-hidden cursor-pointer group hover:border-brand-primary transition-all shadow-sm">
-                <div className="h-44 bg-surface-container-low border-b border-surface-container-highest p-4 relative overflow-hidden flex flex-col">
-                  <div className="flex items-center gap-2 mb-4">
-                    <div className="w-8 h-8 rounded-full bg-brand-primary flex items-center justify-center overflow-hidden text-brand-on-primary"><AgentInitials name={agent.name} image={agent.avatar_url} /></div>
-                    <div className="h-2 w-24 bg-surface-container-high rounded-full" />
+              <motion.div key={agent.id} whileHover={{ y: -4 }} onClick={() => setSelectedId(agent.id)} className="group relative cursor-pointer overflow-hidden rounded-2xl border border-surface-container-highest bg-surface-container-lowest shadow-sm transition-all hover:border-brand-primary">
+                <div className="relative flex h-40 flex-col overflow-hidden border-b border-surface-container-highest">
+                  <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,#d4d4d8_1px,transparent_1px)] [background-size:18px_18px]" />
+                  <div className="absolute inset-0 bg-gradient-to-br from-brand-primary/10 via-transparent to-emerald-500/10" />
+                  <div className="relative z-10 flex items-start justify-between p-5">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="h-11 w-11 rounded-full bg-brand-primary text-brand-on-primary flex items-center justify-center overflow-hidden border border-white/30">
+                        <AgentInitials name={agent.name} image={agent.avatar_url} />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Support agent</div>
+                        <h3 className="truncate text-lg font-bold text-brand-primary">{agent.name}</h3>
+                      </div>
+                    </div>
+                    <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-emerald-700">Ready</span>
                   </div>
-                  <div className="space-y-2">
-                    <div className="h-2 w-3/4 bg-surface-container-high rounded-full ml-auto" />
-                    <div className="h-2 w-1/2 bg-brand-primary/10 rounded-full" />
-                    <div className="h-2 w-2/3 bg-brand-primary/10 rounded-full" />
+                  <div className="relative z-10 mt-auto px-5 pb-5">
+                    <div className="flex flex-wrap gap-2">
+                      <span className="rounded-full border border-surface-container-highest bg-surface-container-lowest px-3 py-1 text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Model {formatModelLabel(agent.model)}</span>
+                      <span className="rounded-full border border-surface-container-highest bg-surface-container-lowest px-3 py-1 text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Created {formatRelative(agent.created_at)}</span>
+                    </div>
                   </div>
-                  <div className="absolute inset-0 bg-gradient-to-t from-surface-container-low to-transparent" />
-                  <div className="absolute top-4 right-4 p-2 bg-surface-container-lowest rounded-lg border border-surface-container-highest opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"><Settings className="w-4 h-4 text-brand-primary" /></div>
+                  <div className="absolute right-4 top-4 opacity-0 transition-opacity group-hover:opacity-100">
+                    <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-surface-container-highest bg-surface-container-lowest shadow-sm">
+                      <Settings className="h-4 w-4 text-brand-primary" />
+                    </span>
+                  </div>
                 </div>
-                <div className="p-6">
-                  <div className="flex items-center justify-between gap-3 mb-2">
-                    <h3 className="text-lg font-bold text-brand-primary truncate">{agent.name}</h3>
-                    <div className="px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest border bg-emerald-500 text-white border-emerald-600">Active</div>
-                  </div>
-                  <p className="text-sm text-on-surface-variant line-clamp-2 leading-relaxed mb-6 min-h-10">{agent.instructions || 'Open this agent to tune its behavior.'}</p>
-                  <div className="flex items-center justify-between pt-4 border-t border-surface-container-highest">
-                    <span className="text-[10px] font-bold text-on-surface-variant opacity-60 uppercase tracking-widest">Created {formatRelative(agent.created_at)}</span>
+                <div className="p-5">
+                  <p className="text-sm text-on-surface-variant leading-relaxed">Configure sources, tune behavior, and ship a crisp support experience.</p>
+                  <div className="mt-5 flex items-center justify-between border-t border-surface-container-highest pt-4">
+                    <span className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant opacity-60">Open agent</span>
                     <div className="p-2 -mr-2 text-brand-primary opacity-0 group-hover:opacity-100 group-hover:translate-x-1 transition-all"><ArrowRight className="w-4 h-4" /></div>
                   </div>
                 </div>
