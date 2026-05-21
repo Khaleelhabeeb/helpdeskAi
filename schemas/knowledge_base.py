@@ -20,6 +20,9 @@ class KnowledgeBaseOut(BaseModel):
     title: Optional[str]
     status: KBStatus
     tokens_estimate: Optional[int]
+    source_content_type: Optional[str] = None
+    source_content_sha256: Optional[str] = None
+    has_stored_source: bool = False
     extracted_size_bytes: Optional[int] = None
     chunk_count: Optional[int] = None
     created_at: datetime

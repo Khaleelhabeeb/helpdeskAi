@@ -49,7 +49,7 @@ def send_message_to_groq(system_prompt: str, user_message: str) -> str:
     ]
 
     response = completion(
-        model="groq/openai/gpt-oss-20b",
+        model="groq/llama-3.1-8b-instant",
         messages=messages,
         temperature=0.2,
         max_tokens=700,

@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronLeft,
   Code2,
+  Database,
   FileText,
   Link as LinkIcon,
   Loader2,
@@ -15,6 +16,7 @@ import {
   RotateCcw,
   Save,
   Settings,
+  ShieldCheck,
   Sun,
   Trash2,
   Upload,
@@ -31,10 +33,11 @@ import { Agent, apiFetch, formatRelative, KnowledgeBase } from '../lib/api';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-const defaultModel = 'groq/openai/gpt-oss-20b';
+const defaultModel = 'groq/llama-3.1-8b-instant';
 
 type CreateStep = 'source' | 'appearance';
 type ManualSource = 'website' | 'file' | 'text' | 'qa';
+type KnowledgeSourceMode = 'url' | 'file' | 'text';
 
 type WizardState = {
   name: string;
@@ -246,6 +249,12 @@ export default function Agents() {
   const [models, setModels] = useState<ModelOption[]>([]);
   const [agentTab, setAgentTab] = useState<AgentTab>('playground');
   const [playgroundMessage, setPlaygroundMessage] = useState('What can you help me with?');
+  const [sourceMode, setSourceMode] = useState<KnowledgeSourceMode>('url');
+  const [sourceTitle, setSourceTitle] = useState('');
+  const [sourceUrl, setSourceUrl] = useState('');
+  const [sourceText, setSourceText] = useState('');
+  const [sourceFile, setSourceFile] = useState<File | null>(null);
+  const [isAddingSource, setAddingSource] = useState(false);
   const [playgroundMessages, setPlaygroundMessages] = useState<ChatMessage[]>([
     {
       id: 'intro',
@@ -257,6 +266,7 @@ export default function Agents() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<Agent | null>(null);
+  const [deleteKbTarget, setDeleteKbTarget] = useState<KnowledgeBase | null>(null);
   const playgroundEndRef = useRef<HTMLDivElement | null>(null);
 
   const selectedAgent = useMemo(() => agents.find((agent) => agent.id === selectedId) ?? null, [agents, selectedId]);
@@ -322,6 +332,11 @@ export default function Agents() {
     setEditInstructions(selectedAgent.instructions ?? '');
     setEditModel(selectedAgent.model);
     setAgentTab('playground');
+    setSourceMode('url');
+    setSourceTitle('');
+    setSourceUrl('');
+    setSourceText('');
+    setSourceFile(null);
     setPlaygroundMessages([
       {
         id: 'intro',
@@ -501,8 +516,73 @@ export default function Agents() {
     try {
       await apiFetch(`/kb/${kbId}`, { method: 'DELETE' });
       setDocuments((current) => current.filter((doc) => doc.id !== kbId));
+      setDeleteKbTarget(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not delete knowledge item');
+    }
+  }
+
+  async function confirmDeleteKb() {
+    if (!deleteKbTarget) return;
+    await deleteKb(deleteKbTarget.id);
+  }
+
+  async function addKnowledgeSource() {
+    if (!selectedAgent) return;
+    setAddingSource(true);
+    setError('');
+    setNotice('');
+    try {
+      const body = new FormData();
+      body.append('agent_id', selectedAgent.id);
+      if (sourceTitle.trim()) body.append('title', sourceTitle.trim());
+
+      if (sourceMode === 'url') {
+        if (!sourceUrl.trim()) throw new Error('Enter a website URL.');
+        body.append('source_type', 'url');
+        body.append('url', sourceUrl.trim());
+      }
+
+      if (sourceMode === 'text') {
+        if (!sourceText.trim()) throw new Error('Enter knowledge base text.');
+        body.append('source_type', 'text');
+        body.append('structured_text', sourceText.trim());
+      }
+
+      if (sourceMode === 'file') {
+        if (!sourceFile) throw new Error('Choose a file to upload.');
+        const lowerName = sourceFile.name.toLowerCase();
+        body.append('source_type', lowerName.endsWith('.pdf') ? 'upload_pdf' : lowerName.endsWith('.txt') ? 'upload_txt' : 'other');
+        body.append('file', sourceFile);
+      }
+
+      await apiFetch<KnowledgeBase>('/kb/add', { method: 'POST', body });
+      setSourceTitle('');
+      setSourceUrl('');
+      setSourceText('');
+      setSourceFile(null);
+      await loadAgentDetails(selectedAgent.id);
+      setNotice('Knowledge source added. Indexing has started.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not add knowledge source');
+    } finally {
+      setAddingSource(false);
+    }
+  }
+
+  async function retrainAllKnowledge() {
+    if (!selectedAgent) return;
+    setSaving(true);
+    setError('');
+    setNotice('');
+    try {
+      await apiFetch(`/kb/agent/${selectedAgent.id}/retrain`, { method: 'POST' });
+      await loadAgentDetails(selectedAgent.id);
+      setNotice('Retraining started for all knowledge sources.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not retrain knowledge sources');
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -843,6 +923,42 @@ export default function Agents() {
             </div>
           )}
 
+          {deleteKbTarget && (
+            <div className="fixed inset-0 z-[80] flex items-center justify-center bg-zinc-950/45 px-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="delete-kb-title">
+              <div className="w-full max-w-md rounded-xl border border-surface-container-highest bg-surface-container-lowest p-6 shadow-2xl">
+                <div className="flex items-start gap-4">
+                  <div className="grid h-11 w-11 shrink-0 place-items-center rounded-lg bg-rose-50 text-rose-700">
+                    <Trash2 className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <h2 id="delete-kb-title" className="text-lg font-black text-brand-primary">Delete knowledge source?</h2>
+                    <p className="mt-2 text-sm leading-6 text-on-surface-variant">
+                      This will delete <span className="font-bold text-brand-primary">{deleteKbTarget.title || deleteKbTarget.source_uri || 'this source'}</span>.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setDeleteKbTarget(null)}
+                    className="h-10 rounded-lg border border-surface-container-highest bg-surface-container-lowest px-4 text-sm font-bold text-brand-primary hover:bg-surface-container-low"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={confirmDeleteKb}
+                    className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-rose-600 px-4 text-sm font-bold text-white hover:bg-rose-700"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Delete source
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {(error || notice) && <div className={cn('rounded-lg border px-4 py-3 text-sm font-medium', error ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700')}>{error || notice}</div>}
 
           <div className="mt-6 grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-8 items-start">
@@ -966,7 +1082,55 @@ export default function Agents() {
                 <section className="mx-auto max-w-4xl rounded-xl bg-surface-container-lowest border border-surface-container-highest overflow-hidden">
                   <div className="flex items-center justify-between border-b border-surface-container-highest bg-surface-container-low px-6 py-4">
                     <h2 className="text-sm font-black uppercase tracking-widest text-brand-primary">Data Sources ({documents.length})</h2>
-                    <button onClick={() => selectedAgent && loadAgentDetails(selectedAgent.id)} className="flex items-center gap-2 rounded-lg border border-surface-container-highest bg-surface px-3 py-2 text-xs font-bold text-brand-primary"><RefreshCw className="h-4 w-4" />Refresh</button>
+                    <div className="flex items-center gap-2">
+                      <button onClick={retrainAllKnowledge} disabled={isSaving || documents.length === 0} className="flex items-center gap-2 rounded-lg border border-surface-container-highest bg-surface px-3 py-2 text-xs font-bold text-brand-primary disabled:opacity-50"><RotateCcw className="h-4 w-4" />Retrain all</button>
+                      <button onClick={() => selectedAgent && loadAgentDetails(selectedAgent.id)} className="flex items-center gap-2 rounded-lg border border-surface-container-highest bg-surface px-3 py-2 text-xs font-bold text-brand-primary"><RefreshCw className="h-4 w-4" />Refresh</button>
+                    </div>
+                  </div>
+                  <div className="border-b border-surface-container-highest p-5">
+                    <div className="space-y-4">
+                      <div>
+                        <p className="text-xs font-black uppercase tracking-widest text-on-surface-variant">Add a source</p>
+                        <p className="mt-1 text-xs text-on-surface-variant">Pick a type, paste or upload, then press Add. Indexing starts right away.</p>
+                      </div>
+
+                      <div className="flex rounded-lg border border-surface-container-highest bg-surface-container-low p-1">
+                        {[
+                          ['url', 'URL', LinkIcon],
+                          ['file', 'File', Upload],
+                          ['text', 'Text', FileText],
+                        ].map(([value, label, Icon]) => (
+                          <button key={value as string} type="button" onClick={() => setSourceMode(value as KnowledgeSourceMode)} className={cn('flex flex-1 items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-black uppercase tracking-widest transition-colors', sourceMode === value ? 'bg-brand-primary text-brand-on-primary' : 'text-on-surface-variant hover:text-brand-primary')}>
+                            <Icon className="h-4 w-4" />
+                            {label as string}
+                          </button>
+                        ))}
+                      </div>
+
+                      <input value={sourceTitle} onChange={(event) => setSourceTitle(event.target.value)} placeholder="Source title (optional)" className="h-11 rounded-lg border border-surface-container-highest bg-surface-container-low px-4 text-sm outline-none focus:border-brand-primary" />
+
+                      {sourceMode === 'url' && (
+                        <input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://example.com/help" className="h-11 w-full rounded-lg border border-surface-container-highest bg-surface-container-low px-4 text-sm outline-none focus:border-brand-primary" />
+                      )}
+                      {sourceMode === 'file' && (
+                        <label className="flex min-h-24 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-surface-container-highest bg-surface-container-low px-4 text-center text-sm font-bold text-on-surface-variant hover:text-brand-primary">
+                          <Upload className="mb-2 h-5 w-5" />
+                          {sourceFile ? sourceFile.name : 'Choose PDF, TXT, DOCX, or another text file'}
+                          <input type="file" className="hidden" onChange={(event) => setSourceFile(event.target.files?.[0] ?? null)} />
+                        </label>
+                      )}
+                      {sourceMode === 'text' && (
+                        <textarea value={sourceText} onChange={(event) => setSourceText(event.target.value)} placeholder="Paste knowledge base text..." rows={6} className="w-full resize-none rounded-lg border border-surface-container-highest bg-surface-container-low p-4 text-sm outline-none focus:border-brand-primary" />
+                      )}
+
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <button onClick={addKnowledgeSource} disabled={isAddingSource} className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-brand-primary px-5 text-sm font-bold text-brand-on-primary hover:opacity-90 disabled:opacity-50">
+                          {isAddingSource ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                          Add source
+                        </button>
+                        <span className="text-xs text-on-surface-variant">URL, PDF, TXT, DOCX supported.</span>
+                      </div>
+                    </div>
                   </div>
                   <div className="divide-y divide-surface-container-highest">
                     {documents.length === 0 && <div className="px-6 py-10 text-sm text-on-surface-variant">No knowledge sources yet.</div>}
@@ -982,7 +1146,7 @@ export default function Agents() {
                         <div className="flex items-center gap-3">
                           <span className={cn('px-2 py-1 text-[10px] font-black rounded-lg border shadow-sm uppercase', doc.status === 'ready' && 'bg-emerald-500 text-white border-emerald-600', doc.status === 'pending' && 'bg-amber-500 text-white border-amber-600', doc.status === 'failed' && 'bg-rose-500 text-white border-rose-600')}>{doc.status}</span>
                           <button onClick={() => reindexKb(doc.id)} className="rounded-lg border border-surface-container-highest px-3 py-2 text-xs font-bold text-brand-primary hover:bg-surface-container-low">Retrain</button>
-                          <button onClick={() => deleteKb(doc.id)} className="text-on-surface-variant hover:text-rose-500 transition-colors" aria-label="Delete knowledge source"><Trash2 className="w-4 h-4" /></button>
+                          <button onClick={() => setDeleteKbTarget(doc)} className="text-on-surface-variant hover:text-rose-500 transition-colors" aria-label="Delete knowledge source"><Trash2 className="w-4 h-4" /></button>
                         </div>
                       </div>
                     ))}

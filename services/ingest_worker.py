@@ -1,4 +1,5 @@
 import logging
+import anyio
 from pathlib import Path
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -8,6 +9,9 @@ from db import models
 from services.rag_service import aindex_kb_text
 from services.kb_limits import enforce_text_limit
 from services.web_scraper import scrape_url_content
+from services.file_parser import extract_text_from_file
+from services.kb_source_storage import download_kb_source
+from services.vector_store import delete_for_kb
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -64,6 +68,12 @@ async def process_kb_ingest_job(
             kb.title = kb.title or scraped_data.get("title")
             kb.extracted_size_bytes = enforce_text_limit(text_content)
             db.commit()
+        elif kb.source_storage_url:
+            source_bytes = await download_kb_source(kb.source_storage_url)
+            filename = kb.original_filename or kb.title or f"{kb.id}.txt"
+            text_content = await anyio.to_thread.run_sync(extract_text_from_file, source_bytes, filename)
+            kb.extracted_size_bytes = enforce_text_limit(text_content)
+            db.commit()
 
         if not text_content or len(text_content.strip()) == 0:
             raise ValueError("No text content extracted for KB")
@@ -72,6 +82,8 @@ async def process_kb_ingest_job(
             raise ValueError("Agent not found for KB")
         if not namespace:
             raise ValueError("Missing vector store namespace")
+
+        await anyio.to_thread.run_sync(lambda: delete_for_kb(namespace, str(kb.id)))
 
         def update_progress(done_chunks: int, total_chunks: int) -> None:
             job.total_chunks = total_chunks

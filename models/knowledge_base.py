@@ -16,6 +16,10 @@ class KnowledgeBase(Base):
     title = Column(String, nullable=True)
     status = Column(SQLAlchemyEnum(KBStatus), default=KBStatus.pending, nullable=False, index=True)
     original_filename = Column(String, nullable=True)
+    source_storage_url = Column(Text, nullable=True)
+    source_storage_key = Column(String, nullable=True)
+    source_content_type = Column(String, nullable=True)
+    source_content_sha256 = Column(String(64), nullable=True)
     file_size_bytes = Column(Integer, nullable=True)
     extracted_size_bytes = Column(Integer, nullable=True)
     chunk_count = Column(Integer, nullable=True)
@@ -27,6 +31,10 @@ class KnowledgeBase(Base):
 
     agent = relationship("Agent", back_populates="knowledge_bases")
     jobs = relationship("KBIngestJob", back_populates="kb", cascade="all, delete-orphan")
+
+    @property
+    def has_stored_source(self) -> bool:
+        return bool(self.source_storage_key or self.source_storage_url)
 
 
 class KBIngestJob(Base):

@@ -1,10 +1,10 @@
-import { 
-  Zap, 
-  Rocket, 
-  ArrowRight, 
-  Bot, 
+import {
+  Zap,
+  Rocket,
+  ArrowRight,
+  Bot,
   Database,
-  CheckCircle2
+  ShieldCheck
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { Link } from 'react-router-dom';
@@ -151,6 +151,44 @@ export default function Landing() {
                 </p>
               </motion.div>
             ))}
+          </div>
+        </section>
+
+        <section className="max-w-7xl mx-auto px-8 pb-24 md:pb-32">
+          <div className="rounded-3xl border border-surface-container-highest bg-[radial-gradient(circle_at_top,#eef2ff_0,transparent_55%)] p-10 md:p-14">
+            <div className="grid grid-cols-1 gap-10 md:grid-cols-[1.1fr_1fr]">
+              <div>
+                <p className="text-xs font-black uppercase tracking-widest text-on-surface-variant">Trust & security</p>
+                <h2 className="mt-3 text-3xl md:text-4xl font-bold text-brand-primary tracking-tight">Enterprise-grade security</h2>
+                <p className="mt-4 text-sm md:text-base text-on-surface-variant max-w-md">
+                  We take security and compliance seriously. Your data stays yours. Data encryption. Secure integrations.
+                </p>
+              </div>
+              <div className="grid gap-4">
+                <div className="rounded-2xl border border-surface-container-highest bg-surface-container-lowest p-5">
+                  <div className="flex items-start gap-3">
+                    <span className="grid h-10 w-10 place-items-center rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-700">
+                      <ShieldCheck className="h-5 w-5" />
+                    </span>
+                    <div>
+                      <p className="text-sm font-black text-brand-primary">Your data stays yours</p>
+                      <p className="mt-1 text-xs leading-5 text-on-surface-variant">Only your AI agents can access its sources. They are never used to train models.</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-surface-container-highest bg-surface-container-lowest p-5">
+                  <div className="flex items-start gap-3">
+                    <span className="grid h-10 w-10 place-items-center rounded-xl border border-sky-200 bg-sky-50 text-sky-700">
+                      <Database className="h-5 w-5" />
+                    </span>
+                    <div>
+                      <p className="text-sm font-black text-brand-primary">Data encryption</p>
+                      <p className="mt-1 text-xs leading-5 text-on-surface-variant">All data is encrypted at rest and in transit. We use industry-standard encryption algorithms.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 

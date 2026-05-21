@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import time
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -12,6 +14,7 @@ from sqlalchemy.orm import Session
 from api.auth.auth import get_db
 from db import models
 from db.database import SessionLocal
+from services.chat_runtime import get_agent_runtime
 from services.rag_service import build_messages, aretrieve_context, astream_answer
 from utils.jwt import get_current_user
 from utils.rate_limit import create_limiter
@@ -19,6 +22,7 @@ from utils.rate_limit import create_limiter
 router = APIRouter()
 logger = logging.getLogger(__name__)
 limiter = create_limiter()
+CHAT_RETRIEVAL_TOP_K_CAP = int(os.getenv("CHAT_RETRIEVAL_TOP_K_CAP", "3"))
 
 
 class ChatRequest(BaseModel):
@@ -40,34 +44,43 @@ async def chat_with_agent(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    agent = db.query(models.Agent).filter(
-        models.Agent.id == agent_id,
-        models.Agent.user_id == user.id,
-    ).first()
-    if not agent:
+    started = time.perf_counter()
+    runtime = await get_agent_runtime(db, agent_id, user.id)
+    lookup_ms = (time.perf_counter() - started) * 1000
+    if not runtime:
         raise HTTPException(status_code=404, detail="Agent not found or access denied")
-    if not agent.instructions:
+    if not runtime.instructions:
         raise HTTPException(status_code=400, detail="Agent has no instructions set yet")
 
-    cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
-    use_retrieval = bool(cfg.retrieval_enabled) if cfg else False
-    top_k = int(cfg.retrieval_top_k) if cfg else 4
-    namespace = cfg.vector_store_namespace if cfg else None
     context = ""
-    if use_retrieval and namespace:
+    retrieval_ms = 0.0
+    if runtime.retrieval_enabled and runtime.vector_store_namespace:
+        retrieval_started = time.perf_counter()
         try:
-            context = await aretrieve_context(db, namespace, str(agent.id), chat.message, top_k=top_k)
+            context = await aretrieve_context(
+                db,
+                runtime.vector_store_namespace,
+                runtime.id,
+                chat.message,
+                top_k=min(runtime.retrieval_top_k, CHAT_RETRIEVAL_TOP_K_CAP),
+            )
         except Exception:
-            logger.exception("chat_retrieval_failed agent_id=%s user_id=%s", agent.id, user.id)
+            logger.exception("chat_retrieval_failed agent_id=%s user_id=%s", runtime.id, user.id)
+        finally:
+            retrieval_ms = (time.perf_counter() - retrieval_started) * 1000
 
     unique_id = chat.unique_id or str(uuid.uuid4())
-    messages = build_messages(agent.instructions or "", context, chat.message)
+    messages = build_messages(runtime.instructions, context, chat.message)
 
     async def generate():
         answer_parts: list[str] = []
+        stream_started = time.perf_counter()
+        first_token_ms = None
         yield _sse("meta", {"unique_id": unique_id})
         try:
-            async for token in astream_answer(agent.model, messages):
+            async for token in astream_answer(runtime.model, messages):
+                if first_token_ms is None:
+                    first_token_ms = (time.perf_counter() - stream_started) * 1000
                 answer_parts.append(token)
                 yield _sse("token", {"content": token})
 
@@ -75,16 +88,29 @@ async def chat_with_agent(
             background_tasks.add_task(
                 _log_usage,
                 user_id=user.id,
-                agent_id=agent.id,
+                agent_id=runtime.id,
                 message_content=chat.message,
                 response_content=answer
             )
+            logger.info(
+                "chat_latency agent_id=%s lookup_ms=%.2f retrieval_ms=%.2f llm_ttft_ms=%.2f total_ms=%.2f",
+                runtime.id,
+                lookup_ms,
+                retrieval_ms,
+                first_token_ms or 0.0,
+                (time.perf_counter() - started) * 1000,
+            )
             yield _sse("done", {"unique_id": unique_id})
-        except Exception as exc:
+        except Exception:
             logger.exception("chat_generation_failed agent_id=%s user_id=%s unique_id=%s", agent_id, user.id, unique_id)
             yield _sse("error", {"detail": "Sorry, I could not answer that right now."})
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        background=background_tasks,
+    )
 
 
 def _log_usage(user_id, agent_id, message_content, response_content):

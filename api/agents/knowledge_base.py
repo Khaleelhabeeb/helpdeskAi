@@ -11,6 +11,8 @@ import logging
 import uuid as uuid_lib
 from services.ingest_queue import enqueue_kb_ingest
 from services.kb_limits import PayloadTooLargeError, enforce_text_limit, read_upload_limited
+from services.kb_source_storage import delete_kb_source, store_kb_source
+from services.image_upload import ImageUploadError
 from services.vector_store import delete_for_kb
 from services.file_parser import extract_text_from_file
 
@@ -47,6 +49,10 @@ async def add_knowledge_base(
 
     source_uri = None
     original_filename = None
+    source_storage_url = None
+    source_storage_key = None
+    source_content_type = None
+    source_content_sha256 = None
     file_size_bytes = 0
     extracted_size_bytes = 0
     extracted_text = ""
@@ -69,6 +75,14 @@ async def add_knowledge_base(
             extracted_size_bytes = enforce_text_limit(extracted_text)
         except PayloadTooLargeError as exc:
             raise HTTPException(status_code=413, detail=str(exc)) from exc
+        try:
+            stored = await store_kb_source(file_content, original_filename, file.content_type)
+        except ImageUploadError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        source_storage_url = stored.url
+        source_storage_key = stored.key
+        source_content_type = stored.content_type
+        source_content_sha256 = stored.sha256
         source_uri = original_filename
         
     # Handle URL scraping
@@ -94,6 +108,16 @@ async def add_knowledge_base(
         extracted_text = structured_text
         source_uri = None
         original_filename = title or "Structured Text"
+        text_bytes = structured_text.encode("utf-8")
+        file_size_bytes = len(text_bytes)
+        try:
+            stored = await store_kb_source(text_bytes, f"{original_filename}.txt", "text/plain")
+        except ImageUploadError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        source_storage_url = stored.url
+        source_storage_key = stored.key
+        source_content_type = stored.content_type
+        source_content_sha256 = stored.sha256
         
     else:
         raise HTTPException(status_code=400, detail="Unsupported source_type")
@@ -106,6 +130,10 @@ async def add_knowledge_base(
         title=title or original_filename,
         status=models.KBStatus.pending,
         original_filename=original_filename,
+        source_storage_url=source_storage_url,
+        source_storage_key=source_storage_key,
+        source_content_type=source_content_type,
+        source_content_sha256=source_content_sha256,
         file_size_bytes=file_size_bytes,
         extracted_size_bytes=extracted_size_bytes
     )
@@ -128,6 +156,44 @@ async def add_knowledge_base(
     return kb
 
 
+@router.post("/agent/{agent_id}/retrain", response_model=List[schemas.KBIngestJobOut])
+async def retrain_agent_knowledge(agent_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+    if not validate_uuid(agent_id):
+        raise HTTPException(status_code=400, detail="Invalid agent ID format")
+    agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    kbs = db.query(models.KnowledgeBase).filter(models.KnowledgeBase.agent_id == agent.id).all()
+    if not kbs:
+        return []
+
+    cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
+    if cfg and cfg.vector_store_namespace:
+        for kb in kbs:
+            try:
+                await anyio.to_thread.run_sync(delete_for_kb, cfg.vector_store_namespace, str(kb.id))
+            except Exception:
+                logger.exception("failed_to_delete_kb_vectors_before_retrain kb_id=%s", kb.id)
+
+    jobs: list[models.KBIngestJob] = []
+    for kb in kbs:
+        if kb.source_type != models.KBSourceType.url and not kb.source_storage_url:
+            kb.status = models.KBStatus.failed
+            continue
+        kb.status = models.KBStatus.pending
+        kb.updated_at = datetime.utcnow()
+        job = models.KBIngestJob(kb_id=kb.id, state=models.JobState.queued)
+        db.add(job)
+        jobs.append(job)
+    db.commit()
+    for job in jobs:
+        db.refresh(job)
+        if not enqueue_kb_ingest(str(job.id), None):
+            raise HTTPException(status_code=503, detail="Knowledge ingestion queue is full. Please try again shortly.")
+    return jobs
+
+
 @router.get("/{agent_id}", response_model=List[schemas.KnowledgeBaseOut])
 def list_kbs(
     agent_id: str,
@@ -148,7 +214,7 @@ def list_kbs(
 
 
 @router.delete("/{kb_id}")
-def delete_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
+async def delete_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
     if not validate_uuid(kb_id):
         raise HTTPException(status_code=400, detail="Invalid KB ID format")
     
@@ -168,6 +234,8 @@ def delete_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(get_curr
             delete_for_kb(cfg.vector_store_namespace, str(kb.id))
         except Exception:
             logger.exception("failed_to_delete_kb_vectors kb_id=%s", kb_id)
+
+    await delete_kb_source(kb.source_storage_key)
     
     db.delete(kb)
     db.commit()
@@ -186,8 +254,8 @@ async def reindex_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(g
     if not agent:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    if kb.source_type != models.KBSourceType.url:
-        raise HTTPException(status_code=400, detail="File/text sources must be uploaded again to retrain because raw source text is not stored.")
+    if kb.source_type != models.KBSourceType.url and not kb.source_storage_url:
+        raise HTTPException(status_code=400, detail="This source was created before stored-source retraining was enabled. Upload it again to retrain.")
 
     kb.status = models.KBStatus.pending
     kb.updated_at = datetime.utcnow()
@@ -195,6 +263,12 @@ async def reindex_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(g
     db.add(job)
     db.commit()
     db.refresh(job)
+    cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
+    if cfg and cfg.vector_store_namespace:
+        try:
+            await anyio.to_thread.run_sync(delete_for_kb, cfg.vector_store_namespace, str(kb.id))
+        except Exception:
+            logger.exception("failed_to_delete_kb_vectors_before_reindex kb_id=%s", kb_id)
     if not enqueue_kb_ingest(str(job.id), None):
         raise HTTPException(status_code=503, detail="Knowledge ingestion queue is full. Please try again shortly.")
     return job
@@ -222,7 +296,6 @@ async def get_kb_content(kb_id: str, db: Session = Depends(get_db), user = Depen
 
 @router.get("/{kb_id}/download")
 def get_kb_download_url(kb_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
-    # Original binary file storage is disabled; URL sources can still be opened.
     if not validate_uuid(kb_id):
         raise HTTPException(status_code=400, detail="Invalid KB ID format")
     
@@ -234,6 +307,14 @@ def get_kb_download_url(kb_id: str, db: Session = Depends(get_db), user = Depend
     if not agent:
         raise HTTPException(status_code=403, detail="Forbidden")
     
+    if kb.source_storage_url:
+        return {
+            "kb_id": kb_id,
+            "filename": kb.original_filename or kb.title,
+            "download_url": kb.source_storage_url,
+            "expires_in_seconds": None
+        }
+
     if kb.source_type != models.KBSourceType.url or not kb.source_uri:
         raise HTTPException(status_code=404, detail="No original file available for download")
 

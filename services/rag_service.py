@@ -17,7 +17,7 @@ JINA_EMBEDDING_URL = os.getenv("JINA_EMBEDDING_URL", "https://api.jina.ai/v1/emb
 JINA_EMBED_MAX_CONCURRENCY = int(os.getenv("JINA_EMBED_MAX_CONCURRENCY", "4"))
 LLM_STREAM_MAX_CONCURRENCY = int(os.getenv("LLM_STREAM_MAX_CONCURRENCY", "8"))
 RAG_CONTEXT_CACHE_TTL_SECONDS = int(os.getenv("RAG_CONTEXT_CACHE_TTL_SECONDS", "180"))
-RAG_RETRIEVAL_TIMEOUT_SECONDS = float(os.getenv("RAG_RETRIEVAL_TIMEOUT_SECONDS", "15"))
+RAG_RETRIEVAL_TIMEOUT_SECONDS = float(os.getenv("RAG_RETRIEVAL_TIMEOUT_SECONDS", "2.5"))
 _embed_semaphore = anyio.Semaphore(JINA_EMBED_MAX_CONCURRENCY)
 _llm_semaphore = anyio.Semaphore(LLM_STREAM_MAX_CONCURRENCY)
 CONCISE_RUNTIME_INSTRUCTION = """### Response Style
@@ -128,6 +128,8 @@ def retrieve_context(db: Session, namespace: str, agent_id: str, query: str, top
 
 
 async def aretrieve_context(db: Session, namespace: str, agent_id: str, query: str, top_k: int = 4) -> str:
+    if should_skip_retrieval(query):
+        return ""
     query_hash = hashlib.sha256(query.strip().lower().encode("utf-8")).hexdigest()
     cache_id = cache_key("rag", "context", namespace, top_k, query_hash)
     cached_context = await aredis_get_json(cache_id)
@@ -143,6 +145,27 @@ async def aretrieve_context(db: Session, namespace: str, agent_id: str, query: s
     if context:
         await aredis_set_json(cache_id, context, RAG_CONTEXT_CACHE_TTL_SECONDS)
     return context
+
+
+def should_skip_retrieval(query: str) -> bool:
+    normalized = " ".join(query.lower().strip().split())
+    if not normalized:
+        return True
+    quick_phrases = {
+        "hi",
+        "hello",
+        "hey",
+        "good morning",
+        "good afternoon",
+        "good evening",
+        "thanks",
+        "thank you",
+        "ok",
+        "okay",
+    }
+    if normalized in quick_phrases:
+        return True
+    return len(normalized.split()) <= 3 and normalized.rstrip("?!") in quick_phrases
 
 
 def build_messages(

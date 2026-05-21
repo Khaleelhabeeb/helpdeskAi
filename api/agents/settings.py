@@ -8,6 +8,8 @@ from typing import Optional
 from uuid import UUID
 from datetime import datetime
 from models.widget_deployment import new_deployment_id
+from services.chat_runtime import invalidate_agent_runtime
+from services.redis_client import cache_key, redis_delete
 
 router = APIRouter()
 
@@ -180,6 +182,10 @@ def update_agent_settings(
         db.commit()
         db.refresh(agent)
         db.refresh(config)
+        invalidate_agent_runtime(str(agent.id), agent.user_id)
+        deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.agent_id == agent.id).first()
+        if deployment:
+            redis_delete(cache_key("widget", "config", deployment.deployment_id))
         
         return {
             "success": True,
@@ -234,6 +240,10 @@ def reset_widget_settings(
     try:
         db.commit()
         db.refresh(config)
+        invalidate_agent_runtime(str(agent.id), agent.user_id)
+        deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.agent_id == agent.id).first()
+        if deployment:
+            redis_delete(cache_key("widget", "config", deployment.deployment_id))
         
         return {
             "success": True,

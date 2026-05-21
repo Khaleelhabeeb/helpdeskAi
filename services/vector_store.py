@@ -15,6 +15,7 @@ MILVUS_COLLECTION = os.getenv("JINA_MILVUS_COLLECTION", "documents_jina")
 VECTOR_DIM = int(os.getenv("JINA_EMBEDDING_DIMENSION", "1024"))
 
 MILVUS_TIMEOUT_SECONDS = float(os.getenv("MILVUS_TIMEOUT_SECONDS", "10"))
+RAG_CONTEXT_MAX_CHARS = int(os.getenv("RAG_CONTEXT_MAX_CHARS", "3500"))
 
 _client: Optional["MilvusClient"] = None
 
@@ -106,7 +107,7 @@ def search(namespace: str, query_vector: List[float], top_k: int = 4) -> List[tu
     return hits
 
 
-def format_context(results: List[tuple[str, float]], max_chars: int = 6000) -> str:
+def format_context(results: List[tuple[str, float]], max_chars: int = RAG_CONTEXT_MAX_CHARS) -> str:
     parts: List[str] = []
     total = 0
     for text, _ in results:

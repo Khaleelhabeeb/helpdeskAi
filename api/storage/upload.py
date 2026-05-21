@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from utils.jwt import get_current_user
 from services.ingest_queue import enqueue_kb_ingest
 from services.kb_limits import PayloadTooLargeError, enforce_text_limit, read_upload_limited
+from services.kb_source_storage import store_kb_source
+from services.image_upload import ImageUploadError
 from services.storage_quota import check_storage_quota, check_files_quota, increment_storage_usage
 
 router = APIRouter()
@@ -41,6 +43,11 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
     except PayloadTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
 
+    try:
+        stored = await store_kb_source(file_content, filename, file.content_type)
+    except ImageUploadError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
     if legacy_prompt_update:
         cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
         if cfg and cfg.system_prompt_locked:
@@ -68,6 +75,10 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
         source_uri=filename,
         status=models.KBStatus.pending,
         original_filename=filename,
+        source_storage_url=stored.url,
+        source_storage_key=stored.key,
+        source_content_type=stored.content_type,
+        source_content_sha256=stored.sha256,
         file_size_bytes=file_size_bytes,
         extracted_size_bytes=extracted_size_bytes
     )

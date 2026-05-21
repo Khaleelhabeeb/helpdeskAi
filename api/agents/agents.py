@@ -12,14 +12,17 @@ from utils.jwt import get_current_user
 from uuid import UUID
 from services.vector_store import delete_namespace
 from services.image_upload import ImageUploadError, upload_avatar_image
+from services.kb_source_storage import delete_kb_source
 from services.kb_limits import PayloadTooLargeError, read_upload_limited
 from services.redis_client import cache_key, redis_delete
+from services.chat_runtime import invalidate_agent_runtime
 import os
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 MAX_AVATAR_BYTES = int(os.getenv("MAX_AVATAR_BYTES", str(2 * 1024 * 1024)))
 ALLOWED_AVATAR_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+DEFAULT_CHAT_MODEL = os.getenv("DEFAULT_CHAT_MODEL", "groq/llama-3.1-8b-instant")
 
 @router.post("/create", response_model=schemas.AgentOut)
 async def create_agent(
@@ -39,7 +42,7 @@ async def create_agent(
         name=name,
         instructions=instructions,
         user_id=user.id,
-        model=model or "groq/openai/gpt-oss-20b",
+        model=model or DEFAULT_CHAT_MODEL,
     )
     db.add(new_agent)
     db.commit()
@@ -94,6 +97,7 @@ async def update_agent_avatar(
         redis_delete(cache_key("widget", "config", deployment.deployment_id))
     db.commit()
     db.refresh(agent)
+    invalidate_agent_runtime(str(agent.id), agent.user_id)
     return agent
 
 
@@ -124,10 +128,11 @@ def update_agent(agent_id: UUID, update: schemas.AgentCreate, db: Session = Depe
         agent.instructions = update.instructions
     db.commit()
     db.refresh(agent)
+    invalidate_agent_runtime(str(agent.id), agent.user_id)
     return agent
 
 @router.delete("/{agent_id}")
-def delete_agent(agent_id: UUID, db: Session = Depends(get_db), user = Depends(get_current_user)):
+async def delete_agent(agent_id: UUID, db: Session = Depends(get_db), user = Depends(get_current_user)):
     agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -153,6 +158,9 @@ def delete_agent(agent_id: UUID, db: Session = Depends(get_db), user = Depends(g
             delete_namespace(cfg.vector_store_namespace)
         except Exception:
             logger.exception("failed_to_delete_agent_vectors agent_id=%s", agent_id)
+
+    for kb in kbs:
+        await delete_kb_source(kb.source_storage_key)
     
     db.delete(agent)
     db.commit()
@@ -198,4 +206,5 @@ def update_agent_config(agent_id: UUID, update: AgentConfigUpdate, db: Session =
         setattr(cfg, field, value)
     db.commit()
     db.refresh(cfg)
+    invalidate_agent_runtime(str(agent.id), agent.user_id)
     return cfg

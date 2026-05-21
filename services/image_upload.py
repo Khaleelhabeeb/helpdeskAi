@@ -27,20 +27,35 @@ async def upload_avatar_image(
     filename: str,
     content_type: Optional[str],
 ) -> ImageUploadResult:
+    return await upload_worker_file(
+        file_bytes=file_bytes,
+        filename=filename,
+        content_type=content_type,
+        folder=_env("IMAGE_WORKER_AVATAR_FOLDER"),
+    )
+
+
+async def upload_worker_file(
+    file_bytes: bytes,
+    filename: str,
+    content_type: Optional[str],
+    folder: Optional[str] = None,
+) -> ImageUploadResult:
     image_worker_url = _env("IMAGE_WORKER_URL")
     image_worker_api_key = _env("IMAGE_WORKER_API_KEY")
     image_worker_app_name = _env("IMAGE_WORKER_APP_NAME")
-    image_worker_avatar_folder = _env("IMAGE_WORKER_AVATAR_FOLDER")
 
     if not image_worker_url or not image_worker_api_key:
-        raise ImageUploadError("Image upload service is not configured")
+        raise ImageUploadError("Upload worker is not configured")
+    if not file_bytes:
+        raise ImageUploadError("Cannot upload an empty file")
 
     files = {
         "file": (filename, file_bytes, content_type or "application/octet-stream"),
     }
     data = {
         "app": image_worker_app_name,
-        "folder": image_worker_avatar_folder,
+        "folder": folder or "",
     }
     headers = {
         "x-api-key": image_worker_api_key,
@@ -71,3 +86,29 @@ async def upload_avatar_image(
         url=str(payload.get("url")),
         key=str(payload.get("key", "")),
     )
+
+
+async def delete_worker_file(key: str) -> bool:
+    image_worker_url = _env("IMAGE_WORKER_URL")
+    image_worker_delete_url = _env("IMAGE_WORKER_DELETE_URL") or image_worker_url
+    image_worker_api_key = _env("IMAGE_WORKER_API_KEY")
+    image_worker_app_name = _env("IMAGE_WORKER_APP_NAME")
+
+    if not key or not image_worker_delete_url or not image_worker_api_key:
+        return False
+
+    headers = {"x-api-key": image_worker_api_key}
+    payload = {"key": key, "app": image_worker_app_name}
+    client = await get_async_http_client()
+    response = await client.request(
+        _env("IMAGE_WORKER_DELETE_METHOD") or "DELETE",
+        image_worker_delete_url,
+        headers=headers,
+        json=payload,
+        timeout=30.0,
+    )
+    if response.status_code in (404, 405):
+        return False
+    if response.status_code >= 400:
+        raise ImageUploadError("Upload worker delete failed")
+    return True

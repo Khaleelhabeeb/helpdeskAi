@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -11,7 +12,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from api.auth.auth import get_db
 from db import models
@@ -37,6 +38,7 @@ RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 30
 WIDGET_CONFIG_CACHE_TTL_SECONDS = 300
 FALLBACK_RATE_LIMIT_MAX_KEYS = 5000
+CHAT_RETRIEVAL_TOP_K_CAP = int(os.getenv("CHAT_RETRIEVAL_TOP_K_CAP", "3"))
 
 class WidgetDeploymentUpdate(BaseModel):
     display_name: Optional[str] = Field(None, min_length=1, max_length=120)
@@ -400,7 +402,13 @@ async def public_widget_chat(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
-    deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.deployment_id == deployment_id).first()
+    started = time.perf_counter()
+    deployment = (
+        db.query(models.WidgetDeployment)
+        .options(joinedload(models.WidgetDeployment.agent))
+        .filter(models.WidgetDeployment.deployment_id == deployment_id)
+        .first()
+    )
     if not deployment or not deployment.is_enabled:
         raise HTTPException(status_code=404, detail="Widget is not available")
     host = _origin_host(request)
@@ -439,14 +447,18 @@ async def public_widget_chat(
 
     cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
     use_retrieval = bool(cfg.retrieval_enabled) if cfg else False
-    top_k = int(cfg.retrieval_top_k) if cfg else 4
+    top_k = min(int(cfg.retrieval_top_k) if cfg else 4, CHAT_RETRIEVAL_TOP_K_CAP)
     namespace = cfg.vector_store_namespace if cfg else None
     context = ""
+    retrieval_ms = 0.0
     if use_retrieval and namespace:
+        retrieval_started = time.perf_counter()
         try:
             context = await aretrieve_context(db, namespace, str(agent.id), payload.message, top_k=top_k)
         except Exception:
             logger.exception("public_widget_retrieval_failed deployment_id=%s agent_id=%s", deployment_id, agent.id)
+        finally:
+            retrieval_ms = (time.perf_counter() - retrieval_started) * 1000
 
     history = _history_for_prompt(db, session.id)
     messages = build_messages(agent.instructions or "", context, payload.message, history=history)
@@ -462,9 +474,13 @@ async def public_widget_chat(
 
     async def generate():
         answer_parts: list[str] = []
+        stream_started = time.perf_counter()
+        first_token_ms = None
         yield _sse("meta", {"session_id": str(session_id_value)})
         try:
             async for token in astream_answer(agent_model, messages):
+                if first_token_ms is None:
+                    first_token_ms = (time.perf_counter() - stream_started) * 1000
                 answer_parts.append(token)
                 yield _sse("token", {"content": token})
             answer = "".join(answer_parts).strip()
@@ -478,12 +494,23 @@ async def public_widget_chat(
                 answer=answer
             )
             
+            logger.info(
+                "widget_chat_latency deployment_id=%s agent_id=%s retrieval_ms=%.2f llm_ttft_ms=%.2f total_ms=%.2f",
+                deployment_id,
+                agent_id_value,
+                retrieval_ms,
+                first_token_ms or 0.0,
+                (time.perf_counter() - started) * 1000,
+            )
             yield _sse("done", {"session_id": str(session_id_value)})
         except Exception:
             logger.exception("public_widget_generation_failed deployment_id=%s session_id=%s", deployment_id, session_id_value)
             yield _sse("error", {"detail": "Sorry, I could not answer that right now."})
 
-    return StreamingResponse(generate(), media_type="text/event-stream", headers=_origin_headers(request))
+    headers = _origin_headers(request)
+    headers["Cache-Control"] = "no-cache"
+    headers["X-Accel-Buffering"] = "no"
+    return StreamingResponse(generate(), media_type="text/event-stream", headers=headers, background=background_tasks)
 
 
 def _log_public_chat(session_id, user_id, agent_id, user_message, answer):
