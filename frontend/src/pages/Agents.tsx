@@ -256,6 +256,7 @@ export default function Agents() {
   const [isTesting, setTesting] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<Agent | null>(null);
   const playgroundEndRef = useRef<HTMLDivElement | null>(null);
 
   const selectedAgent = useMemo(() => agents.find((agent) => agent.id === selectedId) ?? null, [agents, selectedId]);
@@ -486,6 +487,7 @@ export default function Agents() {
       setAgents((current) => current.filter((agent) => agent.id !== agentId));
       setSelectedId(null);
       setDocuments([]);
+      setDeleteTarget(null);
       setNotice('Agent deleted.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not delete agent');
@@ -798,10 +800,48 @@ export default function Agents() {
             </div>
             <div className="flex gap-3">
               <button onClick={() => navigate(`/agents/${selectedAgent.id}/deploy`)} className="flex items-center justify-center gap-2 px-4 py-2 border border-surface-container-highest bg-surface-container-low text-brand-primary text-sm font-bold rounded-lg hover:bg-surface-container transition-colors"><Code2 className="w-4 h-4" />Deploy</button>
-              <button onClick={() => deleteAgent(selectedAgent.id)} disabled={isSaving} className="flex items-center justify-center gap-2 px-4 py-2 border border-rose-200 bg-rose-50 text-rose-700 text-sm font-bold rounded-lg hover:bg-rose-100 transition-colors"><Trash2 className="w-4 h-4" />Delete</button>
+              <button onClick={() => setDeleteTarget(selectedAgent)} disabled={isSaving} className="flex items-center justify-center gap-2 px-4 py-2 border border-rose-200 bg-rose-50 text-rose-700 text-sm font-bold rounded-lg hover:bg-rose-100 transition-colors"><Trash2 className="w-4 h-4" />Delete</button>
               <button onClick={saveAgent} disabled={isSaving || !editName.trim()} className="flex items-center justify-center gap-2 px-6 py-2 bg-brand-primary text-brand-on-primary text-sm font-bold rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50">{isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}Save</button>
             </div>
           </header>
+
+          {deleteTarget && (
+            <div className="fixed inset-0 z-[80] flex items-center justify-center bg-zinc-950/45 px-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="delete-agent-title">
+              <div className="w-full max-w-md rounded-xl border border-surface-container-highest bg-surface-container-lowest p-6 shadow-2xl">
+                <div className="flex items-start gap-4">
+                  <div className="grid h-11 w-11 shrink-0 place-items-center rounded-lg bg-rose-50 text-rose-700">
+                    <Trash2 className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <h2 id="delete-agent-title" className="text-lg font-black text-brand-primary">Delete agent?</h2>
+                    <p className="mt-2 text-sm leading-6 text-on-surface-variant">
+                      This will delete <span className="font-bold text-brand-primary">{deleteTarget.name}</span> and its configuration. This action cannot be undone.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setDeleteTarget(null)}
+                    disabled={isSaving}
+                    className="h-10 rounded-lg border border-surface-container-highest bg-surface-container-lowest px-4 text-sm font-bold text-brand-primary hover:bg-surface-container-low disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => deleteAgent(deleteTarget.id)}
+                    disabled={isSaving}
+                    className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-rose-600 px-4 text-sm font-bold text-white hover:bg-rose-700 disabled:opacity-50"
+                  >
+                    {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                    Delete agent
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {(error || notice) && <div className={cn('rounded-lg border px-4 py-3 text-sm font-medium', error ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700')}>{error || notice}</div>}
 
