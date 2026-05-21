@@ -15,15 +15,11 @@ class KnowledgeBase(Base):
     source_uri = Column(Text, nullable=True)
     title = Column(String, nullable=True)
     status = Column(SQLAlchemyEnum(KBStatus), default=KBStatus.pending, nullable=False, index=True)
-    # Legacy storage fields retained for old rows only.
-    s3_original_key = Column(String, nullable=True)
-    s3_extracted_key = Column(String, nullable=True)
     original_filename = Column(String, nullable=True)
     file_size_bytes = Column(Integer, nullable=True)
     extracted_size_bytes = Column(Integer, nullable=True)
     chunk_count = Column(Integer, nullable=True)
     embedding_cost = Column(Integer, nullable=True)
-    s3_region = Column(String, default="us-east-1")
     
     tokens_estimate = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)

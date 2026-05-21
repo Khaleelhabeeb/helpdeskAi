@@ -25,7 +25,7 @@ import {
 import { AppLayout } from '../components/Layout';
 import { cn } from '../lib/utils';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion } from 'motion/react';
 import { Agent, apiFetch, formatRelative, KnowledgeBase } from '../lib/api';
 import ReactMarkdown from 'react-markdown';
@@ -229,6 +229,8 @@ function ModelSelect({ value, options, onChange }: { value: string; options: Mod
 
 export default function Agents() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const agentIdFromUrl = searchParams.get('agent');
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [documents, setDocuments] = useState<KnowledgeBase[]>([]);
@@ -306,6 +308,12 @@ export default function Agents() {
     loadAgents();
     loadModels();
   }, []);
+
+  useEffect(() => {
+    if (!agentIdFromUrl) return;
+    setCreating(false);
+    setSelectedId(agentIdFromUrl);
+  }, [agentIdFromUrl]);
 
   useEffect(() => {
     if (!selectedAgent) return;

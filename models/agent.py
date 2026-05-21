@@ -13,7 +13,7 @@ class Agent(Base):
     name = Column(String, nullable=False)
     instructions = Column(Text, nullable=True)
     model = Column(String, default="groq/openai/gpt-oss-20b", nullable=False)
-    avatar_url = Column(String, nullable=True)  # S3 key for agent avatar image
+    avatar_url = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", backref="agents")

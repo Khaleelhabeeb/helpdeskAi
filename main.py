@@ -3,12 +3,13 @@ import os
 import time
 import uuid
 
-from fastapi import FastAPI, Request, status, Response
+from fastapi import FastAPI, Request, status
+from starlette.responses import Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+# JSONResponse imported from starlette.responses above for compatibility with slowapi
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from api.agents import agents, chat, knowledge_base, settings, widget_deployment
@@ -133,7 +134,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.getenv("FRONTEND_URL")],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
