@@ -312,8 +312,17 @@ export function TopAppBar({ onMenuClick }: TopAppBarProps) {
     ? 'Search agents...'
     : 'Search workspace...';
 
+  const isDeployRoute = location.pathname.includes('/deploy');
+
   const pageTitle = (() => {
-    if (location.pathname.startsWith('/agents/') && location.pathname.includes('/deploy')) return 'Deploy';
+    if (location.pathname.includes('/deploy/widget')) return 'Chat widget';
+    if (location.pathname.includes('/deploy/help-page')) return 'Help page';
+    if (location.pathname.match(/\/deploy\/(email|whatsapp|phone)$/)) {
+      const channel = location.pathname.split('/').pop();
+      return channel ? channel.charAt(0).toUpperCase() + channel.slice(1) : 'Deploy';
+    }
+    if (location.pathname.includes('/deploy')) return 'Deploy';
+    if (location.pathname.startsWith('/guides')) return 'Guides';
     if (location.pathname.startsWith('/agents')) return 'Agents';
     if (location.pathname.startsWith('/dashboard')) return 'Dashboard';
     if (location.pathname.startsWith('/billing')) return 'Usage';
@@ -322,7 +331,12 @@ export function TopAppBar({ onMenuClick }: TopAppBarProps) {
   })();
 
   return (
-    <header className="sticky top-0 z-40 flex h-14 w-full items-center justify-between gap-4 border-b border-surface-container-highest/80 bg-surface-container-lowest/90 px-4 backdrop-blur-md md:h-16 md:px-6">
+    <header
+      className={cn(
+        'sticky top-0 z-40 flex w-full items-center justify-between gap-3 border-b border-surface-container-highest/80 bg-surface-container-lowest/90 px-3 backdrop-blur-md md:px-5',
+        isDeployRoute ? 'h-12' : 'h-14 gap-4 md:h-16 md:px-6'
+      )}
+    >
       <div className="flex min-w-0 flex-1 items-center gap-3">
         <button
           type="button"
@@ -333,12 +347,19 @@ export function TopAppBar({ onMenuClick }: TopAppBarProps) {
           <Menu className="h-5 w-5" />
         </button>
 
-        <div className="hidden min-w-0 sm:block">
-          <p className="truncate text-sm font-bold text-brand-primary">{pageTitle}</p>
-          <p className="truncate text-[11px] text-on-surface-variant">HelpDeskAI workspace</p>
-        </div>
+        {!isDeployRoute && (
+          <div className="hidden min-w-0 sm:block">
+            <p className="truncate text-sm font-bold text-brand-primary">{pageTitle}</p>
+            <p className="truncate text-[11px] text-on-surface-variant">HelpDeskAI workspace</p>
+          </div>
+        )}
 
-        <div className="relative ml-auto hidden max-w-sm flex-1 sm:ml-0 sm:block lg:max-w-md">
+        <div
+          className={cn(
+            'relative hidden max-w-sm flex-1 sm:block lg:max-w-md',
+            isDeployRoute ? 'ml-0' : 'ml-auto sm:ml-0'
+          )}
+        >
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-on-surface-variant/40" />
           <input
             type="text"

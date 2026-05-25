@@ -12,7 +12,7 @@ const exampleSnippet = `<script
 const steps = [
   {
     title: 'Copy your embed snippet',
-    body: 'Open your agent’s Deploy page, click Manage on the chat widget, then copy the embed code shown under Allowed domains.',
+    body: 'Open your agent’s Deploy → Chat widget page, then copy the embed code shown under Allowed domains.',
   },
   {
     title: 'Paste it on your website',

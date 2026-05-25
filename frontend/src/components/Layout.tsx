@@ -12,7 +12,13 @@ import { X } from 'lucide-react';
 
 const SIDEBAR_STORAGE_KEY = 'helpdeskai.sidebar_collapsed';
 
-export function AppLayout({ children }: { children: ReactNode }) {
+export function AppLayout({
+  children,
+  compact = false,
+}: {
+  children: ReactNode;
+  compact?: boolean;
+}) {
   const location = useLocation();
   const [isMobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(() => {
@@ -81,14 +87,20 @@ export function AppLayout({ children }: { children: ReactNode }) {
         className="flex min-w-0 flex-1 flex-col max-md:!ml-0"
       >
         <TopAppBar onMenuClick={() => setMobileOpen(true)} />
-        <main className="flex-1 overflow-y-auto p-4 md:p-8">
+        <main
+          className={
+            compact
+              ? 'flex-1 overflow-y-auto px-3 py-3 md:px-5 md:py-4'
+              : 'flex-1 overflow-y-auto p-4 md:p-8'
+          }
+        >
           <AnimatePresence mode="wait">
             <motion.div
               key={location.pathname}
-              initial={{ opacity: 0, y: 8 }}
+              initial={{ opacity: 0, y: compact ? 4 : 8 }}
               animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+              exit={{ opacity: 0, y: compact ? 0 : -8 }}
+              transition={{ duration: compact ? 0.18 : 0.25, ease: [0.16, 1, 0.3, 1] }}
               className="mx-auto max-w-[1440px]"
             >
               {children}
