@@ -18,15 +18,29 @@ engine = create_engine(
     DATABASE_URL,
     pool_size=int(os.getenv("DB_POOL_SIZE", "5")),
     max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "5")),
-    pool_timeout=30,  # Seconds to wait before giving up on connection
-    pool_recycle=3600,  # Recycle connections after 1 hour
-    pool_pre_ping=True,  # Test connections before using them
+    pool_timeout=30,
+    pool_recycle=3600,
+    pool_pre_ping=True,
     connect_args={
-        "options": "-c statement_timeout=30000"  # 30 second query timeout
+        "options": "-c statement_timeout=30000"
     }
 )
 
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+# Separate engine + session for background tasks (ingest queue, usage logging, etc.)
+_bg_engine = create_engine(
+    DATABASE_URL,
+    pool_size=int(os.getenv("BG_DB_POOL_SIZE", "3")),
+    max_overflow=int(os.getenv("BG_DB_MAX_OVERFLOW", "3")),
+    pool_timeout=60,
+    pool_recycle=3600,
+    pool_pre_ping=True,
+    connect_args={
+        "options": "-c statement_timeout=60000"
+    },
+)
+BackgroundSession = sessionmaker(bind=_bg_engine, autocommit=False, autoflush=False)
 
 class Base(DeclarativeBase):
     pass

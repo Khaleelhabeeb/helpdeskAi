@@ -8,7 +8,7 @@ from threading import BoundedSemaphore
 from typing import Optional
 
 from db import models
-from db.database import SessionLocal
+from db.database import BackgroundSession
 from services.http_client import close_http_clients
 from services.ingest_worker import process_kb_ingest_job
 from services.redis_client import close_redis_clients
@@ -25,7 +25,7 @@ _slots = BoundedSemaphore(_MAX_PENDING)
 
 
 def _mark_job_failed(job_id: str, error: str) -> None:
-    db = SessionLocal()
+    db = BackgroundSession()
     try:
         job = db.query(models.KBIngestJob).filter(models.KBIngestJob.id == job_id).first()
         if job:

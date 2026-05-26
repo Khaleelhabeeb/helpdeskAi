@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
-from db.database import SessionLocal
+from db.database import BackgroundSession
 from db import models
 from services.rag_service import aindex_kb_text
 from services.kb_limits import enforce_text_limit
@@ -33,7 +33,7 @@ async def process_kb_ingest_job(
 
     transient_text_path: temporary spool file supplied by the ingest queue.
     """
-    db: Session = SessionLocal()
+    db: Session = BackgroundSession()
     try:
         job = db.query(models.KBIngestJob).filter(models.KBIngestJob.id == job_id).first()
         if not job:

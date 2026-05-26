@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from api.auth.auth import get_db
 from db import models
-from db.database import SessionLocal
+from db.database import BackgroundSession
 from models.widget_deployment import new_deployment_id
 from services.redis_client import (
     cache_key,
@@ -514,7 +514,7 @@ async def public_widget_chat(
 
 
 def _log_public_chat(session_id, user_id, agent_id, user_message, answer):
-    db = SessionLocal()
+    db = BackgroundSession()
     try:
         db.add(models.ChatMessage(session_id=session_id, role="assistant", content=answer, created_at=datetime.utcnow()))
         db.add(models.UsageLog(

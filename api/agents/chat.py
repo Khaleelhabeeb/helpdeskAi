@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from api.auth.auth import get_db
 from db import models
-from db.database import SessionLocal
+from db.database import BackgroundSession
 from services.chat_runtime import get_agent_runtime
 from services.rag_service import build_messages, aretrieve_context, astream_answer
 from utils.jwt import get_current_user
@@ -114,7 +114,7 @@ async def chat_with_agent(
 
 
 def _log_usage(user_id, agent_id, message_content, response_content):
-    db = SessionLocal()
+    db = BackgroundSession()
     try:
         db.add(models.UsageLog(
             user_id=user_id,
