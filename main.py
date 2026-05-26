@@ -162,7 +162,7 @@ app.include_router(chat.router, prefix="/chat", tags=["Chat"])
 app.include_router(users.router, prefix="/users", tags=["users"]) 
 app.include_router(storage.router, prefix="/users", tags=["Storage"])
 app.include_router(scrape.router, prefix="/scrape", tags=["Scrape"])
-app.include_router(analytic.router, tags=["KPI"])
+app.include_router(analytics.router, tags=["KPI"])
 app.include_router(model_catalog.router, prefix="/models", tags=["Models"])
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
