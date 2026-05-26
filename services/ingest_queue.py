@@ -1,6 +1,8 @@
+import asyncio
 import logging
 import os
 import tempfile
+import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -71,16 +73,30 @@ def _release_slot(future: Future) -> None:
         _slots.release()
 
 
-import asyncio
-def _run_job(job_id: str, spool_path: Optional[str]) -> None:
-    async def runner() -> None:
-        try:
-            await process_kb_ingest_job(job_id, transient_text_path=spool_path)
-        finally:
-            await close_http_clients()
-            await close_redis_clients()
+# Cache one event loop per thread instead of creating one per job
+# via asyncio.run().  Saves ~200-500KB of temporary allocation per job.
+_thread_loops: dict[int, asyncio.AbstractEventLoop] = {}
 
-    asyncio.run(runner())
+def _get_thread_loop() -> asyncio.AbstractEventLoop:
+    tid = threading.get_ident()
+    loop = _thread_loops.get(tid)
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        _thread_loops[tid] = loop
+    return loop
+
+
+async def _run_async_job(job_id: str, spool_path: Optional[str]) -> None:
+    try:
+        await process_kb_ingest_job(job_id, transient_text_path=spool_path)
+    finally:
+        await close_http_clients()
+        await close_redis_clients()
+
+
+def _run_job(job_id: str, spool_path: Optional[str]) -> None:
+    loop = _get_thread_loop()
+    loop.run_until_complete(_run_async_job(job_id, spool_path))
 
 
 def enqueue_kb_ingest(job_id: str, transient_text: Optional[str] = None) -> bool:

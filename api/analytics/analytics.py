@@ -20,7 +20,14 @@ def get_dashboard_summary(db: Session = Depends(get_db), user=Depends(get_curren
         return cached
 
     agents = (
-        db.query(models.Agent)
+        db.query(
+            models.Agent.id,
+            models.Agent.name,
+            models.Agent.instructions,
+            models.Agent.model,
+            models.Agent.avatar_url,
+            models.Agent.created_at,
+        )
         .filter(models.Agent.user_id == user.id)
         .order_by(models.Agent.created_at.desc())
         .limit(100)
@@ -95,8 +102,13 @@ def get_dashboard_summary(db: Session = Depends(get_db), user=Depends(get_curren
     }
 
     logs = (
-        db.query(models.UsageLog)
-        .options(joinedload(models.UsageLog.agent))
+        db.query(
+            models.UsageLog.timestamp,
+            models.UsageLog.message_content,
+            models.UsageLog.response_content,
+            models.Agent.name.label('agent_name'),
+        )
+        .join(models.Agent, models.UsageLog.agent_id == models.Agent.id)
         .filter(models.UsageLog.user_id == user.id)
         .order_by(models.UsageLog.timestamp.desc())
         .limit(20)
@@ -105,9 +117,9 @@ def get_dashboard_summary(db: Session = Depends(get_db), user=Depends(get_curren
     recent_activity = [
         {
             "timestamp": log.timestamp.isoformat() if log.timestamp else None,
-            "agent_name": log.agent.name if log.agent else "Unknown",
-            "question": log.message_content,
-            "response": log.response_content,
+            "agent_name": log.agent_name or "Unknown",
+            "question": (log.message_content[:200] + "…") if log.message_content and len(log.message_content) > 200 else log.message_content,
+            "response": (log.response_content[:200] + "…") if log.response_content and len(log.response_content) > 200 else log.response_content,
         }
         for log in logs
     ]
@@ -194,20 +206,25 @@ def get_activity_timeline_kpi(db: Session = Depends(get_db), user=Depends(get_cu
     """Return recent activity and peak usage times."""
     # Recent activity is fine with limit
     logs = (
-        db.query(models.UsageLog)
-        .options(joinedload(models.UsageLog.agent))
+        db.query(
+            models.UsageLog.timestamp,
+            models.UsageLog.message_content,
+            models.UsageLog.response_content,
+            models.Agent.name.label('agent_name'),
+        )
+        .join(models.Agent, models.UsageLog.agent_id == models.Agent.id)
         .filter(models.UsageLog.user_id == user.id)
         .order_by(models.UsageLog.timestamp.desc())
         .limit(20)
         .all()
     )
-    
+
     recent_activity = [
         {
             "timestamp": log.timestamp,
-            "agent_name": log.agent.name if log.agent else "Unknown",
-            "question": log.message_content,
-            "response": log.response_content
+            "agent_name": log.agent_name or "Unknown",
+            "question": (log.message_content[:200] + "…") if log.message_content and len(log.message_content) > 200 else log.message_content,
+            "response": (log.response_content[:200] + "…") if log.response_content and len(log.response_content) > 200 else log.response_content,
         }
         for log in logs
     ]

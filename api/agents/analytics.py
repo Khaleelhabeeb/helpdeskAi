@@ -262,22 +262,20 @@ def get_agent_kb_analytics(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
-    # Get KB analytics: total KBs, chunks, storage, status breakdown, and source type distribution
-    # Verify agent ownership
     agent = db.query(models.Agent).filter(
         models.Agent.id == agent_id,
         models.Agent.user_id == user.id
     ).first()
-    
+
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    
-    # Get all KBs for this agent
-    kbs = db.query(models.KnowledgeBase).filter(
+
+    # Push aggregations to SQL instead of loading all rows into Python
+    total_kbs = db.query(func.count(models.KnowledgeBase.id)).filter(
         models.KnowledgeBase.agent_id == agent_id
-    ).all()
-    
-    if not kbs:
+    ).scalar() or 0
+
+    if total_kbs == 0:
         return {
             "agent_id": str(agent_id),
             "agent_name": agent.name,
@@ -288,37 +286,61 @@ def get_agent_kb_analytics(
             "source_type_breakdown": {},
             "knowledge_bases": []
         }
-    
-    # Calculate metrics
-    total_chunks = sum(kb.chunk_count or 0 for kb in kbs)
-    total_storage = sum((kb.file_size_bytes or 0) + (kb.extracted_size_bytes or 0) for kb in kbs)
-    
-    status_breakdown = {}
-    source_type_breakdown = {}
-    
-    for kb in kbs:
-        # Status breakdown
-        status = kb.status.value
-        status_breakdown[status] = status_breakdown.get(status, 0) + 1
-        
-        # Source type breakdown
-        source = kb.source_type.value
-        source_type_breakdown[source] = source_type_breakdown.get(source, 0) + 1
-    
+
+    agg = db.query(
+        func.coalesce(func.sum(models.KnowledgeBase.chunk_count), 0).label('total_chunks'),
+        func.coalesce(func.sum(models.KnowledgeBase.file_size_bytes), 0).label('total_file_size'),
+        func.coalesce(func.sum(models.KnowledgeBase.extracted_size_bytes), 0).label('total_extracted_size'),
+    ).filter(
+        models.KnowledgeBase.agent_id == agent_id
+    ).first()
+
+    total_chunks = agg.total_chunks
+    total_storage = (agg.total_file_size or 0) + (agg.total_extracted_size or 0)
+
+    status_rows = db.query(
+        models.KnowledgeBase.status,
+        func.count(models.KnowledgeBase.id).label('cnt')
+    ).filter(
+        models.KnowledgeBase.agent_id == agent_id
+    ).group_by(models.KnowledgeBase.status).all()
+    status_breakdown = {row.status.value: row.cnt for row in status_rows}
+
+    source_rows = db.query(
+        models.KnowledgeBase.source_type,
+        func.count(models.KnowledgeBase.id).label('cnt')
+    ).filter(
+        models.KnowledgeBase.agent_id == agent_id
+    ).group_by(models.KnowledgeBase.source_type).all()
+    source_type_breakdown = {row.source_type.value: row.cnt for row in source_rows}
+
+    kb_rows = db.query(
+        models.KnowledgeBase.id,
+        models.KnowledgeBase.title,
+        models.KnowledgeBase.original_filename,
+        models.KnowledgeBase.source_type,
+        models.KnowledgeBase.status,
+        models.KnowledgeBase.chunk_count,
+        models.KnowledgeBase.file_size_bytes,
+        models.KnowledgeBase.created_at,
+    ).filter(
+        models.KnowledgeBase.agent_id == agent_id
+    ).all()
+
     kb_details = [{
-        "kb_id": str(kb.id),
-        "title": kb.title or kb.original_filename,
-        "source_type": kb.source_type.value,
-        "status": kb.status.value,
-        "chunk_count": kb.chunk_count or 0,
-        "file_size_bytes": kb.file_size_bytes or 0,
-        "created_at": kb.created_at.isoformat() if kb.created_at else None
-    } for kb in kbs]
-    
+        "kb_id": str(row.id),
+        "title": row.title or row.original_filename,
+        "source_type": row.source_type.value,
+        "status": row.status.value,
+        "chunk_count": row.chunk_count or 0,
+        "file_size_bytes": row.file_size_bytes or 0,
+        "created_at": row.created_at.isoformat() if row.created_at else None
+    } for row in kb_rows]
+
     return {
         "agent_id": str(agent_id),
         "agent_name": agent.name,
-        "total_kbs": len(kbs),
+        "total_kbs": total_kbs,
         "total_chunks": total_chunks,
         "total_storage_bytes": total_storage,
         "total_storage_mb": round(total_storage / (1024 * 1024), 2),

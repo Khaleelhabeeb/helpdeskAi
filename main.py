@@ -19,7 +19,7 @@ from api.storage import storage, upload
 from api.users import users
 from api import models as model_catalog
 from db.database import Base, engine
-from api.analystics import analytic
+from api.analytics import analytic
 from fastapi.staticfiles import StaticFiles
 from services.http_client import close_http_clients
 from services.redis_client import close_redis_clients

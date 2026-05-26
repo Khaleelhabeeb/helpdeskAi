@@ -37,7 +37,7 @@ DEFAULT_ALLOWED_DOMAINS = ["localhost", "127.0.0.1"]
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 30
 WIDGET_CONFIG_CACHE_TTL_SECONDS = 300
-FALLBACK_RATE_LIMIT_MAX_KEYS = 5000
+FALLBACK_RATE_LIMIT_MAX_KEYS = 1000
 CHAT_RETRIEVAL_TOP_K_CAP = int(os.getenv("CHAT_RETRIEVAL_TOP_K_CAP", "3"))
 
 class WidgetDeploymentUpdate(BaseModel):
@@ -165,33 +165,37 @@ async def _check_rate_limit(deployment_public_id: str, visitor_id: str, request:
         if window_start > _rate_limit_data["last_window_start"]:
             # Rotate windows
             if window_start > _rate_limit_data["last_window_start"] + RATE_LIMIT_WINDOW_SECONDS:
-                # If more than one window passed, clear both
                 _rate_limit_data["previous_window"] = {}
             else:
                 _rate_limit_data["previous_window"] = _rate_limit_data["current_window"]
-            
             _rate_limit_data["current_window"] = {}
             _rate_limit_data["last_window_start"] = window_start
-            
+            # Trim previous_window so total memory never exceeds 2x max
+            stale = len(_rate_limit_data["previous_window"]) - FALLBACK_RATE_LIMIT_MAX_KEYS
+            if stale > 0:
+                for _ in range(stale):
+                    _rate_limit_data["previous_window"].pop(next(iter(_rate_limit_data["previous_window"])), None)
+
         key = f"{deployment_public_id}:{ip}"
-        
-        # Sliding window approximation: 
-        # count = current_window_count + previous_window_count * (remaining_time_in_prev_window / total_time)
+
         current_count = _rate_limit_data["current_window"].get(key, 0)
         prev_count = _rate_limit_data["previous_window"].get(key, 0)
-        
+
         elapsed = now - window_start
         weight = (RATE_LIMIT_WINDOW_SECONDS - elapsed) / RATE_LIMIT_WINDOW_SECONDS
-        
+
         estimated_count = current_count + (prev_count * weight)
-        
+
         if estimated_count >= RATE_LIMIT_MAX_REQUESTS:
             logger.warning("rate_limit_exceeded key=%s ip=%s", key, ip)
             raise HTTPException(status_code=429, detail="Too many messages. Please wait a moment.")
-            
+
         _rate_limit_data["current_window"][key] = current_count + 1
         if len(_rate_limit_data["current_window"]) > FALLBACK_RATE_LIMIT_MAX_KEYS:
-            _rate_limit_data["current_window"].pop(next(iter(_rate_limit_data["current_window"])), None)
+            # Evict 10% at once to avoid O(n) pops under sustained load
+            excess = len(_rate_limit_data["current_window"]) - FALLBACK_RATE_LIMIT_MAX_KEYS
+            for _ in range(min(excess, FALLBACK_RATE_LIMIT_MAX_KEYS // 10)):
+                _rate_limit_data["current_window"].pop(next(iter(_rate_limit_data["current_window"])), None)
 
 
 def _deployment_out(deployment: models.WidgetDeployment, request: Request) -> dict:

@@ -1,5 +1,6 @@
 import hashlib
 import os
+import re
 import uuid
 import anyio
 import httpx
@@ -28,18 +29,24 @@ CONCISE_RUNTIME_INSTRUCTION = """### Response Style
 - Do not include long explanations unless the user explicitly asks for detail."""
 
 
+_MULTI_WS = re.compile(r"\s+")
+
+
 def chunk_text(text_value: str, size: int = 1000, overlap: int = 150) -> List[str]:
-    cleaned = " ".join(text_value.split())
-    chunks, start = [], 0
-    while start < len(cleaned):
-        end = min(start + size, len(cleaned))
-        cut = cleaned.rfind(" ", start, end)
-        if cut > start + size // 2:
-            end = cut
-        chunk = cleaned[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-        start = max(end - overlap, end) if end >= len(cleaned) else max(end - overlap, start + 1)
+    cleaned = _MULTI_WS.sub(" ", text_value).strip()
+    if not cleaned:
+        return []
+    chunks: list[str] = []
+    start = 0
+    text_len = len(cleaned)
+    while start < text_len:
+        end = min(start + size, text_len)
+        if end < text_len:
+            cut = cleaned.rfind(" ", start + 1, end)
+            if cut > start + size // 2:
+                end = cut
+        chunks.append(cleaned[start:end])
+        start = end - overlap if end < text_len else end
     return chunks
 
 
