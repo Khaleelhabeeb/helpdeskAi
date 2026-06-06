@@ -6,7 +6,7 @@ from db import models
 from utils.jwt import get_current_user
 from typing import Optional
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, timezone
 from models.widget_deployment import new_deployment_id
 from services.chat_runtime import invalidate_agent_runtime
 from services.redis_client import cache_key, redis_delete
@@ -28,8 +28,8 @@ def _get_or_create_widget_deployment(db: Session, agent: models.Agent) -> models
         primary_color="#ffffff",
         allowed_domains=["localhost", "127.0.0.1"],
         is_enabled=True,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
     db.add(deployment)
     db.commit()
@@ -176,7 +176,7 @@ def update_agent_settings(
         updates.append("widget_use_color_header")
     
     # Update timestamp
-    config.updated_at = datetime.utcnow()
+    config.updated_at = datetime.now(timezone.utc)
     
     try:
         db.commit()
@@ -235,7 +235,7 @@ def reset_widget_settings(
     config.widget_position = 'bottom-right'
     config.widget_greeting = f'Hi! How can {agent.name} help you today?'
     config.widget_use_color_header = False
-    config.updated_at = datetime.utcnow()
+    config.updated_at = datetime.now(timezone.utc)
     
     try:
         db.commit()

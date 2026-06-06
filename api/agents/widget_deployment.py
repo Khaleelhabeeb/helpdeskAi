@@ -5,7 +5,7 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -235,7 +235,7 @@ def _public_widget_config_payload(db: Session, deployment_id: str) -> Optional[d
     if not deployment or not deployment.is_enabled:
         return None
 
-    updated_at = deployment.updated_at or datetime.utcnow()
+    updated_at = deployment.updated_at or datetime.now(timezone.utc)
     payload = {
         "deployment_id": deployment.deployment_id,
         "display_name": deployment.display_name,
@@ -264,8 +264,8 @@ def _get_or_create_deployment(db: Session, agent: models.Agent) -> models.Widget
         primary_color="#ffffff",
         allowed_domains=DEFAULT_ALLOWED_DOMAINS,
         is_enabled=True,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
     db.add(deployment)
     db.commit()
@@ -336,7 +336,7 @@ def update_widget_deployment(
         deployment.allowed_domains = _clean_domains(payload.allowed_domains)
     if payload.is_enabled is not None:
         deployment.is_enabled = payload.is_enabled
-    deployment.updated_at = datetime.utcnow()
+    deployment.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(deployment)
     invalidate_widget_config_cache(deployment.deployment_id)
@@ -356,7 +356,7 @@ def regenerate_widget_deployment(
     deployment = _get_or_create_deployment(db, agent)
     old_deployment_id = deployment.deployment_id
     deployment.deployment_id = new_deployment_id()
-    deployment.updated_at = datetime.utcnow()
+    deployment.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(deployment)
     invalidate_widget_config_cache(old_deployment_id)
@@ -442,8 +442,8 @@ async def public_widget_chat(
             deployment_id=deployment.id,
             agent_id=agent.id,
             visitor_hash=_visitor_hash(deployment.id, visitor_id, request),
-            created_at=datetime.utcnow(),
-            last_active_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
+            last_active_at=datetime.now(timezone.utc),
         )
         db.add(session)
         db.commit()
@@ -472,8 +472,8 @@ async def public_widget_chat(
     agent_model = agent.model
     user_message = payload.message
 
-    db.add(models.ChatMessage(session_id=session_id_value, role="user", content=user_message, created_at=datetime.utcnow()))
-    session.last_active_at = datetime.utcnow()
+    db.add(models.ChatMessage(session_id=session_id_value, role="user", content=user_message, created_at=datetime.now(timezone.utc)))
+    session.last_active_at = datetime.now(timezone.utc)
     db.commit()
 
     async def generate():
@@ -520,18 +520,18 @@ async def public_widget_chat(
 def _log_public_chat(session_id, user_id, agent_id, user_message, answer):
     db = BackgroundSession()
     try:
-        db.add(models.ChatMessage(session_id=session_id, role="assistant", content=answer, created_at=datetime.utcnow()))
+        db.add(models.ChatMessage(session_id=session_id, role="assistant", content=answer, created_at=datetime.now(timezone.utc)))
         db.add(models.UsageLog(
             user_id=user_id,
             agent_id=agent_id,
             message_content=user_message,
             response_content=answer,
             credits_used=1,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         ))
         session = db.query(models.ChatSession).filter(models.ChatSession.id == session_id).first()
         if session:
-            session.last_active_at = datetime.utcnow()
+            session.last_active_at = datetime.now(timezone.utc)
         db.commit()
     except Exception:
         db.rollback()

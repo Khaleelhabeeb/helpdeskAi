@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from db import schemas
 from api.auth.auth import get_db
@@ -182,7 +182,7 @@ async def retrain_agent_knowledge(agent_id: str, db: Session = Depends(get_db), 
             kb.status = models.KBStatus.failed
             continue
         kb.status = models.KBStatus.pending
-        kb.updated_at = datetime.utcnow()
+        kb.updated_at = datetime.now(timezone.utc)
         job = models.KBIngestJob(kb_id=kb.id, state=models.JobState.queued)
         db.add(job)
         jobs.append(job)
@@ -258,7 +258,7 @@ async def reindex_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(g
         raise HTTPException(status_code=400, detail="This source was created before stored-source retraining was enabled. Upload it again to retrain.")
 
     kb.status = models.KBStatus.pending
-    kb.updated_at = datetime.utcnow()
+    kb.updated_at = datetime.now(timezone.utc)
     job = models.KBIngestJob(kb_id=kb.id, state=models.JobState.queued)
     db.add(job)
     db.commit()

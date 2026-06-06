@@ -3,7 +3,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -122,7 +122,7 @@ def _log_usage(user_id, agent_id, message_content, response_content):
             message_content=message_content,
             response_content=response_content,
             credits_used=1,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         ))
         db.commit()
     except Exception:

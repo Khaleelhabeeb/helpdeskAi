@@ -1,7 +1,7 @@
 import ipaddress
 import os
 import socket
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import anyio
@@ -62,7 +62,7 @@ def _parse_html(html: str, url: str) -> dict:
     return {
         "text": structured_text,
         "title": title,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 

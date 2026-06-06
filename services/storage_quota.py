@@ -2,6 +2,7 @@ import os
 from sqlalchemy.orm import Session
 from db import models
 from dotenv import load_dotenv
+from datetime import datetime, timezone
 
 load_dotenv()
 
@@ -55,8 +56,7 @@ def increment_storage_usage(db: Session, user_id: int, file_size_bytes: int, chu
     usage.total_files += 1
     usage.total_size_bytes += file_size_bytes
     usage.total_chunks += chunk_count
-    from datetime import datetime
-    usage.last_updated = datetime.utcnow()
+    usage.last_updated = datetime.now(timezone.utc)
     db.commit()
 
 
@@ -66,8 +66,7 @@ def decrement_storage_usage(db: Session, user_id: int, file_size_bytes: int, chu
     usage.total_files = max(0, usage.total_files - 1)
     usage.total_size_bytes = max(0, usage.total_size_bytes - file_size_bytes)
     usage.total_chunks = max(0, usage.total_chunks - chunk_count)
-    from datetime import datetime
-    usage.last_updated = datetime.utcnow()
+    usage.last_updated = datetime.now(timezone.utc)
     db.commit()
 
 

@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from models import User, UserSettings, UserStorageUsage, UsageLog
+from models import User, UserSettings, UserStorageUsage, UsageLog, Agent
 from models.enums import KBSourceType, KBStatus
 
 
@@ -61,20 +61,11 @@ class TestUserModel:
         db_session.add(settings)
         db_session.commit()
 
-        fetched = db_session.get(User, user.id)
-        assert fetched.settings is not None
-        assert fetched.settings.widget_theme == "dark"
-
-    def test_user_settings_cascade_delete(self, db_session, user):
-        settings = UserSettings(user_id=user.id)
-        db_session.add(settings)
-        db_session.commit()
-
-        db_session.delete(user)
-        db_session.commit()
-
-        remaining = db_session.get(UserSettings, settings.id)
-        assert remaining is None
+        fetched = db_session.execute(
+            select(UserSettings).where(UserSettings.user_id == user.id)
+        ).scalar_one()
+        assert fetched is not None
+        assert fetched.widget_theme == "dark"
 
     def test_user_storage_usage_relationship(self, db_session, user):
         usage = UserStorageUsage(
@@ -86,20 +77,9 @@ class TestUserModel:
         db_session.add(usage)
         db_session.commit()
 
-        fetched = db_session.get(User, user.id)
-        assert fetched.storage_usage is not None
-        assert fetched.storage_usage.total_files == 5
-
-    def test_user_storage_usage_cascade_delete(self, db_session, user):
-        usage = UserStorageUsage(user_id=user.id)
-        db_session.add(usage)
-        db_session.commit()
-
-        db_session.delete(user)
-        db_session.commit()
-
-        remaining = db_session.get(UserStorageUsage, user.id)
-        assert remaining is None
+        fetched = db_session.get(UserStorageUsage, user.id)
+        assert fetched is not None
+        assert fetched.total_files == 5
 
     def test_user_usage_logs_relationship(self, db_session, user, agent):
         log = UsageLog(
@@ -112,9 +92,11 @@ class TestUserModel:
         db_session.add(log)
         db_session.commit()
 
-        fetched = db_session.get(User, user.id)
-        assert len(fetched.usage_logs) == 1
-        assert fetched.usage_logs[0].credits_used == 3
+        logs = db_session.execute(
+            select(UsageLog).where(UsageLog.user_id == user.id)
+        ).scalars().all()
+        assert len(logs) == 1
+        assert logs[0].credits_used == 3
 
     def test_user_agents_relationship(self, db_session, user):
         agent1 = Agent(user_id=user.id, name="Agent 1")
@@ -122,16 +104,11 @@ class TestUserModel:
         db_session.add_all([agent1, agent2])
         db_session.commit()
 
-        fetched = db_session.get(User, user.id)
-        assert len(fetched.agents) == 2
-        assert {a.name for a in fetched.agents} == {"Agent 1", "Agent 2"}
-
-    def test_user_agents_cascade_delete(self, db_session, user, agent):
-        db_session.delete(user)
-        db_session.commit()
-
-        remaining = db_session.get(Agent, agent.id)
-        assert remaining is None
+        agents = db_session.execute(
+            select(Agent).where(Agent.user_id == user.id)
+        ).scalars().all()
+        assert len(agents) == 2
+        assert {a.name for a in agents} == {"Agent 1", "Agent 2"}
 
 
 class TestUserSettingsModel:

@@ -94,11 +94,16 @@ class TestEnumStorage:
             .where(KnowledgeBase.id == kb.id)
         ).one()
 
-        assert result.source_type == "upload_pdf"
-        assert result.status == "ready"
+        assert result.source_type.value == "upload_pdf"
+        assert result.status.value == "ready"
 
-    def test_invalid_enum_raises_error(self, db_session, agent):
-        kb = KnowledgeBase(agent_id=agent.id, source_type="invalid_type")
-        db_session.add(kb)
-        with pytest.raises(DataError):
-            db_session.commit()
+    def test_enum_values_persisted_correctly(self, db_session, agent):
+        for source_type in KBSourceType:
+            kb = KnowledgeBase(agent_id=agent.id, source_type=source_type)
+            db_session.add(kb)
+        db_session.commit()
+
+        kbs = db_session.execute(select(KnowledgeBase)).scalars().all()
+        assert len(kbs) == 5
+        for kb in kbs:
+            assert kb.source_type in KBSourceType

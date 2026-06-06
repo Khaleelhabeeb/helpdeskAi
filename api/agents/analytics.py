@@ -5,7 +5,7 @@ from db import schemas
 from api.auth.auth import get_db
 from db import models
 from utils.jwt import get_current_user
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 from uuid import UUID
 
@@ -29,7 +29,7 @@ def get_agent_analytics_overview(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    start_date = datetime.utcnow() - timedelta(days=days)
+    start_date = datetime.now(timezone.utc) - timedelta(days=days)
     
     # Use SQL aggregations instead of loading all logs into memory
     total_stats = db.query(
@@ -184,7 +184,7 @@ def get_agent_performance_metrics(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    end_date = datetime.utcnow()
+    end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=days)
     previous_start = start_date - timedelta(days=days)
     

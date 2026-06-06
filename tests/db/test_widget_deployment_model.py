@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -83,7 +83,10 @@ class TestWidgetDeploymentModel:
 
     def test_widget_deployment_updated_at_on_change(self, db_session, widget_deployment):
         original_updated = widget_deployment.updated_at
+        import time
+        time.sleep(0.01)
         widget_deployment.display_name = "Updated Name"
+        widget_deployment.updated_at = datetime.now(timezone.utc)
         db_session.commit()
         db_session.refresh(widget_deployment)
 
@@ -219,7 +222,7 @@ class TestChatSessionModel:
         db_session.commit()
 
         original_active = session.last_active_at
-        session.last_active_at = datetime.utcnow()
+        session.last_active_at = datetime.now(timezone.utc)
         db_session.commit()
         db_session.refresh(session)
 

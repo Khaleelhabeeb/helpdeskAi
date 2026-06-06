@@ -6,7 +6,7 @@ from db import schemas
 from db import models
 from services.supabase_auth import get_db, get_supabase_client, upsert_local_user, verify_supabase_token
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timezone
 from pydantic import BaseModel
 from utils.rate_limit import create_limiter
 
@@ -173,7 +173,7 @@ def upgrade_user(
     db_user.credits_remaining = 999999
 
     # Update reset date
-    db_user.last_reset_date = datetime.utcnow()
+    db_user.last_reset_date = datetime.now(timezone.utc)
 
     db.commit()
     db.refresh(db_user)

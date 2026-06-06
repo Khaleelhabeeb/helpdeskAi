@@ -46,7 +46,6 @@ def db_session(engine) -> Generator[Session, None, None]:
     session = sessionmaker(bind=connection, autocommit=False, autoflush=False)()
     yield session
     session.close()
-    transaction.rollback()
     connection.close()
 
 

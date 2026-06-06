@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from datetime import datetime
 from typing import Optional, Dict, Any
 from uuid import UUID
@@ -28,8 +28,7 @@ class UserOut(BaseModel):
     email: EmailStr
     user_type: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserWithCredits(BaseModel):
@@ -39,8 +38,7 @@ class UserWithCredits(BaseModel):
     credits_remaining: int
     last_reset_date: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UsageLogCreate(BaseModel):
@@ -58,8 +56,7 @@ class UsageLogOut(BaseModel):
     message_content: Optional[str]
     response_content: Optional[str]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserSettingsCreate(BaseModel):
@@ -142,5 +139,4 @@ class UserSettingsOut(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

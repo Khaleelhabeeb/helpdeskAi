@@ -4,7 +4,7 @@ import os
 import tempfile
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import BoundedSemaphore
 from typing import Optional
@@ -33,11 +33,11 @@ def _mark_job_failed(job_id: str, error: str) -> None:
         if job:
             job.state = models.JobState.failed
             job.error = error
-            job.updated_at = datetime.utcnow()
+            job.updated_at = datetime.now(timezone.utc)
             kb = db.query(models.KnowledgeBase).filter(models.KnowledgeBase.id == job.kb_id).first()
             if kb:
                 kb.status = models.KBStatus.failed
-                kb.updated_at = datetime.utcnow()
+                kb.updated_at = datetime.now(timezone.utc)
             db.commit()
     except Exception:
         db.rollback()

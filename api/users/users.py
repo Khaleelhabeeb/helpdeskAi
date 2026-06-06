@@ -5,7 +5,7 @@ from db import schemas
 from api.auth.auth import get_db
 from db import models
 from utils.jwt import get_current_user
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import uuid
 
 router = APIRouter()
@@ -14,6 +14,8 @@ router = APIRouter()
 def get_credit_info(db: Session = Depends(get_db), user = Depends(get_current_user)):
     """Get information about the user's credits and usage"""
     next_reset = user.last_reset_date + timedelta(days=30)
+    if next_reset.tzinfo is None:
+        next_reset = next_reset.replace(tzinfo=timezone.utc)
     
     max_credits = user.get_max_credits()
     
@@ -47,7 +49,7 @@ def get_credit_info(db: Session = Depends(get_db), user = Depends(get_current_us
         "credits_remaining": user.credits_remaining,
         "max_credits": max_credits,
         "next_reset_date": next_reset,
-        "days_until_reset": (next_reset - datetime.utcnow()).days,
+        "days_until_reset": (next_reset - datetime.now(timezone.utc)).days,
         "agent_usage": agent_breakdown
     }
 
@@ -62,7 +64,7 @@ def reset_credits(db: Session = Depends(get_db), user = Depends(get_current_user
     
     max_credits = user.get_max_credits()
     user.credits_remaining = max_credits
-    user.last_reset_date = datetime.utcnow()
+    user.last_reset_date = datetime.now(timezone.utc)
     
     db.commit()
     db.refresh(user)
@@ -124,11 +126,11 @@ def update_user_settings(
         db.add(settings)
         db.flush()
     
-    update_data = settings_data.dict(exclude_unset=True)
+    update_data = settings_data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(settings, field, value)
     
-    settings.updated_at = datetime.utcnow()
+    settings.updated_at = datetime.now(timezone.utc)
     
     db.commit()
     db.refresh(settings)

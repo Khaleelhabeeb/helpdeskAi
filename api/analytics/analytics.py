@@ -4,7 +4,7 @@ from sqlalchemy import func, cast, Date, extract
 from db import models
 from api.auth.auth import get_db
 from utils.jwt import get_current_user
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict
 from services.redis_client import cache_key, redis_get_json, redis_set_json
 
@@ -55,6 +55,8 @@ def get_dashboard_summary(db: Session = Depends(get_db), user=Depends(get_curren
     )
 
     next_reset = user.last_reset_date + timedelta(days=30)
+    if next_reset.tzinfo is None:
+        next_reset = next_reset.replace(tzinfo=timezone.utc)
     agent_usage = (
         db.query(
             models.Agent.id,
@@ -74,7 +76,7 @@ def get_dashboard_summary(db: Session = Depends(get_db), user=Depends(get_curren
         "credits_remaining": user.credits_remaining,
         "max_credits": user.get_max_credits(),
         "next_reset_date": next_reset.isoformat(),
-        "days_until_reset": (next_reset - datetime.utcnow()).days,
+        "days_until_reset": (next_reset - datetime.now(timezone.utc)).days,
         "agent_usage": [
             {
                 "agent_id": str(row.id),
@@ -156,7 +158,7 @@ def get_credits_kpi(db: Session = Depends(get_db), user=Depends(get_current_user
     total_credits_used = db.query(models.UsageLog).filter(models.UsageLog.user_id == user.id).count()
     credits_remaining = user.credits_remaining
     
-    thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
     
     # Aggregate by day in the database
     usage_trend_query = (
