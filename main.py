@@ -116,7 +116,7 @@ class PublicWidgetCORSMiddleware(BaseHTTPMiddleware):
                 headers = {
                     "Access-Control-Allow-Origin": origin or "*",
                     "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-                    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Widget-Version",
                 }
                 return Response(status_code=200, headers=headers)
             
@@ -124,6 +124,7 @@ class PublicWidgetCORSMiddleware(BaseHTTPMiddleware):
             origin = request.headers.get("origin")
             if origin:
                 response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Widget-Version"
             return response
             
         return await call_next(request)
@@ -164,7 +165,29 @@ app.include_router(storage.router, prefix="/users", tags=["Storage"])
 app.include_router(scrape.router, prefix="/scrape", tags=["Scrape"])
 app.include_router(analytics.router, tags=["KPI"])
 app.include_router(model_catalog.router, prefix="/models", tags=["Models"])
-app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Custom static file handler with proper cache headers
+from starlette.staticfiles import StaticFiles
+
+class CachedStaticFiles(StaticFiles):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        # Add cache headers for widget files
+        path = str(args[0]) if args else ""
+        if "widget-loader" in path or "widget-panel" in path:
+            # Immutable cache for hashed files
+            if any(x in path for x in [".js", ".html", ".css"]):
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        elif path.endswith((".png", ".jpg", ".jpeg", ".gif", ".svg")):
+            response.headers["Cache-Control"] = "public, max-age=86400"
+        else:
+            response.headers["Cache-Control"] = "public, max-age=60"
+        return response
+
+app.mount("/static", CachedStaticFiles(directory="static"), name="static")
 
 
 if __name__ == "__main__":

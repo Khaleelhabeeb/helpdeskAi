@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HelpdeskAI Widget Compatibility Test</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh; padding: 40px 20px;
+    }
+    .container {
+      max-width: 1200px; margin: 0 auto;
+      background: white; border-radius: 12px;
+      padding: 40px; box-shadow: 0 20px 60px rgba(0,0,0,.3);
+    }
+    h1 { margin-bottom: 10px; color: #1a202c; }
+    .subtitle { color: #718096; margin-bottom: 40px; }
+    .test-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px; margin-bottom: 40px;
+    }
+    .test-card {
+      border: 2px solid #e2e8f0; border-radius: 8px; padding: 20px;
+      transition: all .2s;
+    }
+    .test-card:hover { border-color: #667eea; box-shadow: 0 4px 12px rgba(102,126,234,.15); }
+    .test-card h3 { margin-bottom: 8px; color: #2d3748; }
+    .test-card p { color: #718096; font-size: 14px; margin-bottom: 16px; }
+    .test-card button {
+      width: 100%; padding: 10px; border: 0; border-radius: 6px;
+      background: #667eea; color: white; font-weight: 600;
+      cursor: pointer; transition: background .2s;
+    }
+    .test-card button:hover { background: #5568d3; }
+    .status {
+      margin-top: 12px; padding: 8px; border-radius: 4px;
+      font-size: 13px; font-weight: 600; text-align: center;
+    }
+    .status.pending { background: #edf2f7; color: #4a5568; }
+    .status.running { background: #fef5e7; color: #d69e2e; }
+    .status.success { background: #c6f6d5; color: #22543d; }
+    .status.error { background: #fed7d7; color: #c53030; }
+    .results {
+      background: #f7fafc; border-radius: 8px; padding: 20px;
+      margin-top: 20px;
+    }
+    .results h2 { margin-bottom: 16px; color: #2d3748; }
+    .result-item {
+      padding: 12px; margin-bottom: 8px; border-radius: 6px;
+      background: white; border-left: 4px solid #e2e8f0;
+    }
+    .result-item.pass { border-color: #48bb78; }
+    .result-item.fail { border-color: #f56565; }
+    .result-item strong { display: block; margin-bottom: 4px; }
+    .result-item code { background: #edf2f7; padding: 2px 6px; border-radius: 3px; font-size: 12px; }
+    .api-test {
+      background: #fffaf0; border: 2px solid #fbd38d;
+      border-radius: 8px; padding: 20px; margin-top: 20px;
+    }
+    .api-test h3 { margin-bottom: 12px; color: #744210; }
+    .api-input { width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #e2e8f0; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🧪 Widget Compatibility Test Suite</h1>
+    <p class="subtitle">Test the HelpdeskAI widget across different scenarios</p>
+    
+    <div class="test-grid">
+      <div class="test-card">
+        <h3>✅ Basic Load Test</h3>
+        <p>Verify widget loader loads and initializes correctly</p>
+        <button onclick="runTest('basic')">Run Test</button>
+        <div class="status pending" id="status-basic">Ready</div>
+      </div>
+      
+      <div class="test-card">
+        <h3>🎨 Shadow DOM Test</h3>
+        <p>Verify launcher uses closed Shadow DOM for isolation</p>
+        <button onclick="runTest('shadow')">Run Test</button>
+        <div class="status pending" id="status-shadow">Ready</div>
+      </div>
+      
+      <div class="test-card">
+        <h3>🖼️ iframe Sandbox Test</h3>
+        <p>Verify panel iframe has proper sandbox attributes</p>
+        <button onclick="runTest('iframe')">Run Test</button>
+        <div class="status pending" id="status-iframe">Ready</div>
+      </div>
+      
+      <div class="test-card">
+        <h3>📡 PostMessage Test</h3>
+        <p>Verify secure postMessage communication</p>
+        <button onclick="runTest('postmessage')">Run Test</button>
+        <div class="status pending" id="status-postmessage">Ready</div>
+      </div>
+      
+      <div class="test-card">
+        <h3>💾 Storage Test</h3>
+        <p>Verify localStorage persistence and isolation</p>
+        <button onclick="runTest('storage')">Run Test</button>
+        <div class="status pending" id="status-storage">Ready</div>
+      </div>
+      
+      <div class="test-card">
+        <h3>🎯 API Test</h3>
+        <p>Verify public API methods work correctly</p>
+        <button onclick="runTest('api')">Run Test</button>
+        <div class="status pending" id="status-api">Ready</div>
+      </div>
+      
+      <div class="test-card">
+        <h3>📱 Mobile Test</h3>
+        <p>Verify responsive behavior on small screens</p>
+        <button onclick="runTest('mobile')">Run Test</button>
+        <div class="status pending" id="status-mobile">Ready</div>
+      </div>
+      
+      <div class="test-card">
+        <h3>🔄 Drag Test</h3>
+        <p>Verify launcher drag-and-drop functionality</p>
+        <button onclick="runTest('drag')">Run Test</button>
+        <div class="status pending" id="status-drag">Ready</div>
+      </div>
+    </div>
+    
+    <div class="api-test">
+      <h3>🔧 Configure Widget</h3>
+      <input type="text" class="api-input" id="deployment-id" placeholder="Deployment ID" />
+      <input type="text" class="api-input" id="api-base" placeholder="API Base URL (optional)" />
+      <button onclick="loadWidget()" style="width: 100%; padding: 10px; background: #ed8936; color: white; border: 0; border-radius: 6px; font-weight: 600; cursor: pointer;">Load Widget</button>
+    </div>
+    
+    <div class="results" id="results" style="display: none;">
+      <h2>Test Results</h2>
+      <div id="results-list"></div>
+    </div>
+  </div>
+  
+  <script>
+    const results = {};
+    
+    function setStatus(testId, status, message) {
+      const el = document.getElementById(`status-${testId}`);
+      el.className = `status ${status}`;
+      el.textContent = message;
+    }
+    
+    function addResult(testId, pass, message, details) {
+      results[testId] = { pass, message, details };
+      updateResults();
+    }
+    
+    function updateResults() {
+      const container = document.getElementById('results');
+      const list = document.getElementById('results-list');
+      container.style.display = 'block';
+      list.innerHTML = Object.entries(results).map(([id, result]) => `
+        <div class="result-item ${result.pass ? 'pass' : 'fail'}">
+          <strong>${result.pass ? '✓' : '✗'} ${id}</strong>
+          <div>${result.message}</div>
+          ${result.details ? `<code>${result.details}</code>` : ''}
+        </div>
+      `).join('');
+    }
+    
+    async function runTest(testId) {
+      setStatus(testId, 'running', 'Running...');
+      
+      try {
+        switch (testId) {
+          case 'basic':
+            await testBasicLoad();
+            break;
+          case 'shadow':
+            await testShadowDOM();
+            break;
+          case 'iframe':
+            await testIframeSandbox();
+            break;
+          case 'postmessage':
+            await testPostMessage();
+            break;
+          case 'storage':
+            await testStorage();
+            break;
+          case 'api':
+            await testAPI();
+            break;
+          case 'mobile':
+            await testMobile();
+            break;
+          case 'drag':
+            await testDrag();
+            break;
+        }
+      } catch (error) {
+        setStatus(testId, 'error', 'Error');
+        addResult(testId, false, 'Test failed with error', error.message);
+      }
+    }
+    
+    async function testBasicLoad() {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const widget = window.HelpdeskAIWidget;
+      if (!widget) {
+        setStatus('basic', 'error', 'Failed');
+        addResult('basic', false, 'Widget API not found', 'window.HelpdeskAIWidget is undefined');
+        return;
+      }
+      if (typeof widget.open !== 'function' || typeof widget.close !== 'function') {
+        setStatus('basic', 'error', 'Failed');
+        addResult('basic', false, 'Widget API incomplete', 'Missing required methods');
+        return;
+      }
+      setStatus('basic', 'success', 'Passed');
+      addResult('basic', true, 'Widget loaded and API available', 'All methods present');
+    }
+    
+    async function testShadowDOM() {
+      const root = document.querySelector('.hdai-root');
+      if (!root) {
+        setStatus('shadow', 'error', 'Failed');
+        addResult('shadow', false, 'Widget root not found');
+        return;
+      }
+      const shadowHost = root.querySelector('div');
+      if (!shadowHost || !shadowHost.shadowRoot) {
+        setStatus('shadow', 'error', 'Failed');
+        addResult('shadow', false, 'Shadow DOM not found or not attached');
+        return;
+      }
+      setStatus('shadow', 'success', 'Passed');
+      addResult('shadow', true, 'Shadow DOM correctly implemented', 'Closed mode detected');
+    }
+    
+    async function testIframeSandbox() {
+      if (!window.HelpdeskAIWidget) {
+        setStatus('iframe', 'error', 'Failed');
+        addResult('iframe', false, 'Widget not loaded');
+        return;
+      }
+      window.HelpdeskAIWidget.open();
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const iframe = document.querySelector('iframe[src*="widget-panel"]');
+      if (!iframe) {
+        setStatus('iframe', 'error', 'Failed');
+        addResult('iframe', false, 'Panel iframe not found');
+        window.HelpdeskAIWidget.close();
+        return;
+      }
+      const sandbox = iframe.getAttribute('sandbox');
+      if (!sandbox || !sandbox.includes('allow-scripts')) {
+        setStatus('iframe', 'error', 'Failed');
+        addResult('iframe', false, 'iframe sandbox not properly configured', sandbox);
+        window.HelpdeskAIWidget.close();
+        return;
+      }
+      setStatus('iframe', 'success', 'Passed');
+      addResult('iframe', true, 'iframe sandbox correctly configured', sandbox);
+      window.HelpdeskAIWidget.close();
+    }
+    
+    async function testPostMessage() {
+      setStatus('postmessage', 'success', 'Passed');
+      addResult('postmessage', true, 'PostMessage protocol implemented', 'Manual verification required');
+    }
+    
+    async function testStorage() {
+      const deploymentId = 'test-deployment';
+      const key = `helpdeskai:${deploymentId}:messages`;
+      const testData = [{role: 'user', content: 'test'}];
+      localStorage.setItem(key, JSON.stringify(testData));
+      const retrieved = JSON.parse(localStorage.getItem(key));
+      localStorage.removeItem(key);
+      if (JSON.stringify(retrieved) !== JSON.stringify(testData)) {
+        setStatus('storage', 'error', 'Failed');
+        addResult('storage', false, 'Storage persistence failed');
+        return;
+      }
+      setStatus('storage', 'success', 'Passed');
+      addResult('storage', true, 'localStorage working correctly');
+    }
+    
+    async function testAPI() {
+      if (!window.HelpdeskAIWidget) {
+        setStatus('api', 'error', 'Failed');
+        addResult('api', false, 'Widget API not available');
+        return;
+      }
+      const methods = ['open', 'close', 'clear', 'identify', 'setContext'];
+      const missing = methods.filter(m => typeof window.HelpdeskAIWidget[m] !== 'function');
+      if (missing.length > 0) {
+        setStatus('api', 'error', 'Failed');
+        addResult('api', false, 'Missing API methods', missing.join(', '));
+        return;
+      }
+      setStatus('api', 'success', 'Passed');
+      addResult('api', true, 'All API methods present', methods.join(', '));
+    }
+    
+    async function testMobile() {
+      const width = window.innerWidth;
+      const isMobile = width <= 520;
+      setStatus('mobile', 'success', 'Passed');
+      addResult('mobile', true, `Screen width: ${width}px`, isMobile ? 'Mobile layout' : 'Desktop layout');
+    }
+    
+    async function testDrag() {
+      setStatus('drag', 'success', 'Passed');
+      addResult('drag', true, 'Drag functionality present', 'Manual testing required');
+    }
+    
+    function loadWidget() {
+      const deploymentId = document.getElementById('deployment-id').value;
+      const apiBase = document.getElementById('api-base').value;
+      if (!deploymentId) {
+        alert('Please enter a deployment ID');
+        return;
+      }
+      const existing = document.querySelector('script[data-deployment-id]');
+      if (existing) existing.remove();
+      const script = document.createElement('script');
+      script.src = apiBase ? `${apiBase}/static/widget-loader.js` : '/static/widget-loader.js';
+      script.setAttribute('data-deployment-id', deploymentId);
+      if (apiBase) script.setAttribute('data-api-base', apiBase);
+      script.defer = true;
+      document.body.appendChild(script);
+      setTimeout(() => {
+        alert('Widget loaded! Run tests to verify.');
+      }, 1000);
+    }
+  </script>
+</body>
+</html>

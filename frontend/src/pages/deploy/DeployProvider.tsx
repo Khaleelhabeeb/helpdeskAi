@@ -110,9 +110,8 @@ export function DeployProvider({ children }: { children: ReactNode }) {
   }, [agentId]);
 
   const embedCode = useMemo(() => {
-    if (deployment.embed_script) return deployment.embed_script;
-    return `<script src="${API_BASE_URL}/static/widget.js" data-deployment-id="${deployment.deployment_id}" defer></script>`;
-  }, [deployment.embed_script, deployment.deployment_id]);
+    return `<script src="${API_BASE_URL}/static/widget-loader.js" data-deployment-id="${deployment.deployment_id}" defer></script>`;
+  }, [deployment.deployment_id]);
 
   const previewGreeting =
     deployment.initial_messages.find((m) => m.trim())?.trim() ?? 'Hi! What can I help you with?';

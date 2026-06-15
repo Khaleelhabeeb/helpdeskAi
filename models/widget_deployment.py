@@ -40,6 +40,13 @@ class ChatSession(Base):
     deployment_id: Mapped[int] = mapped_column(ForeignKey("widget_deployments.id"), nullable=False, index=True)
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("agents.id"), nullable=False, index=True)
     visitor_hash: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    
+    # Identity fields for CRM integration
+    external_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    custom_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, default=dict)
+    
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
     last_active_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False, index=True)
 

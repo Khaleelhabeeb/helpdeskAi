@@ -27,6 +27,11 @@ from services.redis_client import (
 )
 from services.rag_service import build_messages, aretrieve_context, astream_answer
 from utils.jwt import get_current_user
+from utils.widget_security import (
+    generate_widget_token,
+    get_rate_limit_key,
+    detect_abuse_signature,
+)
 
 router = APIRouter()
 public_router = APIRouter()
@@ -54,6 +59,14 @@ class PublicChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     session_id: Optional[str] = None
     visitor_id: Optional[str] = Field(None, max_length=120)
+    identity: Optional[dict] = None
+    context: Optional[dict] = None
+
+
+class TelemetryEvent(BaseModel):
+    event: str = Field(..., min_length=1, max_length=100)
+    data: dict = Field(default_factory=dict)
+    timestamp: Optional[int] = None
 
 
 def _sse(event: str, data: dict) -> str:
@@ -136,12 +149,12 @@ _rate_limit_data = {
 
 async def _check_rate_limit(deployment_public_id: str, visitor_id: str, request: Request) -> None:
     ip = request.client.host if request.client else "unknown"
+    user_agent = request.headers.get("user-agent", "")
     redis_client = get_async_redis()
     redis_key = cache_key(
         "ratelimit",
         "widget",
-        deployment_public_id,
-        hashlib.sha256(ip.encode("utf-8")).hexdigest(),
+        get_rate_limit_key(deployment_public_id, visitor_id, ip, user_agent),
     )
     if redis_client:
         try:
@@ -364,6 +377,21 @@ def regenerate_widget_deployment(
     return _deployment_out(deployment, request)
 
 
+@router.post("/{agent_id}/widget-deployment/token")
+def generate_deployment_token(
+    agent_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Generate a signed token for enhanced security (optional)"""
+    agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    deployment = _get_or_create_deployment(db, agent)
+    token = generate_widget_token(deployment.deployment_id)
+    return {"token": token, "expires_in": 300}
+
+
 @public_router.get("/{deployment_id}/config")
 def get_public_widget_config(deployment_id: str, request: Request, db: Session = Depends(get_db)):
     config = _public_widget_config_payload(db, deployment_id)
@@ -398,6 +426,30 @@ def get_public_widget_config(deployment_id: str, request: Request, db: Session =
     )
 
 
+@public_router.post("/{deployment_id}/telemetry")
+async def public_widget_telemetry(
+    deployment_id: str,
+    request: Request,
+):
+    """Log widget telemetry events for monitoring and analytics"""
+    try:
+        # Parse JSON manually to handle both dict and raw body
+        body = await request.json()
+        event = body.get("event", "unknown")
+        data = body.get("data", {})
+        
+        logger.info(
+            "widget_telemetry deployment_id=%s event=%s data=%s",
+            deployment_id,
+            event,
+            data,
+        )
+        return {"status": "ok"}
+    except Exception as e:
+        logger.warning("widget_telemetry_failed deployment_id=%s error=%s", deployment_id, str(e))
+        return {"status": "ok"}  # Still return ok to not break widget
+
+
 @public_router.post("/{deployment_id}/chat")
 async def public_widget_chat(
     deployment_id: str,
@@ -420,6 +472,20 @@ async def public_widget_chat(
         raise HTTPException(status_code=403, detail="This domain is not allowed to use this widget")
 
     visitor_id = payload.visitor_id or "anonymous"
+    
+    # Check for abuse signatures
+    user_agent = request.headers.get("user-agent", "")
+    ip = request.client.host if request.client else "unknown"
+    is_abuse, abuse_reason = detect_abuse_signature(
+        deployment.deployment_id, visitor_id, ip, user_agent, payload.message
+    )
+    if is_abuse:
+        logger.warning(
+            "widget_abuse_detected deployment_id=%s ip=%s reason=%s",
+            deployment.deployment_id, ip, abuse_reason
+        )
+        raise HTTPException(status_code=400, detail="Invalid request")
+    
     await _check_rate_limit(deployment.deployment_id, visitor_id, request)
 
     agent = deployment.agent
@@ -437,6 +503,22 @@ async def public_widget_chat(
             )
         except ValueError:
             session = None
+    
+    # If identity provided, try to find or merge with existing session
+    if payload.identity and payload.identity.get("externalId"):
+        external_id = payload.identity.get("externalId")
+        existing_session = (
+            db.query(models.ChatSession)
+            .filter(
+                models.ChatSession.deployment_id == deployment.id,
+                models.ChatSession.external_id == external_id
+            )
+            .order_by(models.ChatSession.last_active_at.desc())
+            .first()
+        )
+        if existing_session:
+            session = existing_session
+    
     if not session:
         session = models.ChatSession(
             deployment_id=deployment.id,
@@ -448,6 +530,18 @@ async def public_widget_chat(
         db.add(session)
         db.commit()
         db.refresh(session)
+    
+    # Update identity if provided
+    if payload.identity:
+        if payload.identity.get("externalId"):
+            session.external_id = payload.identity.get("externalId")
+        if payload.identity.get("email"):
+            session.email = payload.identity.get("email")
+        if payload.identity.get("name"):
+            session.name = payload.identity.get("name")
+        if payload.identity.get("metadata"):
+            session.custom_metadata = {**(session.custom_metadata or {}), **payload.identity.get("metadata", {})}
+        db.commit()
 
     cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
     use_retrieval = bool(cfg.retrieval_enabled) if cfg else False
