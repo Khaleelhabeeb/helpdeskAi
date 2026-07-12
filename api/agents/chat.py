@@ -52,31 +52,32 @@ async def chat_with_agent(
     if not runtime.instructions:
         raise HTTPException(status_code=400, detail="Agent has no instructions set yet")
 
-    context = ""
-    retrieval_ms = 0.0
-    if runtime.retrieval_enabled and runtime.vector_store_namespace:
-        retrieval_started = time.perf_counter()
-        try:
-            context = await aretrieve_context(
-                db,
-                runtime.vector_store_namespace,
-                runtime.id,
-                chat.message,
-                top_k=min(runtime.retrieval_top_k, CHAT_RETRIEVAL_TOP_K_CAP),
-            )
-        except Exception:
-            logger.exception("chat_retrieval_failed agent_id=%s user_id=%s", runtime.id, user.id)
-        finally:
-            retrieval_ms = (time.perf_counter() - retrieval_started) * 1000
-
     unique_id = chat.unique_id or str(uuid.uuid4())
-    messages = build_messages(runtime.instructions, context, chat.message)
 
     async def generate():
         answer_parts: list[str] = []
         stream_started = time.perf_counter()
         first_token_ms = None
+        retrieval_ms = 0.0
         yield _sse("meta", {"unique_id": unique_id})
+
+        context = ""
+        if runtime.retrieval_enabled and runtime.vector_store_namespace:
+            retrieval_started = time.perf_counter()
+            try:
+                context = await aretrieve_context(
+                    db,
+                    runtime.vector_store_namespace,
+                    runtime.id,
+                    chat.message,
+                    top_k=min(runtime.retrieval_top_k, CHAT_RETRIEVAL_TOP_K_CAP),
+                )
+            except Exception:
+                logger.exception("chat_retrieval_failed agent_id=%s user_id=%s", runtime.id, user.id)
+            finally:
+                retrieval_ms = (time.perf_counter() - retrieval_started) * 1000
+
+        messages = build_messages(runtime.instructions, context, chat.message)
         try:
             async for token in astream_answer(runtime.model, messages):
                 if first_token_ms is None:

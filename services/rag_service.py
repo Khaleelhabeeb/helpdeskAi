@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import os
 import re
 import uuid
@@ -30,6 +31,7 @@ CONCISE_RUNTIME_INSTRUCTION = """### Response Style
 
 
 _MULTI_WS = re.compile(r"\s+")
+logger = logging.getLogger(__name__)
 
 
 def chunk_text(text_value: str, size: int = 1000, overlap: int = 150) -> List[str]:
@@ -136,21 +138,48 @@ def retrieve_context(db: Session, namespace: str, agent_id: str, query: str, top
 
 async def aretrieve_context(db: Session, namespace: str, agent_id: str, query: str, top_k: int = 4) -> str:
     if should_skip_retrieval(query):
+        logger.info("rag_retrieval_skipped reason=heuristic agent_id=%s", agent_id)
         return ""
+
+    started = anyio.current_time()
     query_hash = hashlib.sha256(query.strip().lower().encode("utf-8")).hexdigest()
     cache_id = cache_key("rag", "context", namespace, top_k, query_hash)
     cached_context = await aredis_get_json(cache_id)
     if isinstance(cached_context, str):
+        logger.info(
+            "rag_retrieval agent_id=%s namespace=%s top_k=%s cache_hit=1 total_ms=%.2f",
+            agent_id,
+            namespace,
+            top_k,
+            (anyio.current_time() - started) * 1000,
+        )
         return cached_context
 
+    embed_ms = 0.0
+    search_ms = 0.0
     with anyio.fail_after(RAG_RETRIEVAL_TIMEOUT_SECONDS):
+        embed_started = anyio.current_time()
         qvecs = await aembed_texts([query], task="retrieval.query")
+        embed_ms = (anyio.current_time() - embed_started) * 1000
         if not qvecs:
             return ""
+        search_started = anyio.current_time()
         results = await anyio.to_thread.run_sync(lambda: milvus_search(namespace, qvecs[0], top_k=top_k))
+        search_ms = (anyio.current_time() - search_started) * 1000
         context = format_context(results)
     if context:
         await aredis_set_json(cache_id, context, RAG_CONTEXT_CACHE_TTL_SECONDS)
+
+    logger.info(
+        "rag_retrieval agent_id=%s namespace=%s top_k=%s cache_hit=0 embed_ms=%.2f search_ms=%.2f context_chars=%s total_ms=%.2f",
+        agent_id,
+        namespace,
+        top_k,
+        embed_ms,
+        search_ms,
+        len(context),
+        (anyio.current_time() - started) * 1000,
+    )
     return context
 
 

@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -309,6 +311,17 @@ def _history_for_prompt(db: Session, session_id: uuid.UUID, max_messages: int = 
     return history
 
 
+async def _history_for_prompt_async(session_id: uuid.UUID, max_messages: int = 8, max_chars: int = 3000) -> list[dict[str, str]]:
+    def _load_history() -> list[dict[str, str]]:
+        history_db = BackgroundSession()
+        try:
+            return _history_for_prompt(history_db, session_id, max_messages=max_messages, max_chars=max_chars)
+        finally:
+            history_db.close()
+
+    return await asyncio.to_thread(_load_history)
+
+
 @router.get("/{agent_id}/widget-deployment")
 def get_widget_deployment(
     agent_id: uuid.UUID,
@@ -461,7 +474,7 @@ async def public_widget_chat(
     started = time.perf_counter()
     deployment = (
         db.query(models.WidgetDeployment)
-        .options(joinedload(models.WidgetDeployment.agent))
+        .options(joinedload(models.WidgetDeployment.agent).joinedload(models.Agent.config))
         .filter(models.WidgetDeployment.deployment_id == deployment_id)
         .first()
     )
@@ -543,39 +556,40 @@ async def public_widget_chat(
             session.custom_metadata = {**(session.custom_metadata or {}), **payload.identity.get("metadata", {})}
         db.commit()
 
-    cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
+    cfg = agent.config
     use_retrieval = bool(cfg.retrieval_enabled) if cfg else False
     top_k = min(int(cfg.retrieval_top_k) if cfg else 4, CHAT_RETRIEVAL_TOP_K_CAP)
     namespace = cfg.vector_store_namespace if cfg else None
-    context = ""
-    retrieval_ms = 0.0
-    if use_retrieval and namespace:
-        retrieval_started = time.perf_counter()
-        try:
-            context = await aretrieve_context(db, namespace, str(agent.id), payload.message, top_k=top_k)
-        except Exception:
-            logger.exception("public_widget_retrieval_failed deployment_id=%s agent_id=%s", deployment_id, agent.id)
-        finally:
-            retrieval_ms = (time.perf_counter() - retrieval_started) * 1000
 
-    history = _history_for_prompt(db, session.id)
-    messages = build_messages(agent.instructions or "", context, payload.message, history=history)
     session_id_value = session.id
     agent_id_value = agent.id
     user_id_value = agent.user_id
     agent_model = agent.model
     user_message = payload.message
 
-    db.add(models.ChatMessage(session_id=session_id_value, role="user", content=user_message, created_at=datetime.now(timezone.utc)))
-    session.last_active_at = datetime.now(timezone.utc)
-    db.commit()
-
     async def generate():
         answer_parts: list[str] = []
         stream_started = time.perf_counter()
         first_token_ms = None
+        retrieval_ms = 0.0
+        chat_logged = False
         yield _sse("meta", {"session_id": str(session_id_value)})
+
+        history_task = asyncio.create_task(_history_for_prompt_async(session_id_value))
         try:
+            context = ""
+            if use_retrieval and namespace:
+                retrieval_started = time.perf_counter()
+                try:
+                    context = await aretrieve_context(db, namespace, str(agent.id), payload.message, top_k=top_k)
+                except Exception:
+                    logger.exception("public_widget_retrieval_failed deployment_id=%s agent_id=%s", deployment_id, agent.id)
+                finally:
+                    retrieval_ms = (time.perf_counter() - retrieval_started) * 1000
+
+            history = await history_task
+            messages = build_messages(agent.instructions or "", context, payload.message, history=history)
+
             async for token in astream_answer(agent_model, messages):
                 if first_token_ms is None:
                     first_token_ms = (time.perf_counter() - stream_started) * 1000
@@ -589,8 +603,9 @@ async def public_widget_chat(
                 user_id=user_id_value,
                 agent_id=agent_id_value,
                 user_message=user_message,
-                answer=answer
+                answer=answer,
             )
+            chat_logged = True
             
             logger.info(
                 "widget_chat_latency deployment_id=%s agent_id=%s retrieval_ms=%.2f llm_ttft_ms=%.2f total_ms=%.2f",
@@ -601,8 +616,40 @@ async def public_widget_chat(
                 (time.perf_counter() - started) * 1000,
             )
             yield _sse("done", {"session_id": str(session_id_value)})
+        except asyncio.CancelledError:
+            logger.info("public_widget_stream_cancelled deployment_id=%s session_id=%s", deployment_id, session_id_value)
+            if not history_task.done():
+                history_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await history_task
+            if not chat_logged:
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(
+                        asyncio.to_thread(
+                            _log_public_chat,
+                            session_id_value,
+                            user_id_value,
+                            agent_id_value,
+                            user_message,
+                            "",
+                        )
+                    )
+            raise
         except Exception:
             logger.exception("public_widget_generation_failed deployment_id=%s session_id=%s", deployment_id, session_id_value)
+            if not history_task.done():
+                history_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await history_task
+            background_tasks.add_task(
+                _log_public_chat,
+                session_id=session_id_value,
+                user_id=user_id_value,
+                agent_id=agent_id_value,
+                user_message=user_message,
+                answer="",
+            )
+            chat_logged = True
             yield _sse("error", {"detail": "Sorry, I could not answer that right now."})
 
     headers = _origin_headers(request)
@@ -614,15 +661,17 @@ async def public_widget_chat(
 def _log_public_chat(session_id, user_id, agent_id, user_message, answer):
     db = BackgroundSession()
     try:
-        db.add(models.ChatMessage(session_id=session_id, role="assistant", content=answer, created_at=datetime.now(timezone.utc)))
-        db.add(models.UsageLog(
-            user_id=user_id,
-            agent_id=agent_id,
-            message_content=user_message,
-            response_content=answer,
-            credits_used=1,
-            timestamp=datetime.now(timezone.utc),
-        ))
+        db.add(models.ChatMessage(session_id=session_id, role="user", content=user_message, created_at=datetime.now(timezone.utc)))
+        if answer:
+            db.add(models.ChatMessage(session_id=session_id, role="assistant", content=answer, created_at=datetime.now(timezone.utc)))
+            db.add(models.UsageLog(
+                user_id=user_id,
+                agent_id=agent_id,
+                message_content=user_message,
+                response_content=answer,
+                credits_used=1,
+                timestamp=datetime.now(timezone.utc),
+            ))
         session = db.query(models.ChatSession).filter(models.ChatSession.id == session_id).first()
         if session:
             session.last_active_at = datetime.now(timezone.utc)

@@ -27,15 +27,13 @@ DEFAULT_CHAT_MODEL = os.getenv("DEFAULT_CHAT_MODEL", "groq/llama-3.1-8b-instant"
 @router.post("/create", response_model=schemas.AgentOut)
 async def create_agent(
     name: str = Form(...),
-    instructions: Optional[str] = Form(None),
     model: Optional[str] = Form(None),
     avatar: Optional[UploadFile] = File(None),
     enable_retrieval: bool = Form(True),
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
-    # Generate default instructions if not provided
-    instructions = instructions or default_system_prompt(name)
+    instructions = default_system_prompt(name)
     
     # Create agent
     new_agent = models.Agent(
