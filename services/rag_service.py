@@ -126,9 +126,9 @@ async def aindex_kb_text(
         batch = chunks[start:end]
         vectors = await aembed_texts(batch, task="retrieval.passage")
         ids = [str(uuid.uuid4()) for _ in batch]
-        # Upsert is blocking, run in thread
+        # Upsert is blocking (DB), run in thread — pass global offset for correct chunk_index
         await anyio.to_thread.run_sync(
-            lambda: upsert_texts(namespace, kb_id, agent_id, batch, vectors, ids=ids)
+            lambda s=start: upsert_texts(namespace, kb_id, agent_id, batch, vectors, ids=ids, chunk_offset=s)
         )
         if on_batch:
             on_batch(end, total_chunks)

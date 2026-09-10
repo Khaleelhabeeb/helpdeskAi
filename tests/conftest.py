@@ -102,3 +102,36 @@ if "litellm" not in sys.modules:
 
     litellm_module.completion = _completion
     sys.modules["litellm"] = litellm_module
+
+# pgvector fallback for sqlite tests — keep model clean (Vector only on Postgres)
+# This keeps `pytest --sqlite` in-memory DB tests from failing on CREATE TABLE vector(1024)
+if "pgvector.sqlalchemy" not in sys.modules:
+    pgvector_module = types.ModuleType("pgvector")
+    sqlalchemy_module = types.ModuleType("pgvector.sqlalchemy")
+    from sqlalchemy import Text as _Text
+
+    def _VectorFallback(dim):  # type: ignore
+        return _Text()
+
+    sqlalchemy_module.Vector = _VectorFallback  # type: ignore
+    pgvector_module.sqlalchemy = sqlalchemy_module  # type: ignore
+    sys.modules["pgvector"] = pgvector_module
+    sys.modules["pgvector.sqlalchemy"] = sqlalchemy_module
+else:
+    # If pgvector is installed but we are on sqlite, patch Vector to Text for tests
+    try:
+        import pgvector.sqlalchemy as _pgv  # type: ignore
+
+        from sqlalchemy import Text as _Text2
+
+        _orig_vector = _pgv.Vector
+
+        def _patched_vector(dim):  # type: ignore
+            # Detect sqlite in-memory test run (DATABASE_URL is forced to sqlite above)
+            if os.getenv("DATABASE_URL", "").startswith("sqlite"):
+                return _Text2()
+            return _orig_vector(dim)
+
+        _pgv.Vector = _patched_vector  # type: ignore
+    except Exception:
+        pass
