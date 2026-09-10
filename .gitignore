@@ -210,3 +210,5 @@ downloads_organizer.py
 
 firebase.json
 .firebaserc
+
+.vscode/

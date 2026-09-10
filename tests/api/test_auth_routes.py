@@ -34,6 +34,8 @@ class DummyAuthClient:
 
     def sign_up(self, payload):
         self.calls.append(("sign_up", payload))
+        if isinstance(self._sign_up_response, Exception):
+            raise self._sign_up_response
         return self._sign_up_response
 
     def sign_in_with_password(self, payload):
@@ -134,6 +136,26 @@ def test_signup_returns_tokens_and_message(monkeypatch):
     assert captured["args"][1:] == ("u1", "user@example.com"), (
         "Expected upsert_local_user to be called with normalized email"
     )
+
+
+def test_signup_rate_limit_returns_429(monkeypatch):
+    auth_client = DummyAuthClient(sign_up_response=RuntimeError("HTTP 429 Too Many Requests"))
+    supabase_client = DummySupabaseClient(auth_client)
+
+    app = build_app()
+    app.dependency_overrides[auth_routes.get_db] = lambda: DummyDb()
+    monkeypatch.setattr(auth_routes, "get_supabase_client", lambda: supabase_client)
+
+    client = TestClient(app)
+    response = client.post(
+        "/auth/signup",
+        json={"email": "User@Example.com", "password": "secret"},
+    )
+
+    assert response.status_code == 429, "Expected signup rate limit to return 429"
+    assert response.json() == {
+        "detail": "Email signup rate limit exceeded. Please wait and try again."
+    }, "Expected signup rate limit message to be user-friendly"
 
 
 def test_login_invalid_credentials(monkeypatch):

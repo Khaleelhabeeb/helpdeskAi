@@ -28,23 +28,31 @@ def test_generate_system_prompt_from_text_truncates_to_6000_chars():
 
 
 def test_send_message_to_groq_uses_litellm_completion(monkeypatch):
+    """Now uses direct Groq SDK (no LiteLLM) — mock the Groq client."""
     captured = {}
 
-    def fake_completion(**kwargs):
-        captured["kwargs"] = kwargs
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured["kwargs"] = kwargs
 
-        class Message:
-            content = "Reply"
+            class Message:
+                content = "Reply"
 
-        class Choice:
-            message = Message()
+            class Choice:
+                message = Message()
 
-        class Response:
-            choices = [Choice()]
+            class Response:
+                choices = [Choice()]
 
-        return Response()
+            return Response()
 
-    monkeypatch.setattr("litellm.completion", fake_completion)
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeGroqClient:
+        chat = FakeChat()
+
+    monkeypatch.setattr("services.groq_client.get_groq_client", lambda: FakeGroqClient())
 
     result = ai_prompt_builder.send_message_to_groq("sys", "hello")
 
@@ -52,8 +60,9 @@ def test_send_message_to_groq_uses_litellm_completion(monkeypatch):
         "Expected send_message_to_groq to return the message content; "
         f"got {result!r}"
     )
-    assert captured["kwargs"]["model"] == "groq/llama-3.1-8b-instant", (
-        "Expected groq model to match default"
+    # Groq API expects model without `groq/` prefix (normalized)
+    assert captured["kwargs"]["model"] == "llama-3.1-8b-instant", (
+        "Expected groq model to be normalized (without groq/ prefix)"
     )
     assert captured["kwargs"]["messages"][0]["role"] == "system", (
         "Expected system message to be first in payload"

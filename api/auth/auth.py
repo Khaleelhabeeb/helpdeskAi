@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from sqlalchemy.orm import Session
 import os
 from datetime import timedelta
@@ -41,6 +41,19 @@ def _extract_session_data(response):
     return access_token, refresh_token
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    status_code = _read_attr(exc, "status_code")
+    code = _read_attr(exc, "code")
+    return (
+        status_code == 429
+        or code == 429
+        or "too many requests" in message
+        or "rate limit" in message
+        or "429" in message
+    )
+
+
 @router.get("/supabase-config")
 def supabase_config():
     url = os.getenv("SUPABASE_URL")
@@ -51,13 +64,18 @@ def supabase_config():
 
 @router.post("/signup")
 @limiter.limit("5/minute")
-def signup(request: Request, user: schemas.UserCreate, db: Session = Depends(get_db)):
+def signup(request: Request, response: Response, user: schemas.UserCreate, db: Session = Depends(get_db)):
     normalized_email = user.email.lower()
     try:
         response = get_supabase_client().auth.sign_up(
             {"email": normalized_email, "password": user.password}
         )
     except Exception as exc:
+        if _is_rate_limit_error(exc):
+            raise HTTPException(
+                status_code=429,
+                detail="Email signup rate limit exceeded. Please wait and try again.",
+            ) from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     supabase_user = getattr(response, "user", None)
@@ -74,7 +92,7 @@ def signup(request: Request, user: schemas.UserCreate, db: Session = Depends(get
 
 @router.post("/login")
 @limiter.limit("10/minute")
-def login(request: Request, user: schemas.UserLogin, db: Session = Depends(get_db)):
+def login(request: Request, response: Response, user: schemas.UserLogin, db: Session = Depends(get_db)):
     normalized_email = user.email.lower()
     try:
         response = get_supabase_client().auth.sign_in_with_password(
@@ -99,7 +117,7 @@ def login(request: Request, user: schemas.UserLogin, db: Session = Depends(get_d
 
 @router.get("/google/callback")
 @limiter.limit("10/minute")
-def google_callback(request: Request, code: str, db: Session = Depends(get_db)):
+def google_callback(request: Request, response: Response, code: str, db: Session = Depends(get_db)):
     raise HTTPException(
         status_code=410,
         detail="Google OAuth callback moved to Supabase Auth. Configure Google in Supabase and use the Supabase callback flow.",

@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -38,6 +38,7 @@ def _sse(event: str, data: dict) -> str:
 @limiter.limit("30/minute")
 async def chat_with_agent(
     request: Request,
+    response: Response,
     agent_id: str,
     chat: ChatRequest,
     background_tasks: BackgroundTasks,

@@ -35,7 +35,7 @@ dependencies = [
     "idna==3.10",
     "jsonpatch==1.33",
     "jsonpointer==3.0.0",
-    "litellm>=1.80.0",
+    "groq>=0.24.0",
     "marshmallow==3.26.1",
     "multidict==6.6.3",
     "mypy-extensions==1.1.0",

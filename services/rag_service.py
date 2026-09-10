@@ -9,6 +9,11 @@ from typing import Callable, Iterable, Iterator, List, Optional, AsyncIterator
 
 from sqlalchemy.orm import Session
 
+from services.groq_client import (
+    get_async_groq_client,
+    get_groq_client,
+    normalize_groq_model,
+)
 from services.http_client import default_timeout, get_async_http_client
 from services.redis_client import aredis_get_json, aredis_set_json, cache_key
 from services.vector_store import format_context, search as milvus_search, upsert_texts
@@ -221,41 +226,67 @@ def build_messages(
 
 
 def generate_answer(model: str, messages: list[dict[str, str]]) -> str:
-    from litellm import completion
-
-    if model.startswith("groq/"):
-        groq_key = get_secret("GROQ_API_KEY", prefixes=("gsk_",))
-        if groq_key:
-            os.environ["GROQ_API_KEY"] = groq_key
-    response = completion(model=model, messages=messages, temperature=0.2, max_tokens=700)
-    return response.choices[0].message.content.strip()
+    """
+    Sync non-streaming completion via Groq direct API.
+    Replaces litellm `completion`. Strips legacy `groq/` prefix.
+    """
+    client = get_groq_client()
+    normalized = normalize_groq_model(model)
+    # Groq SDK expects max_completion_tokens (preferred) — aligns with docs
+    response = client.chat.completions.create(
+        model=normalized,
+        messages=messages,  # type: ignore[arg-type]
+        temperature=0.2,
+        max_completion_tokens=700,
+    )
+    content = response.choices[0].message.content if response.choices else None
+    return (content or "").strip()
 
 
 def stream_answer(model: str, messages: list[dict[str, str]]) -> Iterator[str]:
-    from litellm import completion
-
-    if model.startswith("groq/"):
-        groq_key = get_secret("GROQ_API_KEY", prefixes=("gsk_",))
-        if groq_key:
-            os.environ["GROQ_API_KEY"] = groq_key
-    for chunk in completion(model=model, messages=messages, temperature=0.2, max_tokens=700, stream=True):
+    """
+    Sync streaming iterator via Groq direct API.
+    Replaces litellm `completion(..., stream=True)`.
+    """
+    client = get_groq_client()
+    normalized = normalize_groq_model(model)
+    stream = client.chat.completions.create(
+        model=normalized,
+        messages=messages,  # type: ignore[arg-type]
+        temperature=0.2,
+        max_completion_tokens=700,
+        stream=True,
+    )
+    for chunk in stream:
+        if not chunk.choices:
+            continue
         delta = chunk.choices[0].delta
-        content = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)
+        # Groq SDK: delta is object with .content; be defensive for dict-like
+        content = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)  # type: ignore[union-attr]
         if content:
             yield content
 
 
 async def astream_answer(model: str, messages: list[dict[str, str]]) -> AsyncIterator[str]:
-    from litellm import acompletion
-
-    if model.startswith("groq/"):
-        groq_key = get_secret("GROQ_API_KEY", prefixes=("gsk_",))
-        if groq_key:
-            os.environ["GROQ_API_KEY"] = groq_key
+    """
+    Async streaming — hot path for chat endpoints (widget + authenticated).
+    Uses AsyncGroq + semaphore to bound LLM concurrency (default 8).
+    Replaces litellm `acompletion(..., stream=True)`.
+    """
+    client = get_async_groq_client()
+    normalized = normalize_groq_model(model)
     async with _llm_semaphore:
-        response = await acompletion(model=model, messages=messages, temperature=0.2, max_tokens=700, stream=True)
-        async for chunk in response:
+        stream = await client.chat.completions.create(
+            model=normalized,
+            messages=messages,  # type: ignore[arg-type]
+            temperature=0.2,
+            max_completion_tokens=700,
+            stream=True,
+        )
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
             delta = chunk.choices[0].delta
-            content = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)
+            content = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)  # type: ignore[union-attr]
             if content:
                 yield content

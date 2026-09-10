@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel
 
 from services.web_scraper import scrape_url_content
@@ -16,6 +16,6 @@ class ScrapeRequest(BaseModel):
 
 @router.post("/scrape")
 @limiter.limit("10/minute")
-async def scrape_url(request: Request, body: ScrapeRequest, user=Depends(get_current_user)):
+async def scrape_url(request: Request, response: Response, body: ScrapeRequest, user=Depends(get_current_user)):
     result = await scrape_url_content(body.url)
     return {"structured_text": result["text"], "title": result.get("title", "")}

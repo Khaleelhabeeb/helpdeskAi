@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 import os
 
 from db import schemas
@@ -15,6 +15,7 @@ FRONTEND_URL = os.getenv("FRONTEND_URL")
 @limiter.limit("3/hour")
 async def forgot_password(
     request: Request,
+    response: Response,
     body: schemas.ForgotPasswordRequest,
 ):
     normalized_email = body.email.lower()
@@ -33,6 +34,7 @@ async def forgot_password(
 @limiter.limit("5/hour")
 async def reset_password(
     request: Request,
+    response: Response,
     body: schemas.ResetPasswordRequest,
 ):
     raise HTTPException(

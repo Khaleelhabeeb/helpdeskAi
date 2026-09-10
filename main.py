@@ -21,6 +21,7 @@ from api import models as model_catalog
 from db.database import Base, engine
 from api.analytics import analytics
 from fastapi.staticfiles import StaticFiles
+from services.groq_client import aclose_groq_clients, close_groq_clients
 from services.http_client import close_http_clients
 from services.redis_client import close_redis_clients
 from utils.rate_limit import create_limiter
@@ -148,6 +149,8 @@ app.add_middleware(PublicWidgetCORSMiddleware)
 async def close_shared_clients():
     await close_http_clients(close_all=True)
     await close_redis_clients(close_all=True)
+    close_groq_clients()
+    await aclose_groq_clients()
 
 
 app.include_router(auth.router, prefix="/auth")

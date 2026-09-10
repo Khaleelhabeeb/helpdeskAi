@@ -41,18 +41,24 @@ def generate_system_prompt_from_text(training_text: str, agent_name: str) -> str
 
 
 def send_message_to_groq(system_prompt: str, user_message: str) -> str:
-    from litellm import completion
+    """
+    Sync helper — direct Groq API (no LiteLLM overhead).
+    Keeps legacy `groq/llama-3.1-8b-instant` string normalized internally.
+    """
+    from services.groq_client import get_groq_client, normalize_groq_model
 
+    client = get_groq_client()
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_message}
+        {"role": "user", "content": user_message},
     ]
 
-    response = completion(
-        model="groq/llama-3.1-8b-instant",
-        messages=messages,
+    response = client.chat.completions.create(
+        model=normalize_groq_model("groq/llama-3.1-8b-instant"),
+        messages=messages,  # type: ignore[arg-type]
         temperature=0.2,
-        max_tokens=700,
+        max_completion_tokens=700,
     )
 
-    return response.choices[0].message.content.strip()
+    content = response.choices[0].message.content if response.choices else None
+    return (content or "").strip()
