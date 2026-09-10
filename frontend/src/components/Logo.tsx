@@ -3,31 +3,30 @@ import { cn } from '../lib/utils';
 type LogoProps = {
   className?: string;
   compact?: boolean;
+  theme?: 'light' | 'dark';
 };
 
-export function Logo({ className, compact = false }: LogoProps) {
+export function Logo({ className, compact = false, theme = 'dark' }: LogoProps) {
   return (
     <div
       className={cn(
         'flex items-center',
-        compact ? 'justify-center' : 'gap-3',
+        compact ? 'justify-center' : 'gap-2.5',
         className
       )}
     >
       <img
-        src="/logo_white.png"
+        src={theme === 'light' ? '/logo_white.png' : '/logo_black.png'}
         alt="HelpDeskAI"
-        className={cn('shrink-0 object-contain', compact ? 'h-9 w-9' : 'h-10 w-10')}
+        className={cn('shrink-0 object-contain', compact ? 'h-9 w-9' : 'h-8 w-8')}
       />
       {!compact && (
-        <div className="min-w-0">
-          <span className="block truncate text-base font-bold tracking-tight text-brand-primary leading-none">
-            HelpDeskAI
-          </span>
-          <span className="mt-0.5 block text-[10px] font-semibold uppercase tracking-[0.2em] text-on-surface-variant/70">
-            Support
-          </span>
-        </div>
+        <span className={cn(
+          'truncate text-[15px] font-bold tracking-tight leading-none',
+          theme === 'light' ? 'text-white' : 'text-[#1a1a1a]'
+        )}>
+          helpdesk<span className="text-[#ef5f3d]">ai</span>
+        </span>
       )}
     </div>
   );

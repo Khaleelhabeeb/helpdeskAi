@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Caveat:wght@500;600&display=swap');
 
 @import "tailwindcss";
 
@@ -52,5 +52,16 @@ body {
 @layer utilities {
   .tracking-tighter {
     letter-spacing: -0.05em;
+  }
+
+  .font-hand {
+    font-family: "Caveat", cursive;
+  }
+
+  .landing-gradient-text {
+    background: linear-gradient(135deg, #ef5f3d 0%, #e84a8a 50%, #7c6cf0 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
   }
 }

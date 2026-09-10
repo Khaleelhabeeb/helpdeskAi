@@ -60,15 +60,15 @@ export function AppLayout({
               animate={{ x: 0 }}
               exit={{ x: -SIDEBAR_EXPANDED }}
               transition={{ type: 'spring', damping: 28, stiffness: 320 }}
-              className="fixed left-0 top-0 bottom-0 z-[70] w-[260px] shadow-2xl md:hidden"
+              className="fixed left-0 top-0 bottom-0 z-[70] w-[260px] border-r border-zinc-200 bg-white shadow-xl md:hidden"
             >
               <button
                 type="button"
                 onClick={() => setMobileOpen(false)}
-                className="absolute right-3 top-4 z-10 grid h-9 w-9 place-items-center rounded-lg border border-surface-container-highest bg-surface text-on-surface-variant hover:text-brand-primary"
+                className="absolute right-3 top-4 z-10 grid h-8 w-8 place-items-center rounded-md bg-white text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900"
                 aria-label="Close menu"
               >
-                <X className="h-5 w-5" />
+                <X className="h-4 w-4" />
               </button>
               <Sidebar
                 onClose={() => setMobileOpen(false)}

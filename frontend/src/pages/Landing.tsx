@@ -1,217 +1,427 @@
 import {
-  Zap,
-  Rocket,
   ArrowRight,
+  ArrowUpRight,
+  BookOpen,
   Bot,
   Database,
-  ShieldCheck
+  Rocket,
+  ShieldCheck,
+  Sparkles,
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { Link } from 'react-router-dom';
-import { cn } from '../lib/utils';
+import { BrandLogo, integrationBrands, type BrandLogoKey } from '../components/BrandIcons';
+import { Icon3D } from '../components/Icon3D';
 import { Logo } from '../components/Logo';
+
+const floatTransition = {
+  duration: 5,
+  repeat: Infinity,
+  repeatType: 'reverse' as const,
+  ease: 'easeInOut' as const,
+};
+
+const heroFloats: { brand: BrandLogoKey; size: number; className: string; delay: number }[] = [
+  { brand: 'slack', size: 36, className: 'absolute left-2 top-28 hidden md:block lg:left-10', delay: 0 },
+  { brand: 'whatsapp', size: 40, className: 'absolute right-4 top-36 hidden md:block lg:right-12', delay: 0.7 },
+  { brand: 'web', size: 34, className: 'absolute left-[16%] top-[44%] hidden lg:block', delay: 1.4 },
+];
+
+function FloatingBrand({
+  brand,
+  size,
+  className,
+  delay,
+}: {
+  brand: BrandLogoKey;
+  size: number;
+  className?: string;
+  delay?: number;
+}) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, scale: 0.85 }}
+      animate={{ opacity: 1, scale: 1, y: [0, -10, 0] }}
+      transition={{ ...floatTransition, delay }}
+      className={className}
+    >
+      <BrandLogo brand={brand} size={size} className="drop-shadow-[0_8px_24px_rgba(0,0,0,0.12)]" />
+    </motion.div>
+  );
+}
 
 export default function Landing() {
   return (
-    <div className="min-h-screen bg-surface selection:bg-brand-primary selection:text-brand-on-primary">
+    <div className="min-h-screen overflow-x-hidden bg-surface text-on-surface selection:bg-brand-primary selection:text-brand-on-primary">
       {/* Header */}
-      <header className="w-full h-16 border-b border-surface-container-highest bg-surface/80 backdrop-blur-md flex items-center justify-between px-4 md:px-8 sticky top-0 z-50">
-        <Logo />
-        <nav className="hidden md:flex items-center gap-8">
-          <a href="#features" className="text-sm font-medium text-on-surface-variant hover:text-brand-primary transition-colors">Features</a>
-          <a href="#pricing" className="text-sm font-medium text-on-surface-variant hover:text-brand-primary transition-colors">Pricing</a>
-          <a href="#docs" className="text-sm font-medium text-on-surface-variant hover:text-brand-primary transition-colors">Documentation</a>
-        </nav>
-        <div className="flex items-center gap-4">
-          <Link to="/login" className="text-sm font-medium text-brand-primary hover:text-on-surface-variant transition-colors">Sign In</Link>
-          <Link to="/login" className="bg-brand-primary text-brand-on-primary text-sm font-medium px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
-            Get Started
-          </Link>
+      <header className="sticky top-0 z-50 border-b border-surface-container-highest/60 bg-surface/80 backdrop-blur-md">
+        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6 md:px-10">
+          <Logo />
+          <nav className="hidden items-center gap-8 md:flex">
+            <a href="#features" className="text-sm font-medium text-on-surface-variant transition-colors hover:text-brand-primary">
+              Features
+            </a>
+            <a href="#security" className="text-sm font-medium text-on-surface-variant transition-colors hover:text-brand-primary">
+              Security
+            </a>
+            <a href="#docs" className="text-sm font-medium text-on-surface-variant transition-colors hover:text-brand-primary">
+              Documentation
+            </a>
+          </nav>
+          <div className="flex items-center gap-4 md:gap-5">
+            <Link
+              to="/login"
+              className="text-sm font-medium text-on-surface-variant transition-colors hover:text-brand-primary"
+            >
+              Sign In
+            </Link>
+            <Link
+              to="/login"
+              className="group inline-flex items-center gap-1.5 rounded-full bg-brand-primary px-5 py-2.5 text-sm font-medium text-brand-on-primary transition-all hover:opacity-90"
+            >
+              Get Started
+              <ArrowUpRight className="h-3.5 w-3.5 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5" />
+            </Link>
+          </div>
         </div>
       </header>
 
       <main>
-        {/* Hero Section */}
-        <section className="max-w-7xl mx-auto px-8 py-24 md:py-32 flex flex-col items-center text-center">
-          <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="inline-flex items-center gap-2 px-3 py-1 border border-surface-container-highest rounded-full bg-surface-container-lowest mb-8 animate-slam-in"
-          >
-            <Rocket className="w-4 h-4 text-brand-primary" />
-            <span className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">v2.0 Now Available</span>
-          </motion.div>
-          
-          <motion.h1 
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ delay: 0.1 }}
-            className="text-5xl md:text-7xl font-bold text-brand-primary max-w-4xl mb-6 tracking-tighter leading-[1.05]"
-          >
-            HelpDeskAI: Autonomous Customer Care
-          </motion.h1>
-          
-          <motion.p 
+        {/* Hero */}
+        <section className="relative mx-auto max-w-6xl px-6 pb-8 pt-12 md:px-10 md:pb-16 md:pt-20">
+          <div className="pointer-events-none absolute left-1/2 top-0 h-[480px] w-[720px] -translate-x-1/2 rounded-full bg-surface-container-low blur-3xl" />
+
+          {heroFloats.map((item) => (
+            <FloatingBrand key={item.className} {...item} />
+          ))}
+
+          <div className="relative mx-auto max-w-3xl text-center">
+            <motion.div
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mb-8 inline-flex items-center gap-2 rounded-full border border-surface-container-highest bg-surface-container-lowest px-3 py-1"
+            >
+              <Rocket className="h-4 w-4 text-brand-primary" />
+              <span className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
+                v2.0 Now Available
+              </span>
+            </motion.div>
+
+            <motion.h1
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.05 }}
+              className="text-4xl font-bold leading-[1.08] tracking-[-0.03em] text-brand-primary md:text-6xl lg:text-7xl"
+            >
+              Autonomous Customer Care
+            </motion.h1>
+
+            <motion.p
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.12 }}
+              className="mx-auto mt-6 max-w-2xl text-base leading-relaxed text-on-surface-variant md:text-xl"
+            >
+              Integrate precise, reliable AI agents with Slack, WhatsApp, and your website.
+              Resolve tickets faster with uncompromising technical accuracy.
+            </motion.p>
+
+            <motion.div
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+              className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row"
+            >
+              <Link
+                to="/login"
+                className="group inline-flex h-12 items-center gap-2 rounded-full bg-brand-primary px-8 text-sm font-semibold text-brand-on-primary transition-all hover:opacity-90"
+              >
+                Get Started
+                <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+              </Link>
+              <a
+                href="#docs"
+                className="inline-flex h-12 items-center rounded-full border border-surface-container-highest bg-surface-container-lowest px-8 text-sm font-medium text-brand-primary transition-colors hover:bg-surface-container-low"
+              >
+                View Documentation
+              </a>
+            </motion.div>
+          </div>
+
+          <motion.p
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            transition={{ delay: 0.2 }}
-            className="text-lg md:text-xl text-on-surface-variant max-w-2xl mb-12"
+            transition={{ delay: 0.45 }}
+            className="font-hand pointer-events-none absolute right-6 top-[56%] hidden text-xl text-on-surface-variant lg:block xl:right-14"
           >
-            Integrate precise, reliable AI agents with Slack, WhatsApp, and your website. Resolve tickets faster with uncompromising technical accuracy.
+            faster tickets.
+            <br />
+            fewer escalations.
+            <span className="ml-2 inline-block rotate-12 text-2xl">↘</span>
           </motion.p>
-          
-          <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.3 }}
-            className="flex flex-col sm:flex-row items-center gap-4"
-          >
-            <Link to="/login" className="bg-brand-primary text-brand-on-primary font-medium h-12 px-8 rounded-lg hover:opacity-90 transition-all flex items-center gap-2 group">
-              Get Started
-              <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-            </Link>
-            <button className="bg-surface-container-lowest border border-surface-container-highest text-brand-primary font-medium h-12 px-8 rounded-lg hover:bg-surface-container-low transition-colors">
-              View Documentation
-            </button>
-          </motion.div>
 
-          {/* Hero Graphic */}
-          <motion.div 
-            initial={{ opacity: 0, y: 40 }}
+          {/* Product preview */}
+          <motion.div
+            initial={{ opacity: 0, y: 48 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.4 }}
-            className="w-full max-w-5xl aspect-[16/9] mt-24 border border-surface-container-highest rounded-xl bg-surface-container-lowest shadow-2xl overflow-hidden relative flex flex-col group"
+            transition={{ delay: 0.35, duration: 0.7 }}
+            className="relative mx-auto mt-20 max-w-5xl md:mt-28"
           >
-            <div className="h-10 border-b border-surface-container-highest bg-surface-container-low flex items-center px-4 gap-2">
-              <div className="w-3 h-3 rounded-full border border-surface-container-highest bg-red-400/20" />
-              <div className="w-3 h-3 rounded-full border border-surface-container-highest bg-yellow-400/20" />
-              <div className="w-3 h-3 rounded-full border border-surface-container-highest bg-green-400/20" />
-            </div>
-            <div className="flex-1 relative bg-[#09090b]">
-              <img 
-                src="/landing.png" 
-                alt="Product Dashboard Visualization"
-                className="w-full h-full object-cover opacity-60 grayscale group-hover:grayscale-0 transition-all duration-700"
-              />
-              <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-transparent to-transparent" />
-              <div className="absolute bottom-8 left-8 text-left space-y-2">
-                <div className="font-mono text-xs text-white/40">&gt; Initializing Autonomous Agent Cluster...</div>
-                <div className="font-mono text-xs text-emerald-400">&gt; Connection established: Slack (Webhook connected)</div>
-                <div className="font-mono text-xs text-emerald-400">&gt; Connection established: WhatsApp API (Active)</div>
-                <div className="font-mono text-xs text-emerald-400">&gt; System ready. Awaiting inquiries.</div>
+            <div className="overflow-hidden rounded-t-2xl border border-surface-container-highest bg-surface-container-lowest shadow-[0_24px_80px_rgba(0,0,0,0.06)]">
+              <div className="flex h-10 items-center gap-2 border-b border-surface-container-highest bg-surface-container-low px-4">
+                <div className="h-3 w-3 rounded-full bg-red-400/30" />
+                <div className="h-3 w-3 rounded-full bg-yellow-400/30" />
+                <div className="h-3 w-3 rounded-full bg-green-400/30" />
+              </div>
+              <div className="relative aspect-[16/9] overflow-hidden bg-[#09090b]">
+                <img
+                  src="/landing.png"
+                  alt="HelpDeskAI dashboard preview"
+                  className="h-full w-full object-cover opacity-60 grayscale transition-all duration-700 hover:grayscale-0"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-transparent to-transparent" />
+                <div className="absolute bottom-8 left-8 space-y-2 text-left">
+                  <div className="font-mono text-xs text-white/40">&gt; Initializing Autonomous Agent Cluster...</div>
+                  <div className="font-mono text-xs text-emerald-400">&gt; Connection established: Slack (Webhook connected)</div>
+                  <div className="font-mono text-xs text-emerald-400">&gt; Connection established: WhatsApp API (Active)</div>
+                  <div className="font-mono text-xs text-emerald-400">&gt; System ready. Awaiting inquiries.</div>
+                </div>
               </div>
             </div>
           </motion.div>
         </section>
 
-        {/* Features Section */}
-        <section id="features" className="max-w-7xl mx-auto px-8 py-24 md:py-32">
-          <div className="text-center mb-16">
-            <h2 className="text-3xl md:text-4xl font-bold text-brand-primary mb-4 tracking-tight">Engineered for Precision</h2>
-            <p className="text-on-surface-variant max-w-xl mx-auto">
-              A technical architecture designed to handle complex support workflows without human intervention.
-            </p>
+        {/* Channels section */}
+        <section id="features" className="border-t border-surface-container-highest bg-surface-container-lowest/50 py-20 md:py-28">
+          <div className="mx-auto grid max-w-6xl items-center gap-16 px-6 md:px-10 lg:grid-cols-2 lg:gap-20">
+            <motion.div
+              initial={{ opacity: 0, x: -24 }}
+              whileInView={{ opacity: 1, x: 0 }}
+              viewport={{ once: true }}
+            >
+              <p className="text-xs font-bold uppercase tracking-[0.2em] text-on-surface-variant">
+                Every channel covered
+              </p>
+              <h2 className="mt-3 text-3xl font-bold tracking-tight text-brand-primary md:text-4xl lg:text-[2.65rem] lg:leading-tight">
+                Show up wherever your customers already are
+              </h2>
+              <p className="mt-5 max-w-md text-base leading-relaxed text-on-surface-variant md:text-lg">
+                Slack at 11pm. WhatsApp on the commute. A quick question on your site at lunch.
+                One AI agent that meets people on their terms — same tone, same answers, no
+                runaround.
+              </p>
+              <p className="mt-4 max-w-md text-sm leading-relaxed text-on-surface-variant/80">
+                Plug in once. Reply everywhere. That&apos;s it.
+              </p>
+            </motion.div>
+
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              whileInView={{ opacity: 1, scale: 1 }}
+              viewport={{ once: true }}
+              className="w-full max-w-md justify-self-center lg:max-w-none lg:justify-self-end"
+            >
+              <div className="grid grid-cols-3 gap-x-10 gap-y-10 md:gap-x-12 md:gap-y-12">
+                {integrationBrands.map((item, i) => (
+                  <motion.div
+                    key={`${item.brand}-${i}`}
+                    initial={{ opacity: 0, y: 12 }}
+                    whileInView={{ opacity: 1, y: 0 }}
+                    viewport={{ once: true }}
+                    transition={{ delay: i * 0.05 }}
+                    whileHover={{ scale: 1.08, y: -3 }}
+                    className="flex items-center justify-center"
+                    title={item.label}
+                  >
+                    <BrandLogo brand={item.brand} size={44} />
+                  </motion.div>
+                ))}
+              </div>
+            </motion.div>
           </div>
-          
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        </section>
+
+        {/* Feature cards */}
+        <section className="mx-auto max-w-6xl px-6 py-20 md:px-10 md:py-28">
+          <div className="mb-14 text-center md:mb-16">
+            <motion.h2
+              initial={{ opacity: 0, y: 12 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              className="text-2xl font-bold tracking-tight text-brand-primary md:text-3xl"
+            >
+              Support that actually gets things done
+            </motion.h2>
+            <motion.p
+              initial={{ opacity: 0 }}
+              whileInView={{ opacity: 1 }}
+              viewport={{ once: true }}
+              className="mx-auto mt-3 max-w-xl text-on-surface-variant"
+            >
+              Less copy-pasting. Fewer escalations. More happy customers.
+            </motion.p>
+          </div>
+
+          <div className="grid gap-5 md:grid-cols-3 md:gap-6">
             {[
-              { 
-                icon: Bot, 
-                title: 'Autonomous Support', 
+              {
+                icon: Bot,
+                title: 'Autonomous Support',
                 desc: 'Deploy intelligent agents capable of resolving multi-step technical inquiries using deterministic logic paths.',
-                color: 'text-blue-500 bg-blue-50'
+                from: '#3b3b3b',
+                to: '#1a1a1a',
+                shadow: 'rgba(0,0,0,0.2)',
               },
-              { 
-                icon: Zap, 
-                title: 'Multi-platform', 
+              {
+                title: 'Multi-platform',
                 desc: 'A single unified knowledge core connected seamlessly to Slack, WhatsApp, email, and live website chat widgets.',
-                color: 'text-amber-500 bg-amber-50'
+                brands: ['slack', 'whatsapp', 'gmail', 'web'] as BrandLogoKey[],
               },
-              { 
-                icon: Database, 
-                title: 'Knowledge Base', 
+              {
+                icon: BookOpen,
+                title: 'Knowledge Base',
                 desc: 'Ingest thousands of technical documents, API references, and past tickets. The system strictly citations its sources.',
-                color: 'text-emerald-500 bg-emerald-50'
-              }
+                from: '#10b981',
+                to: '#059669',
+                shadow: 'rgba(16,185,129,0.3)',
+              },
             ].map((feature, i) => (
-              <motion.div 
-                key={i}
-                whileHover={{ y: -5 }}
-                className="border border-surface-container-highest bg-surface-container-lowest p-8 rounded-xl flex flex-col items-start group hover:border-brand-primary transition-colors"
+              <motion.div
+                key={feature.title}
+                initial={{ opacity: 0, y: 20 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true }}
+                transition={{ delay: i * 0.08 }}
+                className="group rounded-2xl border border-surface-container-highest bg-surface-container-lowest p-8 transition-all hover:border-brand-primary/20 hover:shadow-[0_8px_40px_rgba(0,0,0,0.06)]"
               >
-                <div className={cn(
-                  "w-12 h-12 rounded-lg flex items-center justify-center mb-6 border border-surface-container-highest group-hover:bg-brand-primary group-hover:text-brand-on-primary transition-colors",
-                  feature.color
-                )}>
-                  <feature.icon className="w-6 h-6" />
+                <div className="mb-6 h-14 transition-transform group-hover:scale-105">
+                  {'brands' in feature ? (
+                    <div className="flex items-center gap-3">
+                      {feature.brands.map((brand) => (
+                        <BrandLogo key={brand} brand={brand} size={28} />
+                      ))}
+                    </div>
+                  ) : (
+                    <Icon3D
+                      icon={feature.icon!}
+                      from={feature.from!}
+                      to={feature.to!}
+                      shadow={feature.shadow!}
+                      size="sm"
+                    />
+                  )}
                 </div>
-                <h3 className="text-xl font-bold text-brand-primary mb-3">{feature.title}</h3>
-                <p className="text-sm text-on-surface-variant leading-relaxed">
-                  {feature.desc}
-                </p>
+                <h3 className="text-xl font-bold text-brand-primary">{feature.title}</h3>
+                <p className="mt-3 text-sm leading-relaxed text-on-surface-variant">{feature.desc}</p>
               </motion.div>
             ))}
           </div>
         </section>
 
-        <section className="max-w-7xl mx-auto px-8 pb-24 md:pb-32">
-          <div className="rounded-3xl border border-surface-container-highest bg-[radial-gradient(circle_at_top,#eef2ff_0,transparent_55%)] p-10 md:p-14">
-            <div className="grid grid-cols-1 gap-10 md:grid-cols-[1.1fr_1fr]">
+        {/* Security */}
+        <section id="security" className="mx-auto max-w-6xl px-6 pb-20 md:px-10 md:pb-28">
+          <motion.div
+            initial={{ opacity: 0, y: 24 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            className="overflow-hidden rounded-3xl border border-surface-container-highest bg-[radial-gradient(circle_at_top,#f3f3f4_0,transparent_55%)] p-10 md:p-14"
+          >
+            <div className="grid gap-12 lg:grid-cols-[1.1fr_1fr] lg:gap-16">
               <div>
-                <p className="text-xs font-black uppercase tracking-widest text-on-surface-variant">Trust & security</p>
-                <h2 className="mt-3 text-3xl md:text-4xl font-bold text-brand-primary tracking-tight">Enterprise-grade security</h2>
-                <p className="mt-4 text-sm md:text-base text-on-surface-variant max-w-md">
-                  We take security and compliance seriously. Your data stays yours. Data encryption. Secure integrations.
+                <p className="text-xs font-black uppercase tracking-widest text-on-surface-variant">
+                  Trust & security
+                </p>
+                <h2 className="mt-3 text-3xl font-bold tracking-tight text-brand-primary md:text-4xl">
+                  Enterprise-grade security
+                </h2>
+                <p className="mt-4 max-w-md text-sm leading-relaxed text-on-surface-variant md:text-base">
+                  We take security and compliance seriously. Your data stays yours. Data encryption.
+                  Secure integrations.
                 </p>
               </div>
               <div className="grid gap-4">
                 <div className="rounded-2xl border border-surface-container-highest bg-surface-container-lowest p-5">
-                  <div className="flex items-start gap-3">
-                    <span className="grid h-10 w-10 place-items-center rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-700">
-                      <ShieldCheck className="h-5 w-5" />
-                    </span>
+                  <div className="flex items-start gap-4">
+                    <ShieldCheck className="mt-0.5 h-8 w-8 shrink-0 text-emerald-600" strokeWidth={1.75} />
                     <div>
                       <p className="text-sm font-black text-brand-primary">Your data stays yours</p>
-                      <p className="mt-1 text-xs leading-5 text-on-surface-variant">Only your AI agents can access its sources. They are never used to train models.</p>
+                      <p className="mt-1 text-xs leading-5 text-on-surface-variant md:text-sm">
+                        Only your AI agents can access its sources. They are never used to train models.
+                      </p>
                     </div>
                   </div>
                 </div>
                 <div className="rounded-2xl border border-surface-container-highest bg-surface-container-lowest p-5">
-                  <div className="flex items-start gap-3">
-                    <span className="grid h-10 w-10 place-items-center rounded-xl border border-sky-200 bg-sky-50 text-sky-700">
-                      <Database className="h-5 w-5" />
-                    </span>
+                  <div className="flex items-start gap-4">
+                    <Database className="mt-0.5 h-8 w-8 shrink-0 text-sky-600" strokeWidth={1.75} />
                     <div>
                       <p className="text-sm font-black text-brand-primary">Data encryption</p>
-                      <p className="mt-1 text-xs leading-5 text-on-surface-variant">All data is encrypted at rest and in transit. We use industry-standard encryption algorithms.</p>
+                      <p className="mt-1 text-xs leading-5 text-on-surface-variant md:text-sm">
+                        All data is encrypted at rest and in transit. We use industry-standard encryption algorithms.
+                      </p>
                     </div>
                   </div>
                 </div>
               </div>
             </div>
-          </div>
+          </motion.div>
         </section>
 
-        {/* CTA Section */}
-        <section className="border-t border-surface-container-highest bg-surface py-24 px-8 text-center">
-          <h2 className="text-3xl font-bold text-brand-primary mb-4">Ready to automate your technical support?</h2>
-          <p className="text-on-surface-variant mb-10 max-w-xl mx-auto">Join forward-thinking engineering teams managing thousands of inquiries.</p>
-          <Link to="/login" className="bg-brand-primary text-brand-on-primary font-medium h-12 px-8 rounded-lg hover:opacity-90 transition-opacity inline-flex items-center">
-            Start Free Trial
-          </Link>
+        {/* CTA */}
+        <section id="docs" className="border-t border-surface-container-highest py-24 md:py-32">
+          <div className="mx-auto max-w-2xl px-6 text-center md:px-10">
+            <motion.div
+              initial={{ opacity: 0, y: 12 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              className="mb-6 flex justify-center"
+            >
+              <Sparkles className="h-8 w-8 text-brand-primary" strokeWidth={1.75} />
+            </motion.div>
+            <motion.h2
+              initial={{ opacity: 0, y: 12 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              className="text-2xl font-bold tracking-tight text-brand-primary md:text-3xl"
+            >
+              Ready to automate your technical support?
+            </motion.h2>
+            <motion.p
+              initial={{ opacity: 0 }}
+              whileInView={{ opacity: 1 }}
+              viewport={{ once: true }}
+              className="mx-auto mt-4 max-w-xl text-on-surface-variant"
+            >
+              Join forward-thinking engineering teams managing thousands of inquiries.
+            </motion.p>
+            <motion.div
+              initial={{ opacity: 0, y: 12 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              className="mt-10"
+            >
+              <Link
+                to="/login"
+                className="group inline-flex h-12 items-center gap-2 rounded-full bg-brand-primary px-8 text-sm font-semibold text-brand-on-primary transition-all hover:opacity-90"
+              >
+                Start Free Trial
+                <ArrowUpRight className="h-4 w-4 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5" />
+              </Link>
+            </motion.div>
+          </div>
         </section>
       </main>
 
       {/* Footer */}
-      <footer className="max-w-7xl mx-auto px-8 py-12 flex flex-col md:flex-row items-center justify-between border-t border-surface-container-highest text-sm text-on-surface-variant">
-        <div className="flex items-center gap-3 mb-6 md:mb-0">
+      <footer className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-6 border-t border-surface-container-highest px-6 py-10 text-sm text-on-surface-variant md:flex-row md:px-10">
+        <div className="flex items-center gap-3">
           <Logo />
-          <span className="ml-2 font-medium">© 2026 HelpDeskAI</span>
+          <span className="font-medium">© 2026 HelpDeskAI</span>
         </div>
         <div className="flex items-center gap-8">
-          <a href="#" className="hover:text-brand-primary transition-colors">Terms</a>
-          <a href="#" className="hover:text-brand-primary transition-colors">Privacy</a>
-          <a href="#" className="hover:text-brand-primary transition-colors">Security</a>
+          <a href="#" className="transition-colors hover:text-brand-primary">Terms</a>
+          <a href="#" className="transition-colors hover:text-brand-primary">Privacy</a>
+          <a href="#" className="transition-colors hover:text-brand-primary">Security</a>
         </div>
       </footer>
     </div>

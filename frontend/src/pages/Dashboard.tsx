@@ -40,16 +40,21 @@ type DashboardData = {
 };
 
 function AgentAvatar({ agent }: { agent: Agent }) {
-  const initials = agent.name
-    .split(' ')
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join('') || 'AI';
+  const initials =
+    agent.name
+      .split(' ')
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase())
+      .join('') || 'AI';
 
   return (
-    <div className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-full bg-brand-primary text-sm font-black text-brand-on-primary">
-      {agent.avatar_url ? <img src={agent.avatar_url} alt="" className="h-full w-full object-cover" /> : initials}
+    <div className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-full bg-brand-primary text-sm font-semibold text-brand-on-primary">
+      {agent.avatar_url ? (
+        <img src={agent.avatar_url} alt="" className="h-full w-full object-cover" />
+      ) : (
+        initials
+      )}
     </div>
   );
 }
@@ -110,7 +115,9 @@ export default function Dashboard() {
 
   const selectedActivity = useMemo(() => {
     if (!selectedAgent) return [];
-    return (data.activity?.recent_activity ?? []).filter((activity) => activity.agent_name === selectedAgent.name);
+    return (data.activity?.recent_activity ?? []).filter(
+      (activity) => activity.agent_name === selectedAgent.name
+    );
   }, [data.activity?.recent_activity, selectedAgent]);
 
   useEffect(() => {
@@ -152,59 +159,62 @@ export default function Dashboard() {
     <AppLayout>
       <div className="space-y-8">
         <header>
-          <h1 className="text-3xl font-bold text-brand-primary">Dashboard</h1>
-          <p className="mt-1 text-sm text-on-surface-variant">Select an agent to view its knowledge base and recent conversations.</p>
+          <h1 className="text-3xl font-bold tracking-tight text-brand-primary">Dashboard</h1>
+          <p className="mt-1 text-sm text-on-surface-variant">
+            Select an agent to view its knowledge base and recent conversations.
+          </p>
         </header>
 
         {error && (
-          <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">
+          <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
             {error}
           </div>
         )}
 
         {isLoading ? (
-          <div className="flex min-h-[260px] items-center justify-center text-on-surface-variant">
+          <div className="flex min-h-[260px] items-center justify-center text-sm text-on-surface-variant">
             <Loader2 className="mr-2 h-5 w-5 animate-spin" />
             Loading dashboard...
           </div>
         ) : (
           <>
             <section className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div className="rounded-lg border border-surface-container-highest bg-surface-container-lowest p-5 shadow-sm">
-                <div className="flex items-center justify-between">
+              <div className="rounded-xl border border-surface-container-highest bg-surface-container-lowest p-5">
+                <div className="flex items-center justify-between gap-4">
                   <div>
-                    <p className="text-sm font-bold text-on-surface-variant">Active agents</p>
-                    <p className="mt-2 text-3xl font-black text-brand-primary">{data.agents.length.toLocaleString()}</p>
+                    <p className="text-sm text-on-surface-variant">Active agents</p>
+                    <p className="mt-1 text-3xl font-bold text-brand-primary">
+                      {data.agents.length.toLocaleString()}
+                    </p>
                   </div>
-                  <div className="grid h-11 w-11 place-items-center rounded-lg bg-sky-50 text-sky-700">
-                    <Bot className="h-6 w-6" />
-                  </div>
+                  <Bot className="h-5 w-5 text-on-surface-variant/50" strokeWidth={1.75} />
                 </div>
               </div>
 
-              <div className="rounded-lg border border-surface-container-highest bg-surface-container-lowest p-5 shadow-sm">
-                <div className="flex items-center justify-between">
+              <div className="rounded-xl border border-surface-container-highest bg-surface-container-lowest p-5">
+                <div className="flex items-center justify-between gap-4">
                   <div>
-                    <p className="text-sm font-bold text-on-surface-variant">Access</p>
-                    <p className="mt-2 text-3xl font-black text-brand-primary">Full access</p>
+                    <p className="text-sm text-on-surface-variant">Access</p>
+                    <p className="mt-1 text-3xl font-bold text-brand-primary">Full access</p>
                   </div>
-                  <div className="grid h-11 w-11 place-items-center rounded-lg bg-emerald-50 text-emerald-700">
-                    <ShieldCheck className="h-6 w-6" />
-                  </div>
+                  <ShieldCheck className="h-5 w-5 text-on-surface-variant/50" strokeWidth={1.75} />
                 </div>
               </div>
             </section>
 
             <section className="space-y-4">
-              <h2 className="text-lg font-black text-brand-primary">Agents</h2>
+              <h2 className="text-lg font-semibold text-brand-primary">Agents</h2>
 
               {data.agents.length === 0 ? (
-                <div className="rounded-lg border border-surface-container-highest bg-surface-container-lowest p-8 text-center">
-                  <Bot className="mx-auto mb-3 h-9 w-9 text-on-surface-variant" />
-                  <p className="font-bold text-brand-primary">No agents yet</p>
+                <div className="rounded-xl border border-surface-container-highest bg-surface-container-lowest p-8 text-center">
+                  <Bot className="mx-auto mb-3 h-9 w-9 text-on-surface-variant/60" strokeWidth={1.5} />
+                  <p className="font-semibold text-brand-primary">No agents yet</p>
+                  <p className="mt-1 text-sm text-on-surface-variant">
+                    Create your first agent to start handling support.
+                  </p>
                   <button
                     onClick={() => navigate('/agents')}
-                    className="mt-5 inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-brand-primary px-4 text-sm font-bold text-brand-on-primary hover:opacity-90"
+                    className="mt-5 inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-brand-primary px-4 text-sm font-medium text-brand-on-primary hover:opacity-90"
                   >
                     Create agent
                     <ArrowRight className="h-4 w-4" />
@@ -219,26 +229,26 @@ export default function Dashboard() {
                         key={agent.id}
                         onClick={() => setSelectedAgentId(agent.id)}
                         className={cn(
-                          'group relative min-h-[118px] overflow-hidden rounded-lg border bg-surface-container-lowest p-4 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-brand-primary hover:shadow-md',
-                          isSelected ? 'border-brand-primary ring-2 ring-brand-primary/10' : 'border-surface-container-highest'
+                          'rounded-xl border bg-surface-container-lowest p-4 text-left transition-colors',
+                          isSelected
+                            ? 'border-brand-primary'
+                            : 'border-surface-container-highest hover:border-brand-primary/30'
                         )}
                       >
-                        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,#d4d4d8_1px,transparent_1px)] [background-size:18px_18px]" />
-                        <div className="absolute inset-0 bg-gradient-to-br from-sky-500/10 via-transparent to-emerald-500/10" />
-                        <div className="relative z-10 flex items-start gap-3">
+                        <div className="flex items-start gap-3">
                           <AgentAvatar agent={agent} />
                           <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2">
-                              <p className="truncate font-black text-brand-primary">{agent.name}</p>
-                              <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
-                            </div>
-                            <p className="mt-1 text-xs font-bold text-on-surface-variant">Created {formatRelative(agent.created_at)}</p>
+                            <p className="truncate font-semibold text-brand-primary">{agent.name}</p>
+                            <p className="mt-1 text-xs text-on-surface-variant">
+                              Created {formatRelative(agent.created_at)}
+                            </p>
                           </div>
-                          <ArrowRight className={cn('h-4 w-4 text-on-surface-variant transition-transform group-hover:translate-x-1', isSelected && 'text-brand-primary')} />
-                        </div>
-                        <div className="relative z-10 mt-4 flex items-center justify-between border-t border-surface-container-highest pt-3">
-                          <span className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Support agent</span>
-                          <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-emerald-700">Active</span>
+                          <ArrowRight
+                            className={cn(
+                              'h-4 w-4 shrink-0 text-on-surface-variant/50',
+                              isSelected && 'text-brand-primary'
+                            )}
+                          />
                         </div>
                       </button>
                     );
@@ -249,79 +259,89 @@ export default function Dashboard() {
 
             {!selectedAgent ? (
               data.agents.length > 0 && (
-                <div className="rounded-lg border border-dashed border-surface-container-highest bg-surface-container-lowest p-8 text-center text-sm font-medium text-on-surface-variant">
+                <div className="rounded-xl border border-dashed border-surface-container-highest px-8 py-10 text-center text-sm text-on-surface-variant">
                   Click an agent card to view details.
                 </div>
               )
             ) : (
-              <section className="space-y-4 rounded-lg border border-surface-container-highest bg-surface-container-lowest p-5 shadow-sm">
+              <section className="space-y-5 rounded-xl border border-surface-container-highest bg-surface-container-lowest p-5 md:p-6">
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex min-w-0 items-center gap-3">
                     <AgentAvatar agent={selectedAgent} />
                     <div className="min-w-0">
-                      <h2 className="truncate text-xl font-black text-brand-primary">{selectedAgent.name}</h2>
+                      <h2 className="truncate text-xl font-semibold text-brand-primary">
+                        {selectedAgent.name}
+                      </h2>
                       <p className="text-sm text-on-surface-variant">Agent details</p>
                     </div>
                   </div>
                   <button
                     onClick={() => navigate(`/agents?agent=${encodeURIComponent(selectedAgent.id)}`)}
-                    className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-brand-primary px-4 text-sm font-bold text-brand-on-primary hover:opacity-90"
+                    className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-brand-primary px-4 text-sm font-medium text-brand-on-primary hover:opacity-90"
                   >
-                    Open full agent configurations
+                    Open agent workspace
                     <ExternalLink className="h-4 w-4" />
                   </button>
                 </div>
 
                 {knowledgeError && (
-                  <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">
+                  <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
                     {knowledgeError}
                   </div>
                 )}
 
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div className="rounded-lg border border-surface-container-highest p-4">
+                  <div className="rounded-xl border border-surface-container-highest p-4">
                     <div className="flex items-center justify-between">
-                      <p className="text-sm font-bold text-on-surface-variant">Knowledge base</p>
+                      <p className="text-sm text-on-surface-variant">Knowledge base</p>
                       {isKnowledgeLoading ? (
-                        <Loader2 className="h-4 w-4 animate-spin text-violet-600" />
+                        <Loader2 className="h-4 w-4 animate-spin text-on-surface-variant" />
                       ) : (
-                        <div className="grid h-9 w-9 place-items-center rounded-lg bg-violet-50 text-violet-700">
-                          <Database className="h-5 w-5" />
-                        </div>
+                        <Database className="h-4 w-4 text-on-surface-variant/50" strokeWidth={1.75} />
                       )}
                     </div>
-                    <p className="mt-2 text-3xl font-black text-brand-primary">{knowledge.length.toLocaleString()}</p>
+                    <p className="mt-2 text-3xl font-bold text-brand-primary">
+                      {knowledge.length.toLocaleString()}
+                    </p>
                   </div>
 
-                  <div className="rounded-lg border border-surface-container-highest p-4">
+                  <div className="rounded-xl border border-surface-container-highest p-4">
                     <div className="flex items-center justify-between">
-                      <p className="text-sm font-bold text-on-surface-variant">Messages</p>
-                      <div className="grid h-9 w-9 place-items-center rounded-lg bg-amber-50 text-amber-700">
-                        <MessageSquare className="h-5 w-5" />
-                      </div>
+                      <p className="text-sm text-on-surface-variant">Messages</p>
+                      <MessageSquare className="h-4 w-4 text-on-surface-variant/50" strokeWidth={1.75} />
                     </div>
-                    <p className="mt-2 text-3xl font-black text-brand-primary">{selectedMessages.toLocaleString()}</p>
+                    <p className="mt-2 text-3xl font-bold text-brand-primary">
+                      {selectedMessages.toLocaleString()}
+                    </p>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                  <section className="overflow-hidden rounded-lg border border-surface-container-highest">
-                    <div className="border-b border-surface-container-highest bg-surface-container-low px-4 py-3">
-                      <h3 className="font-black text-brand-primary">Knowledge base</h3>
+                  <section className="overflow-hidden rounded-xl border border-surface-container-highest">
+                    <div className="border-b border-surface-container-highest px-4 py-3">
+                      <h3 className="text-sm font-semibold text-brand-primary">Knowledge base</h3>
                     </div>
                     <div className="max-h-[320px] divide-y divide-surface-container-highest overflow-y-auto">
                       {!isKnowledgeLoading && knowledge.length === 0 && (
-                        <div className="px-4 py-8 text-sm text-on-surface-variant">No knowledge base sources yet.</div>
+                        <div className="px-4 py-8 text-sm text-on-surface-variant">
+                          No knowledge base sources yet.
+                        </div>
                       )}
                       {knowledge.map((source) => (
                         <div key={source.id} className="flex items-center gap-3 px-4 py-3">
-                          <div className={cn('grid h-9 w-9 shrink-0 place-items-center rounded-lg', source.source_type === 'url' ? 'bg-sky-50 text-sky-700' : 'bg-violet-50 text-violet-700')}>
-                            {source.source_type === 'url' ? <LinkIcon className="h-4 w-4" /> : <FileText className="h-4 w-4" />}
-                          </div>
+                          <span className="text-on-surface-variant">
+                            {source.source_type === 'url' ? (
+                              <LinkIcon className="h-4 w-4" strokeWidth={1.75} />
+                            ) : (
+                              <FileText className="h-4 w-4" strokeWidth={1.75} />
+                            )}
+                          </span>
                           <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm font-black text-brand-primary">{source.title || source.source_uri || 'Untitled source'}</p>
-                            <p className="mt-1 text-xs font-bold text-on-surface-variant">
-                              {sourceLabel(source.source_type)} - {source.status}
+                            <p className="truncate text-sm font-medium text-brand-primary">
+                              {source.title || source.source_uri || 'Untitled source'}
+                            </p>
+                            <p className="mt-0.5 text-xs text-on-surface-variant">
+                              {sourceLabel(source.source_type)} · {source.status}
                             </p>
                           </div>
                         </div>
@@ -329,21 +349,27 @@ export default function Dashboard() {
                     </div>
                   </section>
 
-                  <section className="overflow-hidden rounded-lg border border-surface-container-highest">
-                    <div className="border-b border-surface-container-highest bg-surface-container-low px-4 py-3">
-                      <h3 className="font-black text-brand-primary">Recent conversations</h3>
+                  <section className="overflow-hidden rounded-xl border border-surface-container-highest">
+                    <div className="border-b border-surface-container-highest px-4 py-3">
+                      <h3 className="text-sm font-semibold text-brand-primary">Recent conversations</h3>
                     </div>
                     <div className="max-h-[320px] divide-y divide-surface-container-highest overflow-y-auto">
                       {selectedActivity.length === 0 && (
-                        <div className="px-4 py-8 text-sm text-on-surface-variant">No recent conversations for this agent.</div>
+                        <div className="px-4 py-8 text-sm text-on-surface-variant">
+                          No recent conversations for this agent.
+                        </div>
                       )}
                       {selectedActivity.map((activity, index) => (
                         <div key={`${activity.timestamp}-${index}`} className="px-4 py-3">
                           <div className="flex items-start justify-between gap-3">
-                            <p className="line-clamp-2 text-sm font-black text-brand-primary">{activity.question || 'Customer message'}</p>
-                            <span className="shrink-0 text-xs font-bold text-on-surface-variant">{formatRelative(activity.timestamp)}</span>
+                            <p className="line-clamp-2 text-sm font-medium text-brand-primary">
+                              {activity.question || 'Customer message'}
+                            </p>
+                            <span className="shrink-0 text-xs text-on-surface-variant">
+                              {formatRelative(activity.timestamp)}
+                            </span>
                           </div>
-                          <p className="mt-2 text-xs font-bold text-on-surface-variant">
+                          <p className="mt-1.5 text-xs text-on-surface-variant">
                             {activity.response ? 'Answered' : 'Pending'}
                           </p>
                         </div>

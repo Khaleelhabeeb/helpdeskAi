@@ -10,10 +10,9 @@ import {
   Bell,
   History,
   Menu,
-  X,
   PanelLeftClose,
   PanelLeftOpen,
-  Sparkles,
+  ChevronsUpDown,
 } from 'lucide-react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { motion } from 'motion/react';
@@ -28,7 +27,6 @@ const navItems = [
   { icon: LayoutDashboard, label: 'Dashboard', path: '/dashboard' },
   { icon: Bot, label: 'Agents', path: '/agents' },
   { icon: CreditCard, label: 'Billing', path: '/billing' },
-  { icon: Settings, label: 'Settings', path: '/settings' },
 ];
 
 function userInitials(email?: string) {
@@ -44,12 +42,11 @@ function NavTooltip({ label, show }: { label: string; show: boolean }) {
   return (
     <span
       className={cn(
-        'pointer-events-none absolute left-[calc(100%+10px)] top-1/2 z-[100] -translate-y-1/2',
-        'whitespace-nowrap rounded-lg border border-surface-container-highest bg-brand-primary px-2.5 py-1.5',
-        'text-xs font-semibold text-brand-on-primary shadow-lg',
-        'opacity-0 scale-95 transition-all duration-150',
-        'group-hover/nav:opacity-100 group-hover/nav:scale-100',
-        'group-focus-within/nav:opacity-100 group-focus-within/nav:scale-100'
+        'pointer-events-none absolute left-[calc(100%+12px)] top-1/2 z-[100] -translate-y-1/2',
+        'whitespace-nowrap rounded-md bg-zinc-900 px-2.5 py-1.5',
+        'text-xs font-medium text-white shadow-lg',
+        'opacity-0 transition-opacity duration-150',
+        'group-hover/nav:opacity-100 group-focus-within/nav:opacity-100'
       )}
       role="tooltip"
     >
@@ -79,30 +76,34 @@ export function Sidebar({
   return (
     <aside
       className={cn(
-        'relative flex h-full flex-col overflow-hidden',
-        'border-r border-surface-container-highest/80 bg-surface-container-lowest',
+        'relative flex h-full flex-col bg-white',
+        // card-like vs edge: when used inside DesktopSidebar with padding, this is the card. When standalone (mobile) it's full.
+        'overflow-hidden',
+        isCompact ? 'border-r border-zinc-200/70' : 'border-r border-zinc-200/60',
         className
       )}
     >
-      <div
-        className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top_left,rgba(0,0,0,0.03),transparent_55%)]"
-        aria-hidden
-      />
-
-      <div className={cn('relative flex flex-col h-full', isCompact ? 'px-2.5 py-4' : 'px-3 py-5')}>
-        {/* Brand */}
+      <div className={cn('flex h-full flex-col', isCompact ? 'px-2 py-4' : 'px-3 py-5')}>
+        {/* Brand — inspiration: widelab Team Plan header */}
         <div
           className={cn(
             'flex items-center',
-            isCompact ? 'justify-center' : 'justify-between gap-2 px-1'
+            isCompact ? 'justify-center' : 'justify-between gap-2'
           )}
         >
-          <Logo compact={isCompact} />
+          <div className={cn('flex items-center min-w-0', isCompact ? 'justify-center' : 'gap-2.5')}>
+            <Logo compact={isCompact} />
+            {!isCompact && (
+              <div className="hidden">
+                {/* kept for spacing — logo already contains brand */}
+              </div>
+            )}
+          </div>
           {showCollapseControl && onToggleCollapsed && !isCompact && (
             <button
               type="button"
               onClick={onToggleCollapsed}
-              className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-surface-container-highest bg-surface text-on-surface-variant transition-colors hover:border-brand-primary/30 hover:bg-surface-container-low hover:text-brand-primary"
+              className="grid h-7 w-7 place-items-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700"
               aria-label="Collapse sidebar"
             >
               <PanelLeftClose className="h-4 w-4" />
@@ -114,38 +115,56 @@ export function Sidebar({
           <button
             type="button"
             onClick={onToggleCollapsed}
-            className="mx-auto mt-4 grid h-9 w-9 place-items-center rounded-lg border border-surface-container-highest bg-surface text-on-surface-variant transition-colors hover:border-brand-primary/30 hover:bg-surface-container-low hover:text-brand-primary"
+            className="mx-auto mt-4 grid h-8 w-8 place-items-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700"
             aria-label="Expand sidebar"
           >
             <PanelLeftOpen className="h-4 w-4" />
           </button>
         )}
 
-        {/* New agent */}
+        {/* Search */}
+        {!isCompact && (
+          <div className="relative mt-6">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+            <input
+              type="text"
+              placeholder="Search"
+              className="h-9 w-full rounded-lg border border-zinc-200 bg-[#f8f8f7] pl-9 pr-3 text-[13.5px] font-medium text-zinc-800 placeholder:text-zinc-400 transition-colors focus:border-zinc-200 focus:bg-white focus:outline-none focus:ring-0"
+            />
+          </div>
+        )}
+        {isCompact && (
+          <div className="mt-5 flex justify-center">
+            <button
+              type="button"
+              className="grid h-9 w-9 place-items-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-700"
+              aria-label="Search"
+              tabIndex={-1}
+            >
+              <Search className="h-4 w-4" />
+            </button>
+          </div>
+        )}
+
+        {/* Primary action */}
         <NavLink
           to="/agents"
           onClick={onClose}
           title={isCompact ? 'New agent' : undefined}
           className={cn(
-            'group/nav relative mt-6 flex items-center font-semibold transition-all duration-200',
-            'bg-brand-primary text-brand-on-primary shadow-sm hover:opacity-90',
+            'group/nav relative flex items-center text-sm font-medium transition-colors',
             isCompact
-              ? 'mx-auto h-10 w-10 justify-center rounded-xl'
-              : 'gap-2.5 rounded-xl px-3.5 py-2.5 text-sm'
+              ? 'mx-auto mt-4 h-9 w-9 justify-center rounded-lg bg-black text-white hover:bg-zinc-800'
+              : 'mt-4 gap-2 rounded-lg bg-black px-3 py-2.5 text-white hover:bg-zinc-800'
           )}
         >
-          <Plus className={cn('shrink-0', isCompact ? 'h-5 w-5' : 'h-4 w-4')} />
+          <Plus className="h-4 w-4 shrink-0" />
           {!isCompact && <span>New agent</span>}
           <NavTooltip label="New agent" show={isCompact} />
         </NavLink>
 
-        {/* Main nav */}
-        <nav className={cn('mt-6 flex-1 space-y-1', isCompact && 'space-y-1.5')}>
-          {!isCompact && (
-            <p className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[0.18em] text-on-surface-variant/50">
-              Workspace
-            </p>
-          )}
+        {/* Nav — high contrast like inspiration, dots instead of shortcuts */}
+        <nav className={cn('flex-1', isCompact ? 'mt-6 space-y-1' : 'mt-6 space-y-1')}>
           {navItems.map((item) => (
             <NavLink
               key={item.path}
@@ -154,30 +173,36 @@ export function Sidebar({
               title={isCompact ? item.label : undefined}
               className={({ isActive }) =>
                 cn(
-                  'group/nav relative flex items-center transition-all duration-200',
+                  'group/nav relative flex items-center transition-colors',
                   isCompact
-                    ? 'mx-auto h-10 w-10 justify-center rounded-xl'
-                    : 'gap-3 rounded-xl px-3 py-2.5 text-sm font-medium',
+                    ? 'mx-auto h-9 w-9 justify-center rounded-lg text-sm'
+                    : 'justify-between rounded-lg px-2.5 py-2 text-[14px] font-medium',
                   isActive
-                    ? isCompact
-                      ? 'bg-brand-primary text-brand-on-primary shadow-md'
-                      : 'bg-brand-primary text-brand-on-primary shadow-sm'
-                    : 'text-on-surface-variant hover:bg-surface-container-low hover:text-brand-primary'
+                    ? 'bg-[#f3f4f6] text-zinc-900'
+                    : 'text-zinc-700 hover:bg-zinc-50 hover:text-zinc-900'
                 )
               }
             >
               {({ isActive }) => (
                 <>
-                  <item.icon
-                    className={cn(
-                      'shrink-0',
-                      isCompact ? 'h-5 w-5' : 'h-[18px] w-[18px]',
-                      isActive && !isCompact && 'opacity-100'
-                    )}
-                  />
-                  {!isCompact && <span className="truncate">{item.label}</span>}
-                  {isActive && !isCompact && (
-                    <span className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-brand-on-primary/80" />
+                  <span className={cn('flex items-center', isCompact ? 'justify-center' : 'gap-3 min-w-0')}>
+                    <item.icon
+                      className={cn(
+                        'shrink-0',
+                        isCompact ? 'h-[18px] w-[18px]' : 'h-[18px] w-[18px]',
+                        isActive ? 'text-zinc-700' : 'text-zinc-500 group-hover/nav:text-zinc-700'
+                      )}
+                    />
+                    {!isCompact && <span className="truncate">{item.label}</span>}
+                  </span>
+                  {!isCompact && (
+                    <span
+                      className={cn(
+                        'h-1.5 w-1.5 shrink-0 rounded-full transition-colors',
+                        isActive ? 'bg-zinc-700' : 'bg-zinc-300 group-hover/nav:bg-zinc-400'
+                      )}
+                      aria-hidden
+                    />
                   )}
                   <NavTooltip label={item.label} show={isCompact} />
                 </>
@@ -186,49 +211,52 @@ export function Sidebar({
           ))}
         </nav>
 
-        {/* Upgrade hint — expanded only */}
-        {!isCompact && (
-          <div className="mt-4 rounded-xl border border-surface-container-highest bg-surface-container-low p-3.5">
-            <div className="flex items-start gap-2.5">
-              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-brand-primary/5 text-brand-primary">
-                <Sparkles className="h-4 w-4" />
-              </span>
-              <div className="min-w-0">
-                <p className="text-xs font-bold text-brand-primary">Full access</p>
-                <p className="mt-0.5 text-[11px] leading-relaxed text-on-surface-variant">
-                  All agents and channels unlocked.
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Footer */}
-        <div
-          className={cn(
-            'mt-4 border-t border-surface-container-highest pt-4 space-y-1',
-            isCompact && 'space-y-1.5'
-          )}
-        >
+        {/* Divider + bottom group like inspiration Settings/Help */}
+        <div className={cn('border-t border-zinc-100', isCompact ? 'mt-4 pt-4 space-y-1' : 'mt-4 pt-4 space-y-0.5')}>
           <NavLink
             to="/settings"
             onClick={onClose}
-            title={isCompact ? 'Support' : undefined}
+            title={isCompact ? 'Settings' : undefined}
             className={({ isActive }) =>
               cn(
-                'group/nav relative flex items-center text-sm font-medium transition-colors duration-200',
+                'group/nav relative flex items-center transition-colors',
                 isCompact
-                  ? 'mx-auto h-10 w-10 justify-center rounded-xl'
-                  : 'gap-3 rounded-xl px-3 py-2.5',
+                  ? 'mx-auto h-9 w-9 justify-center rounded-lg'
+                  : 'justify-between rounded-lg px-2.5 py-2 text-[14px] font-medium',
                 isActive
-                  ? 'bg-surface-container-low text-brand-primary'
-                  : 'text-on-surface-variant hover:bg-surface-container-low hover:text-brand-primary'
+                  ? 'bg-[#f3f4f6] text-zinc-900'
+                  : 'text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900'
               )
             }
           >
-            <HelpCircle className={cn('shrink-0', isCompact ? 'h-5 w-5' : 'h-[18px] w-[18px]')} />
-            {!isCompact && <span>Support</span>}
-            <NavTooltip label="Support" show={isCompact} />
+            {({ isActive }) => (
+              <>
+                <span className={cn('flex items-center', isCompact ? 'justify-center' : 'gap-3')}>
+                  <Settings className={cn('h-[18px] w-[18px] shrink-0', isActive ? 'text-zinc-600' : 'text-zinc-500 group-hover/nav:text-zinc-600')} />
+                  {!isCompact && <span>Settings</span>}
+                </span>
+                {!isCompact && null}
+                <NavTooltip label="Settings" show={isCompact} />
+              </>
+            )}
+          </NavLink>
+
+          <NavLink
+            to="/settings"
+            onClick={onClose}
+            title={isCompact ? 'Help' : undefined}
+            className={() =>
+              cn(
+                'group/nav relative flex items-center transition-colors',
+                isCompact
+                  ? 'mx-auto h-9 w-9 justify-center rounded-lg text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700'
+                  : 'gap-3 rounded-lg px-2.5 py-2 text-[14px] font-medium text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900'
+              )
+            }
+          >
+            <HelpCircle className="h-[18px] w-[18px] shrink-0 text-zinc-500 group-hover/nav:text-zinc-600" />
+            {!isCompact && <span>Help</span>}
+            <NavTooltip label="Help" show={isCompact} />
           </NavLink>
 
           <button
@@ -239,37 +267,43 @@ export function Sidebar({
             }}
             title={isCompact ? 'Sign out' : undefined}
             className={cn(
-              'group/nav relative flex w-full items-center text-sm font-medium text-on-surface-variant transition-colors duration-200 hover:bg-rose-50 hover:text-rose-700',
+              'group/nav relative flex w-full items-center transition-colors',
               isCompact
-                ? 'mx-auto h-10 w-10 justify-center rounded-xl'
-                : 'gap-3 rounded-xl px-3 py-2.5'
+                ? 'mx-auto h-9 w-9 justify-center rounded-lg text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700'
+                : 'gap-3 rounded-lg px-2.5 py-2 text-[14px] font-medium text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900'
             )}
           >
-            <LogOut className={cn('shrink-0', isCompact ? 'h-5 w-5' : 'h-[18px] w-[18px]')} />
+            <LogOut className="h-[18px] w-[18px] shrink-0 text-zinc-500 group-hover/nav:text-zinc-600" />
             {!isCompact && <span>Sign out</span>}
             <NavTooltip label="Sign out" show={isCompact} />
           </button>
+        </div>
 
-          {/* User */}
-          <div
-            className={cn(
-              'flex items-center rounded-xl border border-surface-container-highest bg-surface',
-              isCompact ? 'mx-auto mt-2 h-10 w-10 justify-center' : 'mt-2 gap-3 p-2.5'
-            )}
-            title={isCompact ? user?.email : undefined}
-          >
-            <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-brand-primary text-xs font-bold text-brand-on-primary">
+        {/* User — inspiration: Sandra Marx card */}
+        <div
+          className={cn(
+            'flex items-center border-t border-zinc-100',
+            isCompact ? 'mx-auto mt-4 h-9 w-9 justify-center border-0 pt-0' : 'mt-3 gap-3 px-1.5 py-3'
+          )}
+          title={isCompact ? user?.email : undefined}
+        >
+          <div className="grid h-8 w-8 shrink-0 place-items-center overflow-hidden rounded-lg bg-zinc-100 ring-1 ring-zinc-200">
+            {/* use initials as fallback, but rounded-lg like inspiration avatar */}
+            <span className="grid h-full w-full place-items-center bg-zinc-900 text-[11px] font-semibold text-white">
               {userInitials(user?.email)}
-            </div>
-            {!isCompact && (
+            </span>
+          </div>
+          {!isCompact && (
+            <>
               <div className="min-w-0 flex-1">
-                <p className="truncate text-xs font-bold text-brand-primary">
+                <p className="truncate text-[13px] font-semibold leading-none text-zinc-900">
                   {user?.email?.split('@')[0] ?? 'Account'}
                 </p>
-                <p className="truncate text-[10px] text-on-surface-variant">{user?.email}</p>
+                <p className="truncate text-xs leading-none text-zinc-500 mt-1">{user?.email ?? '—'}</p>
               </div>
-            )}
-          </div>
+              <ChevronsUpDown className="h-4 w-4 shrink-0 text-zinc-400" />
+            </>
+          )}
         </div>
       </div>
     </aside>
@@ -288,13 +322,15 @@ export function DesktopSidebar({
       initial={false}
       animate={{ width: collapsed ? SIDEBAR_COLLAPSED : SIDEBAR_EXPANDED }}
       transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-      className="fixed left-0 top-0 z-50 hidden h-full md:block"
+      className="fixed left-0 top-0 z-50 hidden h-full p-3 md:block"
     >
-      <Sidebar
-        collapsed={collapsed}
-        onToggleCollapsed={onToggleCollapsed}
-        className="h-full w-full"
-      />
+      <div className="h-full overflow-hidden rounded-xl border border-zinc-200/60 bg-white shadow-sm">
+        <Sidebar
+          collapsed={collapsed}
+          onToggleCollapsed={onToggleCollapsed}
+          className="h-full w-full border-0"
+        />
+      </div>
     </motion.aside>
   );
 }
@@ -333,7 +369,7 @@ export function TopAppBar({ onMenuClick }: TopAppBarProps) {
   return (
     <header
       className={cn(
-        'sticky top-0 z-40 flex w-full items-center justify-between gap-3 border-b border-surface-container-highest/80 bg-surface-container-lowest/90 px-3 backdrop-blur-md md:px-5',
+        'sticky top-0 z-40 flex w-full items-center justify-between gap-3 border-b border-zinc-200/70 bg-white/80 px-3 backdrop-blur-md md:px-5',
         isDeployRoute ? 'h-12' : 'h-14 gap-4 md:h-16 md:px-6'
       )}
     >
@@ -341,7 +377,7 @@ export function TopAppBar({ onMenuClick }: TopAppBarProps) {
         <button
           type="button"
           onClick={onMenuClick}
-          className="grid h-9 w-9 place-items-center rounded-lg text-on-surface-variant transition-colors hover:bg-surface-container-low hover:text-brand-primary md:hidden"
+          className="grid h-9 w-9 place-items-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 md:hidden"
           aria-label="Open menu"
         >
           <Menu className="h-5 w-5" />
@@ -349,8 +385,8 @@ export function TopAppBar({ onMenuClick }: TopAppBarProps) {
 
         {!isDeployRoute && (
           <div className="hidden min-w-0 sm:block">
-            <p className="truncate text-sm font-bold text-brand-primary">{pageTitle}</p>
-            <p className="truncate text-[11px] text-on-surface-variant">HelpDeskAI workspace</p>
+            <p className="truncate text-sm font-semibold text-zinc-900">{pageTitle}</p>
+            <p className="truncate text-[11px] text-zinc-500">HelpDeskAI workspace</p>
           </div>
         )}
 
@@ -360,11 +396,11 @@ export function TopAppBar({ onMenuClick }: TopAppBarProps) {
             isDeployRoute ? 'ml-0' : 'ml-auto sm:ml-0'
           )}
         >
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-on-surface-variant/40" />
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
           <input
             type="text"
             placeholder={searchPlaceholder}
-            className="h-9 w-full rounded-lg border border-transparent bg-surface-container-low pl-9 pr-3 text-sm text-brand-primary placeholder:text-on-surface-variant/50 transition-colors focus:border-surface-container-highest focus:bg-surface-container-lowest focus:outline-none focus:ring-1 focus:ring-brand-primary/20"
+            className="h-9 w-full rounded-lg border border-zinc-200 bg-zinc-50 pl-9 pr-3 text-sm text-zinc-900 placeholder:text-zinc-400 transition-colors focus:border-zinc-300 focus:bg-white focus:outline-none"
           />
         </div>
       </div>
@@ -372,20 +408,20 @@ export function TopAppBar({ onMenuClick }: TopAppBarProps) {
       <div className="flex shrink-0 items-center gap-1.5 md:gap-2">
         <button
           type="button"
-          className="grid h-9 w-9 place-items-center rounded-lg text-on-surface-variant transition-colors hover:bg-surface-container-low hover:text-brand-primary"
+          className="grid h-9 w-9 place-items-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900"
           aria-label="Notifications"
         >
           <Bell className="h-[18px] w-[18px]" />
         </button>
         <button
           type="button"
-          className="hidden h-9 w-9 place-items-center rounded-lg text-on-surface-variant transition-colors hover:bg-surface-container-low hover:text-brand-primary sm:grid"
+          className="hidden h-9 w-9 place-items-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 sm:grid"
           aria-label="History"
         >
           <History className="h-[18px] w-[18px]" />
         </button>
         <div
-          className="grid h-9 w-9 place-items-center rounded-lg border border-surface-container-highest bg-brand-primary text-xs font-bold text-brand-on-primary"
+          className="grid h-8 w-8 place-items-center rounded-full bg-zinc-900 text-xs font-semibold text-white"
           title={user?.email}
         >
           {userInitials(user?.email)}
