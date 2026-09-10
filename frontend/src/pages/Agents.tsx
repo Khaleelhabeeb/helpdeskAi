@@ -152,14 +152,36 @@ function AgentInitials({ name, image }: { name: string; image?: string | null })
   return <span className="text-sm font-black">{name.slice(0, 2).toUpperCase() || 'AI'}</span>;
 }
 
-function ModelLogo({ logo }: { logo?: string }) {
-  const key = (logo || 'groq').toLowerCase();
-  if (key === 'meta') return <span className="text-xl font-black text-blue-600">∞</span>;
-  if (key === 'deepseek') return <span className="text-xl font-black text-indigo-600">DS</span>;
-  if (key === 'qwen') return <span className="text-xl font-black text-purple-600">Q</span>;
-  if (key === 'google') return <span className="text-xl font-black text-red-500">G</span>;
-  if (key === 'openai') return <span className="text-xl font-black text-zinc-800">◎</span>;
-  return <span className="text-xl font-black text-emerald-600">G</span>;
+const GROQ_LOGO_URL = 'https://upload.wikimedia.org/wikipedia/commons/c/cc/Groq_logo.svg';
+const OPENAI_LOGO_URL = 'https://i.pinimg.com/1200x/b3/3f/0d/b33f0d10bab5c0d68a006844f7eda264.jpg';
+const META_LOGO_URL = 'https://i.pinimg.com/1200x/0a/db/09/0adb09b6580d9c13a6fd4af026649940.jpg';
+
+function resolveModelBadgeSrc(logo?: string, provider?: string, modelId?: string): { src: string; alt: string } {
+  const combined = `${logo ?? ''} ${provider ?? ''} ${modelId ?? ''}`.toLowerCase();
+  if (combined.includes('openai') || combined.includes('gpt')) return { src: OPENAI_LOGO_URL, alt: 'OpenAI' };
+  if (combined.includes('meta') || combined.includes('llama')) return { src: META_LOGO_URL, alt: 'Meta' };
+  return { src: GROQ_LOGO_URL, alt: 'Groq' };
+}
+
+function ModelLogo({ logo, provider, modelId }: { logo?: string; provider?: string; modelId?: string }) {
+  const { src, alt } = resolveModelBadgeSrc(logo, provider, modelId);
+  return (
+    <img
+      src={src}
+      alt={alt}
+      title={alt}
+      className="h-full w-full object-contain object-center"
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      onError={(event) => {
+        const target = event.currentTarget as HTMLImageElement;
+        if (target.src !== GROQ_LOGO_URL) {
+          target.onerror = null;
+          target.src = GROQ_LOGO_URL;
+        }
+      }}
+    />
+  );
 }
 
 function ModelSelect({ value, options, onChange }: { value: string; options: ModelOption[]; onChange: (value: string) => void }) {
@@ -174,7 +196,9 @@ function ModelSelect({ value, options, onChange }: { value: string; options: Mod
         onClick={() => setOpen((current) => !current)}
         className="flex h-12 w-full items-center gap-3 rounded-lg border border-surface-container-highest bg-surface px-4 text-left text-sm font-bold text-brand-primary transition-colors hover:bg-surface-container-low focus:border-brand-primary focus:outline-none"
       >
-        <span className="grid h-7 w-7 place-items-center rounded-md bg-white shadow-sm"><ModelLogo logo={selected.logo} /></span>
+        <span className="grid h-7 w-7 shrink-0 place-items-center overflow-hidden rounded-md border border-zinc-100 bg-white p-1 shadow-sm">
+          <ModelLogo logo={selected.logo} provider={selected.provider} modelId={selected.id} />
+        </span>
         <span className="min-w-0 flex-1 truncate">{selected.label}</span>
         <ChevronDown className={cn('h-4 w-4 text-on-surface-variant transition-transform', open && 'rotate-180')} />
       </button>
@@ -196,7 +220,9 @@ function ModelSelect({ value, options, onChange }: { value: string; options: Mod
                 model.locked && 'cursor-not-allowed opacity-40'
               )}
             >
-              <span className="grid h-7 w-7 place-items-center rounded-md bg-white shadow-sm"><ModelLogo logo={model.logo} /></span>
+              <span className="grid h-7 w-7 shrink-0 place-items-center overflow-hidden rounded-md border border-zinc-100 bg-white p-1 shadow-sm">
+                <ModelLogo logo={model.logo} provider={model.provider} modelId={model.id} />
+              </span>
               <span className="min-w-0 flex-1 truncate">{model.label}</span>
               {model.id === selected.id && <Check className="h-4 w-4 text-brand-primary" />}
             </button>
