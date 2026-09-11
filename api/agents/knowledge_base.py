@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Request
 from typing import Optional, List
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
@@ -9,12 +9,14 @@ from utils.jwt import get_current_user
 import anyio
 import logging
 import uuid as uuid_lib
+from pydantic import BaseModel, Field
 from services.ingest_queue import enqueue_kb_ingest
 from services.kb_limits import PayloadTooLargeError, enforce_text_limit, read_upload_limited
 from services.kb_source_storage import delete_kb_source, store_kb_source
 from services.image_upload import ImageUploadError
 from services.vector_store import delete_for_kb
 from services.file_parser import extract_text_from_file
+from services.web_scraper import discover_site_links, crawl_site
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -27,6 +29,20 @@ def validate_uuid(uuid_str: str) -> bool:
         return True
     except (ValueError, AttributeError):
         return False
+
+
+def _normalize_url(url: Optional[str]) -> Optional[str]:
+    if not url:
+        return url
+    url = url.strip()
+    if not url:
+        return url
+    import re
+    if url.startswith("//"):
+        return "https:" + url
+    if re.match(r"^[a-zA-Z][a-zA-Z\d+\-.]*://", url):
+        return url
+    return "https://" + url.lstrip("/")
 
 @router.post("/add", response_model=schemas.KnowledgeBaseOut)
 async def add_knowledge_base(
@@ -89,7 +105,7 @@ async def add_knowledge_base(
     elif source_type == schemas.KBSourceType.url:
         if not url:
             raise HTTPException(status_code=400, detail="url is required for source_type=url")
-        
+        url = _normalize_url(url)  # handle both example.com and https://example.com
         kb_id = str(uuid_lib.uuid4())
         source_uri = url
         original_filename = title or url
@@ -369,6 +385,117 @@ def update_kb_metadata(
     db.refresh(kb)
     
     return {"message": "KB updated successfully", "kb": kb}
+
+
+class BulkUrlAddRequest(BaseModel):
+    agent_id: str
+    urls: List[str] = Field(..., min_length=1, max_length=10)
+    titles: Optional[List[str]] = None
+
+
+class DiscoverRequest(BaseModel):
+    url: str
+    limit: int = Field(default=20, ge=1, le=50)
+
+
+class CrawlAddRequest(BaseModel):
+    agent_id: str
+    url: str
+    max_pages: int = Field(default=5, ge=1, le=10)
+
+
+@router.post("/discover")
+async def discover_pages(body: DiscoverRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Discover internal pages on a website (same-origin links + branding)."""
+    result = await discover_site_links(body.url, limit=body.limit)
+    return result
+
+
+@router.post("/bulk-add", response_model=List[schemas.KnowledgeBaseOut])
+async def bulk_add_urls(body: BulkUrlAddRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Add multiple URLs as knowledge bases in one call (for site scraping)."""
+    if not validate_uuid(body.agent_id):
+        raise HTTPException(status_code=400, detail="Invalid agent ID format")
+    agent = db.query(models.Agent).filter(models.Agent.id == body.agent_id, models.Agent.user_id == user.id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if len(body.urls) > 10:
+        raise HTTPException(status_code=400, detail="Too many URLs (max 10)")
+    # Validate titles length matches urls if provided
+    titles = body.titles or []
+    kbs: List[models.KnowledgeBase] = []
+    jobs: List[models.KBIngestJob] = []
+    for idx, url in enumerate(body.urls):
+        url = _normalize_url(url.strip())
+        if not url:
+            continue
+        title = titles[idx] if idx < len(titles) and titles[idx] else url
+        kb_id = str(uuid_lib.uuid4())
+        kb = models.KnowledgeBase(
+            id=kb_id,
+            agent_id=agent.id,
+            source_type=models.KBSourceType.url,
+            source_uri=url,
+            title=title or url,
+            status=models.KBStatus.pending,
+            original_filename=title or url,
+        )
+        db.add(kb)
+        kbs.append(kb)
+    db.commit()
+    for kb in kbs:
+        db.refresh(kb)
+        job = models.KBIngestJob(kb_id=kb.id, state=models.JobState.queued)
+        db.add(job)
+        jobs.append(job)
+    db.commit()
+    for job in jobs:
+        db.refresh(job)
+        if not enqueue_kb_ingest(str(job.id), None):
+            raise HTTPException(status_code=503, detail="Knowledge ingestion queue is full. Please try again shortly.")
+    return kbs
+
+
+@router.post("/crawl-add", response_model=List[schemas.KnowledgeBaseOut])
+async def crawl_and_add(body: CrawlAddRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Crawl a site starting from url and add discovered pages as KB entries."""
+    if not validate_uuid(body.agent_id):
+        raise HTTPException(status_code=400, detail="Invalid agent ID format")
+    agent = db.query(models.Agent).filter(models.Agent.id == body.agent_id, models.Agent.user_id == user.id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    # Discover + limit
+    crawl_result = await crawl_site(body.url, max_pages=body.max_pages)
+    pages = crawl_result.get("pages", [])
+    kbs: List[models.KnowledgeBase] = []
+    for page in pages:
+        url = page.get("url")
+        title = page.get("title") or url
+        # Skip failed pages without text
+        if not url or (page.get("success") is False and not page.get("text")):
+            continue
+        kb_id = str(uuid_lib.uuid4())
+        kb = models.KnowledgeBase(
+            id=kb_id,
+            agent_id=agent.id,
+            source_type=models.KBSourceType.url,
+            source_uri=url,
+            title=title,
+            status=models.KBStatus.pending,
+            original_filename=title,
+        )
+        db.add(kb)
+        kbs.append(kb)
+    db.commit()
+    for kb in kbs:
+        db.refresh(kb)
+        job = models.KBIngestJob(kb_id=kb.id, state=models.JobState.queued)
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        if not enqueue_kb_ingest(str(job.id), None):
+            raise HTTPException(status_code=503, detail="Knowledge ingestion queue is full")
+    return kbs
 
 
 @router.get("/{kb_id}/status")

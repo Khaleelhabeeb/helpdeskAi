@@ -1,4 +1,6 @@
 import logging
+import mimetypes
+import os
 import anyio
 from pathlib import Path
 from typing import Optional
@@ -16,6 +18,93 @@ from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+
+async def _try_assign_branding_to_agent(db: Session, agent: models.Agent, favicon_url: Optional[str], theme_color: Optional[str]) -> None:
+    """Assign favicon/logo and theme color to agent/widget if not already set."""
+    # Assign avatar/logo if missing
+    if favicon_url and not agent.avatar_url:
+        try:
+            from services.web_scraper import download_image_bytes, is_safe_url
+            from services.image_upload import upload_avatar_image, ImageUploadError
+            from services.redis_client import cache_key, redis_delete
+            if await is_safe_url(favicon_url):
+                try:
+                    img_bytes, content_type = await download_image_bytes(favicon_url)
+                    parsed = favicon_url.split("?")[0].split("/")[-1] or "favicon"
+                    ext = mimetypes.guess_extension(content_type or "") or ".png"
+                    if "." not in parsed:
+                        parsed = f"favicon{ext}"
+                    worker_configured = bool(os.getenv("IMAGE_WORKER_URL") and os.getenv("IMAGE_WORKER_API_KEY"))
+                    if worker_configured:
+                        try:
+                            result = await upload_avatar_image(img_bytes, parsed, content_type or "image/png")
+                            final_url = result.url
+                        except ImageUploadError:
+                            final_url = favicon_url
+                    else:
+                        final_url = favicon_url
+                    agent.avatar_url = final_url
+                    db.commit()
+                    db.refresh(agent)
+                    deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.agent_id == agent.id).first()
+                    if deployment:
+                        if not deployment.logo_url:
+                            deployment.logo_url = final_url
+                            redis_delete(cache_key("widget", "config", deployment.deployment_id))
+                            db.commit()
+                    else:
+                        from models.widget_deployment import new_deployment_id
+                        from datetime import datetime, timezone
+                        deployment = models.WidgetDeployment(
+                            agent_id=agent.id,
+                            deployment_id=new_deployment_id(),
+                            display_name=agent.name,
+                            logo_url=final_url,
+                            initial_messages=["Hi! What can I help you with?"],
+                            theme="dark",
+                            primary_color="#ffffff",
+                            allowed_domains=["localhost", "127.0.0.1"],
+                            is_enabled=True,
+                            created_at=datetime.now(timezone.utc),
+                            updated_at=datetime.now(timezone.utc),
+                        )
+                        db.add(deployment)
+                        db.commit()
+                except Exception as dl_exc:
+                    logger.info("ingest_favicon_download_failed agent_id=%s err=%s", agent.id, dl_exc)
+                    # fallback direct URL
+                    agent.avatar_url = favicon_url
+                    db.commit()
+                    db.refresh(agent)
+                    from services.redis_client import cache_key, redis_delete
+                    deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.agent_id == agent.id).first()
+                    if deployment and not deployment.logo_url:
+                        deployment.logo_url = favicon_url
+                        redis_delete(cache_key("widget", "config", deployment.deployment_id))
+                        db.commit()
+        except Exception as exc:
+            logger.info("ingest_favicon_assign_failed agent_id=%s err=%s", agent.id, exc)
+
+    # Assign theme color to config/deployment if valid and not already customized
+    if theme_color and isinstance(theme_color, str) and theme_color.startswith("#") and len(theme_color) == 7:
+        try:
+            int(theme_color[1:], 16)
+            cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
+            if cfg and cfg.widget_color in (None, "#4a6cf7", "#ffffff"):
+                cfg.widget_color = theme_color
+                cfg.widget_use_color_header = True
+                db.commit()
+            deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.agent_id == agent.id).first()
+            if deployment and deployment.primary_color in ("#ffffff", "#4a6cf7"):
+                from services.redis_client import cache_key, redis_delete
+                deployment.primary_color = theme_color
+                from datetime import datetime, timezone
+                deployment.updated_at = datetime.now(timezone.utc)
+                redis_delete(cache_key("widget", "config", deployment.deployment_id))
+                db.commit()
+        except Exception:
+            pass
 
 
 async def process_kb_ingest_job(
@@ -68,6 +157,15 @@ async def process_kb_ingest_job(
             kb.title = kb.title or scraped_data.get("title")
             kb.extracted_size_bytes = enforce_text_limit(text_content)
             db.commit()
+            # Try to assign favicon/logo to agent if not already set (branding propagation)
+            try:
+                if agent and not agent.avatar_url:
+                    favicon_candidate = scraped_data.get("logo_url") or scraped_data.get("favicon_url") or scraped_data.get("og_image_url")
+                    theme_color = scraped_data.get("theme_color")
+                    if favicon_candidate or theme_color:
+                        await _try_assign_branding_to_agent(db, agent, favicon_candidate, theme_color)
+            except Exception as br_exc:
+                logger.info("ingest_branding_assign_failed kb_id=%s err=%s", kb.id, br_exc)
         elif kb.source_storage_url:
             source_bytes = await download_kb_source(kb.source_storage_url)
             filename = kb.original_filename or kb.title or f"{kb.id}.txt"

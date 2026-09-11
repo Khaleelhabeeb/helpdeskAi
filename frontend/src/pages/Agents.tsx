@@ -52,6 +52,7 @@ type WizardState = {
   theme: 'light' | 'dark';
   color: string;
   useColorHeader: boolean;
+  logoUrl: string | null;
 };
 
 type AgentSettingsResponse = {
@@ -94,6 +95,14 @@ function formatModelLabel(model?: string) {
   return parts[parts.length - 1] || model;
 }
 
+function normalizeUrl(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) return '';
+  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(trimmed)) return trimmed;
+  if (trimmed.startsWith('//')) return `https:${trimmed}`;
+  return `https://${trimmed}`;
+}
+
 const markdownComponents = {
   h1: ({ children }: { children: React.ReactNode }) => <h1 className="text-lg font-bold text-brand-primary">{children}</h1>,
   h2: ({ children }: { children: React.ReactNode }) => <h2 className="text-base font-bold text-brand-primary">{children}</h2>,
@@ -134,6 +143,7 @@ function initialWizard(): WizardState {
     theme: 'dark',
     color: '#ffffff',
     useColorHeader: false,
+    logoUrl: null,
   };
 }
 
@@ -270,6 +280,7 @@ export default function Agents() {
   const [notice, setNotice] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<Agent | null>(null);
   const [deleteKbTarget, setDeleteKbTarget] = useState<KnowledgeBase | null>(null);
+  const [isFetchingBranding, setFetchingBranding] = useState(false);
   const playgroundEndRef = useRef<HTMLDivElement | null>(null);
 
   const selectedAgent = useMemo(() => agents.find((agent) => agent.id === selectedId) ?? null, [agents, selectedId]);
@@ -354,6 +365,52 @@ export default function Agents() {
     playgroundEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [playgroundMessages]);
 
+  // Live branding fetch: shows favicon/logo immediately while typing website
+  useEffect(() => {
+    if (!isCreating) return;
+    const source = !wizard.manual ? wizard.website.trim() : wizard.manualSource === 'website' ? wizard.manualUrl.trim() : '';
+    if (!source || source.length < 4 || !source.includes('.')) return;
+    const normalized = normalizeUrl(source);
+    try {
+      // basic URL validation - must be parseable after normalization
+      new URL(normalized);
+    } catch {
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      setFetchingBranding(true);
+      try {
+        const data = await apiFetch<{ logo_url?: string | null; favicon_url?: string | null; og_image_url?: string | null; theme_color?: string | null }>('/scrape/branding', {
+          method: 'POST',
+          body: JSON.stringify({ url: normalized }),
+        });
+        if (cancelled) return;
+        const logo = data.logo_url || data.favicon_url || data.og_image_url || null;
+        if (logo) {
+          setWizard((prev) => ({ ...prev, logoUrl: logo }));
+        }
+        const theme = data.theme_color;
+        if (theme && /^#[0-9A-Fa-f]{6}$/.test(theme)) {
+          setWizard((prev) => {
+            if (prev.color.toLowerCase() === '#ffffff') {
+              return { ...prev, color: theme, useColorHeader: true };
+            }
+            return prev;
+          });
+        }
+      } catch {
+        // ignore branding fetch errors - keep initials
+      } finally {
+        if (!cancelled) setFetchingBranding(false);
+      }
+    }, 600);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [isCreating, wizard.website, wizard.manual, wizard.manualUrl, wizard.manualSource]);
+
   function startCreate() {
     setWizard(initialWizard());
     setCreatedAgent(null);
@@ -370,10 +427,11 @@ export default function Agents() {
     const jobs: Promise<unknown>[] = [];
 
     const addUrl = (url: string) => {
+      const normalized = normalizeUrl(url);
       const body = new FormData();
       body.append('agent_id', agentId);
       body.append('source_type', 'url');
-      body.append('url', url);
+      body.append('url', normalized);
       jobs.push(apiFetch<KnowledgeBase>('/kb/add', { method: 'POST', body }));
     };
 
@@ -415,6 +473,9 @@ export default function Agents() {
       body.append('name', wizard.name.trim());
       body.append('model', editModel || defaultModel);
       body.append('enable_retrieval', 'true');
+      // Send website_url for favicon/brand auto-assignment (normalized, https auto-added)
+      const websiteForBrand = wizard.website.trim() || (wizard.manual && wizard.manualSource === 'website' ? wizard.manualUrl.trim() : '');
+      if (websiteForBrand) body.append('website_url', normalizeUrl(websiteForBrand));
       const agent = await apiFetch<Agent>('/agents/create', { method: 'POST', body });
 
       await addKnowledgeForAgent(agent.id, agent.name);
@@ -429,6 +490,9 @@ export default function Agents() {
       });
 
       setCreatedAgent(agent);
+      if (agent.avatar_url) {
+        setWizard((prev) => ({ ...prev, logoUrl: agent.avatar_url }));
+      }
       setAgents((current) => [agent, ...current]);
       await loadAgentDetails(agent.id);
       setNotice('Training started. You can continue while background indexing finishes.');
@@ -542,7 +606,7 @@ export default function Agents() {
       if (sourceMode === 'url') {
         if (!sourceUrl.trim()) throw new Error('Enter a website URL.');
         body.append('source_type', 'url');
-        body.append('url', sourceUrl.trim());
+        body.append('url', normalizeUrl(sourceUrl.trim()));
       }
 
       if (sourceMode === 'text') {
@@ -665,6 +729,7 @@ export default function Agents() {
 
   if (isCreating) {
     const previewName = wizard.name || createdAgent?.name || 'Your Agent';
+    const previewLogo = wizard.logoUrl || createdAgent?.avatar_url || null;
     const hasManualSource = (
       (wizard.manualSource === 'website' && wizard.manualUrl.trim()) ||
       (wizard.manualSource === 'file' && wizard.file) ||
@@ -704,8 +769,12 @@ export default function Agents() {
                       <label className="text-sm font-bold text-on-surface-variant">Website link</label>
                       <div className="relative">
                         <LinkIcon className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-on-surface-variant opacity-50" />
-                        <input value={wizard.website} onChange={(event) => setWizard((current) => ({ ...current, website: event.target.value }))} placeholder="https://yourcompany.com" className="h-12 w-full rounded-lg border border-surface-container-highest bg-surface pl-11 pr-4 text-sm focus:border-brand-primary focus:outline-none focus:ring-1 focus:ring-brand-primary" />
+                        <input value={wizard.website} onChange={(event) => setWizard((current) => ({ ...current, website: event.target.value }))} placeholder="yourcompany.com" className="h-12 w-full rounded-lg border border-surface-container-highest bg-surface pl-11 pr-10 text-sm focus:border-brand-primary focus:outline-none focus:ring-1 focus:ring-brand-primary" />
+                        {isFetchingBranding && (
+                          <Loader2 className="absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-on-surface-variant opacity-60" />
+                        )}
                       </div>
+                      <p className="text-[10px] leading-none text-on-surface-variant opacity-60">You can enter just <span className="font-mono font-bold">yourcompany.com</span> or full <span className="font-mono font-bold">https://yourcompany.com</span> — https is added automatically.</p>
                     </div>
                   )}
                   <div className="space-y-2">
@@ -741,7 +810,14 @@ export default function Agents() {
                         ))}
                       </div>
 
-                      {wizard.manualSource === 'website' && <input value={wizard.manualUrl} onChange={(event) => setWizard((current) => ({ ...current, manualUrl: event.target.value }))} placeholder="https://docs.yourcompany.com" className="h-11 w-full rounded-lg border border-surface-container-highest bg-surface-container-lowest px-4 text-sm focus:border-brand-primary focus:outline-none" />}
+                      {wizard.manualSource === 'website' && (
+                        <div className="relative">
+                          <input value={wizard.manualUrl} onChange={(event) => setWizard((current) => ({ ...current, manualUrl: event.target.value }))} placeholder="docs.yourcompany.com" className="h-11 w-full rounded-lg border border-surface-container-highest bg-surface-container-lowest px-4 pr-10 text-sm focus:border-brand-primary focus:outline-none" />
+                          {isFetchingBranding && (
+                            <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-on-surface-variant opacity-60" />
+                          )}
+                        </div>
+                      )}
                       {wizard.manualSource === 'file' && (
                         <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-surface-container-highest bg-surface-container-lowest text-center hover:border-brand-primary">
                           <input type="file" accept=".pdf,.txt,.doc,.docx,application/pdf,text/plain" onChange={(event) => setWizard((current) => ({ ...current, file: event.target.files?.[0] ?? null }))} className="hidden" />
@@ -772,8 +848,12 @@ export default function Agents() {
               <section className="hidden lg:flex items-center justify-center border-l border-surface-container-highest bg-[radial-gradient(#d9d9db_1.5px,transparent_1.5px)] [background-size:28px_28px] p-10">
                 <div className="w-full max-w-md rounded-2xl bg-black p-5 text-white shadow-2xl">
                   <div className="flex items-center gap-3 border-b border-white/10 pb-4">
-                    <div className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-full bg-white text-black">
-                      <AgentInitials name={previewName} />
+                    <div className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-full bg-white text-black relative">
+                      {isFetchingBranding && !previewLogo ? (
+                        <Loader2 className="h-5 w-5 animate-spin text-zinc-400" />
+                      ) : (
+                        <AgentInitials name={previewName} image={previewLogo} />
+                      )}
                     </div>
                     <div className="font-bold">{previewName}</div>
                     <MoreHorizontal className="ml-auto h-5 w-5" />
@@ -781,7 +861,7 @@ export default function Agents() {
                   <div className="space-y-6 py-6">
                     <div className="max-w-[75%] rounded-2xl bg-zinc-900 p-4">
                       <div className="mb-2 flex items-center gap-2 font-bold">
-                        <div className="h-7 w-7 overflow-hidden rounded-full bg-white text-black flex items-center justify-center"><AgentInitials name={previewName} /></div>
+                        <div className="h-7 w-7 overflow-hidden rounded-full bg-white text-black flex items-center justify-center"><AgentInitials name={previewName} image={previewLogo} /></div>
                         {previewName}
                       </div>
                       <p className="text-sm text-zinc-200">Hey, how can I help you today?</p>
@@ -844,14 +924,14 @@ export default function Agents() {
               <section className="flex items-start justify-center border-l border-surface-container-highest bg-[radial-gradient(#d9d9db_1.5px,transparent_1.5px)] [background-size:28px_28px] px-8 py-20">
                 <div className="h-[680px] w-full max-w-[520px] overflow-hidden rounded-2xl bg-black text-white shadow-2xl">
                   <div className="flex h-24 items-center gap-4 px-7" style={{ backgroundColor: wizard.useColorHeader ? wizard.color : '#1c1c1f', color: wizard.useColorHeader && wizard.color.toLowerCase() === '#ffffff' ? '#000' : '#fff' }}>
-                    <div className="h-12 w-12 overflow-hidden rounded-full bg-white text-black flex items-center justify-center"><AgentInitials name={previewName} /></div>
+                    <div className="h-12 w-12 overflow-hidden rounded-full bg-white text-black flex items-center justify-center"><AgentInitials name={previewName} image={previewLogo} /></div>
                     <div className="text-lg font-bold">{previewName}</div>
                     <MoreHorizontal className="ml-auto h-6 w-6" />
                   </div>
                   <div className={cn('h-full p-7', wizard.theme === 'light' ? 'bg-white text-black' : 'bg-black text-white')}>
                     <div className={cn('max-w-[72%] rounded-2xl p-5', wizard.theme === 'light' ? 'bg-zinc-100' : 'bg-zinc-900')}>
                       <div className="mb-3 flex items-center gap-3 font-bold">
-                        <div className="h-8 w-8 overflow-hidden rounded-full bg-white text-black flex items-center justify-center"><AgentInitials name={previewName} /></div>
+                        <div className="h-8 w-8 overflow-hidden rounded-full bg-white text-black flex items-center justify-center"><AgentInitials name={previewName} image={previewLogo} /></div>
                         {previewName}
                       </div>
                       <p className="text-sm opacity-80">Hey, how can I help you today?</p>
@@ -1112,7 +1192,10 @@ export default function Agents() {
                       <input value={sourceTitle} onChange={(event) => setSourceTitle(event.target.value)} placeholder="Source title (optional)" className="h-11 rounded-lg border border-surface-container-highest bg-surface-container-low px-4 text-sm outline-none focus:border-brand-primary" />
 
                       {sourceMode === 'url' && (
-                        <input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://example.com/help" className="h-11 w-full rounded-lg border border-surface-container-highest bg-surface-container-low px-4 text-sm outline-none focus:border-brand-primary" />
+                        <div className="space-y-1">
+                          <input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="example.com/help" className="h-11 w-full rounded-lg border border-surface-container-highest bg-surface-container-low px-4 text-sm outline-none focus:border-brand-primary" />
+                          <p className="text-[10px] leading-none text-on-surface-variant opacity-60">https:// is optional — we’ll add it if missing.</p>
+                        </div>
                       )}
                       {sourceMode === 'file' && (
                         <label className="flex min-h-24 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-surface-container-highest bg-surface-container-low px-4 text-center text-sm font-bold text-on-surface-variant hover:text-brand-primary">
