@@ -13,13 +13,16 @@ function readParams() {
     refreshToken: hash.get('refresh_token') || query.get('refresh_token'),
     error: hash.get('error_description') || query.get('error_description') || hash.get('error') || query.get('error'),
     code: query.get('code'),
+    // Supabase OTP magic-link may use token_hash/type - treat as generic auth code case
+    tokenHash: query.get('token_hash') || query.get('token'),
+    type: query.get('type'),
   };
 }
 
 export default function AuthCallback() {
   const navigate = useNavigate();
   const { completeOAuthSignIn, exchangeOAuthCode } = useAuth();
-  const [message, setMessage] = useState('Finishing Google sign-in...');
+  const [message, setMessage] = useState('Finishing sign-in...');
   const [failed, setFailed] = useState(false);
   const handledRef = useRef(false);
 
@@ -30,7 +33,7 @@ export default function AuthCallback() {
     const params = readParams();
     if (params.error) {
       setFailed(true);
-      setMessage(params.error === 'Not authenticated' ? 'Google did not return a usable session. Please try signing in again.' : params.error);
+      setMessage(params.error === 'Not authenticated' ? 'Sign-in did not return a usable session. Please try again.' : params.error);
       return;
     }
 
@@ -39,10 +42,10 @@ export default function AuthCallback() {
         const verifier = sessionStorage.getItem(OAUTH_VERIFIER_KEY);
         if (!verifier) {
           setFailed(true);
-          setMessage('Google sign-in session expired. Please try again.');
+          setMessage('Sign-in session expired. Please try again from the login page.');
           return;
         }
-        setMessage('Finishing secure Google sign-in...');
+        setMessage('Finishing secure sign-in...');
         exchangeOAuthCode(params.code, verifier, `${window.location.origin}/auth/callback`)
           .then(() => {
             sessionStorage.removeItem(OAUTH_VERIFIER_KEY);
@@ -50,13 +53,15 @@ export default function AuthCallback() {
           })
           .catch((err) => {
             setFailed(true);
-            setMessage(err instanceof Error ? err.message : 'Could not finish Google sign-in.');
+            setMessage(err instanceof Error ? err.message : 'Could not finish sign-in.');
           });
         return;
       }
 
+      // Magic-link / OTP email links via Supabase usually deliver tokens in the hash.
+      // If we land here with neither token nor code, it's an unexpected URL.
       setFailed(true);
-      setMessage('Google sign-in did not return an access token.');
+      setMessage('Sign-in link is invalid or expired. Please request a new one.');
       return;
     }
 
@@ -64,7 +69,7 @@ export default function AuthCallback() {
       .then(() => navigate('/dashboard', { replace: true }))
       .catch((err) => {
         setFailed(true);
-        setMessage(err instanceof Error ? err.message : 'Could not finish Google sign-in.');
+        setMessage(err instanceof Error ? err.message : 'Could not finish sign-in.');
       });
   }, [completeOAuthSignIn, exchangeOAuthCode, navigate]);
 
@@ -72,7 +77,7 @@ export default function AuthCallback() {
     <div className="min-h-screen bg-surface flex items-center justify-center p-6">
       <div className="w-full max-w-sm bg-surface-container-lowest border border-surface-container-highest rounded-xl p-8 text-center shadow-sm">
         {!failed && <Loader2 className="w-6 h-6 animate-spin mx-auto mb-4 text-brand-primary" />}
-        <h1 className="text-xl font-bold text-brand-primary">{failed ? 'Google sign-in needs attention' : 'Signing you in'}</h1>
+        <h1 className="text-xl font-bold text-brand-primary">{failed ? 'Sign-in needs attention' : 'Signing you in'}</h1>
         <p className="mt-3 text-sm text-on-surface-variant">{message}</p>
         {failed && (
           <Link to="/login" className="mt-6 inline-flex h-10 items-center justify-center rounded-lg bg-brand-primary px-5 text-sm font-bold text-brand-on-primary">

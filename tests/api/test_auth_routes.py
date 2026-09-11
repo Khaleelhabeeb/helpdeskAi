@@ -1,5 +1,3 @@
-from datetime import datetime, timedelta
-
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -25,11 +23,13 @@ class DummyResponse:
 
 
 class DummyAuthClient:
-    def __init__(self, sign_up_response=None, sign_in_response=None, refresh_response=None, exchange_response=None):
+    def __init__(self, sign_up_response=None, sign_in_response=None, refresh_response=None, exchange_response=None, otp_response=None, verify_response=None):
         self._sign_up_response = sign_up_response
         self._sign_in_response = sign_in_response
         self._refresh_response = refresh_response
         self._exchange_response = exchange_response
+        self._otp_response = otp_response
+        self._verify_response = verify_response
         self.calls = []
 
     def sign_up(self, payload):
@@ -41,6 +41,18 @@ class DummyAuthClient:
     def sign_in_with_password(self, payload):
         self.calls.append(("sign_in", payload))
         return self._sign_in_response
+
+    def sign_in_with_otp(self, payload):
+        self.calls.append(("otp_request", payload))
+        if isinstance(self._otp_response, Exception):
+            raise self._otp_response
+        return self._otp_response if self._otp_response is not None else {}
+
+    def verify_otp(self, payload):
+        self.calls.append(("otp_verify", payload))
+        if isinstance(self._verify_response, Exception):
+            raise self._verify_response
+        return self._verify_response
 
     def refresh_session(self, payload):
         self.calls.append(("refresh", payload))
@@ -105,84 +117,92 @@ def test_supabase_config_returns_keys(monkeypatch):
 
 
 def test_signup_returns_tokens_and_message(monkeypatch):
-    session = DummySession("access-1", "refresh-1")
-    response_obj = DummyResponse(user=DummyUser("u1"), session=session)
-    auth_client = DummyAuthClient(sign_up_response=response_obj)
-    supabase_client = DummySupabaseClient(auth_client)
-
-    captured = {}
-
-    def fake_upsert(db, supabase_user_id, email):
-        captured["args"] = (db, supabase_user_id, email)
-
+    # Password signup is now disabled — should return 410 with OTP guidance
     app = build_app()
-    app.dependency_overrides[auth_routes.get_db] = lambda: DummyDb()
-    monkeypatch.setattr(auth_routes, "get_supabase_client", lambda: supabase_client)
-    monkeypatch.setattr(auth_routes, "upsert_local_user", fake_upsert)
-
     client = TestClient(app)
     response = client.post(
         "/auth/signup",
         json={"email": "User@Example.com", "password": "secret"},
     )
 
-    assert response.status_code == 200, "Expected signup to succeed"
-    assert response.json() == {
-        "message": "User created successfully",
-        "access_token": "access-1",
-        "refresh_token": "refresh-1",
-        "token_type": "bearer",
-    }, "Expected signup to return tokens and message"
-    assert captured["args"][1:] == ("u1", "user@example.com"), (
-        "Expected upsert_local_user to be called with normalized email"
-    )
+    assert response.status_code == 410, "Expected signup to return 410 Gone (password flow disabled)"
+    assert "otp/request" in response.json()["detail"].lower(), "Expected 410 detail to point to OTP flow"
 
 
 def test_signup_rate_limit_returns_429(monkeypatch):
-    auth_client = DummyAuthClient(sign_up_response=RuntimeError("HTTP 429 Too Many Requests"))
-    supabase_client = DummySupabaseClient(auth_client)
-
+    # Password signup is disabled regardless of rate limits — legacy endpoint always 410
     app = build_app()
-    app.dependency_overrides[auth_routes.get_db] = lambda: DummyDb()
-    monkeypatch.setattr(auth_routes, "get_supabase_client", lambda: supabase_client)
-
     client = TestClient(app)
     response = client.post(
         "/auth/signup",
         json={"email": "User@Example.com", "password": "secret"},
     )
 
-    assert response.status_code == 429, "Expected signup rate limit to return 429"
-    assert response.json() == {
-        "detail": "Email signup rate limit exceeded. Please wait and try again."
-    }, "Expected signup rate limit message to be user-friendly"
+    assert response.status_code == 410, "Expected signup to return 410 Gone"
 
 
 def test_login_invalid_credentials(monkeypatch):
-    response_obj = DummyResponse(user=None, session=None)
-    auth_client = DummyAuthClient(sign_in_response=response_obj)
-    supabase_client = DummySupabaseClient(auth_client)
-
+    # Password login is disabled — should return 410
     app = build_app()
-    app.dependency_overrides[auth_routes.get_db] = lambda: DummyDb()
-    monkeypatch.setattr(auth_routes, "get_supabase_client", lambda: supabase_client)
-
     client = TestClient(app)
     response = client.post(
         "/auth/login",
         json={"email": "user@example.com", "password": "bad"},
     )
 
-    assert response.status_code == 401, "Expected invalid login to return 401"
-    assert response.json() == {"detail": "Invalid credentials"}, (
-        "Expected invalid login to return exact detail"
-    )
+    assert response.status_code == 410, "Expected login to return 410 Gone (password flow disabled)"
+    assert "otp/request" in response.json()["detail"].lower()
 
 
 def test_login_success_returns_tokens_and_user_type(monkeypatch):
-    session = DummySession("access-2", "refresh-2")
-    response_obj = DummyResponse(user=DummyUser("u2"), session=session)
-    auth_client = DummyAuthClient(sign_in_response=response_obj)
+    # Password login disabled — even valid credentials return 410
+    app = build_app()
+    client = TestClient(app)
+    response = client.post(
+        "/auth/login",
+        json={"email": "user@example.com", "password": "secret"},
+    )
+
+    assert response.status_code == 410, "Expected login to return 410 Gone"
+
+
+def test_otp_request_sends_email_and_normalizes(monkeypatch):
+    auth_client = DummyAuthClient(otp_response={})
+    supabase_client = DummySupabaseClient(auth_client)
+
+    app = build_app()
+    monkeypatch.setattr(auth_routes, "get_supabase_client", lambda: supabase_client)
+    monkeypatch.setattr(auth_routes, "FRONTEND_URL", "https://app.example.com")
+
+    client = TestClient(app)
+    response = client.post("/auth/otp/request", json={"email": "User@Example.com"})
+
+    assert response.status_code == 200, "Expected otp/request to succeed"
+    assert response.json() == {
+        "message": "Check your email for a magic link to sign in. It expires in a few minutes."
+    }
+    # Verify normalized email and redirect_to
+    assert auth_client.calls[0][1]["email"] == "user@example.com"
+    assert auth_client.calls[0][1]["options"]["email_redirect_to"] == "https://app.example.com/auth/callback"
+
+
+def test_otp_request_rate_limit(monkeypatch):
+    auth_client = DummyAuthClient(otp_response=RuntimeError("429 Too Many Requests"))
+    supabase_client = DummySupabaseClient(auth_client)
+
+    app = build_app()
+    monkeypatch.setattr(auth_routes, "get_supabase_client", lambda: supabase_client)
+
+    client = TestClient(app)
+    response = client.post("/auth/otp/request", json={"email": "user@example.com"})
+
+    assert response.status_code == 429, "Expected otp/request rate limit to return 429"
+
+
+def test_otp_verify_success_returns_tokens(monkeypatch):
+    session = DummySession("access-otp", "refresh-otp")
+    response_obj = DummyResponse(user=DummyUser("u-otp", "user@example.com"), session=session)
+    auth_client = DummyAuthClient(verify_response=response_obj)
     supabase_client = DummySupabaseClient(auth_client)
 
     class DbUser:
@@ -194,18 +214,32 @@ def test_login_success_returns_tokens_and_user_type(monkeypatch):
     monkeypatch.setattr(auth_routes, "upsert_local_user", lambda *_args: DbUser())
 
     client = TestClient(app)
-    response = client.post(
-        "/auth/login",
-        json={"email": "user@example.com", "password": "secret"},
-    )
+    response = client.post("/auth/otp/verify", json={"email": "user@example.com", "token": "123456"})
 
-    assert response.status_code == 200, "Expected login to succeed"
+    assert response.status_code == 200, "Expected otp/verify to succeed"
     assert response.json() == {
-        "access_token": "access-2",
-        "refresh_token": "refresh-2",
+        "access_token": "access-otp",
+        "refresh_token": "refresh-otp",
         "token_type": "bearer",
         "user_type": "free",
-    }, "Expected login to return tokens and user_type"
+    }
+    assert auth_client.calls[0][0] == "otp_verify"
+    assert auth_client.calls[0][1]["email"] == "user@example.com"
+    assert auth_client.calls[0][1]["token"] == "123456"
+
+
+def test_otp_verify_invalid_code_returns_401(monkeypatch):
+    auth_client = DummyAuthClient(verify_response=RuntimeError("invalid token"))
+    supabase_client = DummySupabaseClient(auth_client)
+
+    app = build_app()
+    app.dependency_overrides[auth_routes.get_db] = lambda: DummyDb()
+    monkeypatch.setattr(auth_routes, "get_supabase_client", lambda: supabase_client)
+
+    client = TestClient(app)
+    response = client.post("/auth/otp/verify", json={"email": "user@example.com", "token": "bad"})
+
+    assert response.status_code == 401, "Expected invalid otp to return 401"
 
 
 def test_refresh_session_uses_fallback_payload(monkeypatch):

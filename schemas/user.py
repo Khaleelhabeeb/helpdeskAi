@@ -6,12 +6,22 @@ from uuid import UUID
 
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str
+    password: str  # Deprecated: kept for backward compat, OTP flow does not use passwords
 
 
 class UserLogin(BaseModel):
     email: EmailStr
-    password: str
+    password: str  # Deprecated: kept for backward compat, OTP flow does not use passwords
+
+
+class OtpRequest(BaseModel):
+    email: EmailStr
+
+
+class OtpVerifyRequest(BaseModel):
+    email: EmailStr
+    token: str = Field(..., min_length=1, description="Magic-link token from email (legacy OTP code)")
+    type: str | None = Field(default="magiclink", description="OTP type: magiclink | email | recovery | signup | invite (legacy)")
 
 
 class ForgotPasswordRequest(BaseModel):

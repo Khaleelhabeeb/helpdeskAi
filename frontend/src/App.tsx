@@ -16,7 +16,17 @@ import AuthCallback from './pages/AuthCallback';
 
 function RootRoute() {
   const params = new URLSearchParams(window.location.search);
-  if (params.has('error') || params.has('code') || window.location.hash.includes('access_token=')) {
+  const hash = window.location.hash;
+  const isAuthCallback =
+    params.has('error') ||
+    params.has('code') ||
+    params.has('token') ||
+    params.has('token_hash') ||
+    params.has('type') ||
+    params.has('access_token') ||
+    hash.includes('access_token=') ||
+    hash.includes('refresh_token=');
+  if (isAuthCallback) {
     return <AuthCallback />;
   }
   return <Landing />;

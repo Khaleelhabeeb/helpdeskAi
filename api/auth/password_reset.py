@@ -11,6 +11,11 @@ router = APIRouter()
 FRONTEND_URL = os.getenv("FRONTEND_URL")
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "429" in msg or "too many requests" in msg or "rate limit" in msg
+
+
 @router.post("/forgot-password")
 @limiter.limit("3/hour")
 async def forgot_password(
@@ -18,16 +23,26 @@ async def forgot_password(
     response: Response,
     body: schemas.ForgotPasswordRequest,
 ):
-    normalized_email = body.email.lower()
-    options = {"redirect_to": f"{FRONTEND_URL}/reset-password"} if FRONTEND_URL else None
+    """
+    Deprecated password-reset endpoint — now an alias for OTP magic-link.
+    Kept for backward compatibility: triggers the same Supabase OTP email as
+    POST /auth/otp/request so older clients still get a sign-in email.
+    """
+    normalized_email = body.email.lower().strip()
+    redirect_to = f"{FRONTEND_URL}/auth/callback" if FRONTEND_URL else None
+    payload: dict = {"email": normalized_email}
+    if redirect_to:
+        payload["options"] = {"email_redirect_to": redirect_to, "should_create_user": True}
+    else:
+        payload["options"] = {"should_create_user": True}
     try:
-        if options:
-            get_supabase_client().auth.reset_password_email(normalized_email, options=options)
-        else:
-            get_supabase_client().auth.reset_password_email(normalized_email)
-    except Exception:
+        get_supabase_client().auth.sign_in_with_otp(payload)
+    except Exception as exc:
+        if _is_rate_limit_error(exc):
+            raise HTTPException(status_code=429, detail="Too many email requests. Please wait and try again.") from exc
+        # Swallow generic errors to avoid email enumeration, same as original behavior
         pass
-    return {"message": "If that email exists, a password reset link has been sent"}
+    return {"message": "Check your email for a magic link to sign in. It expires in a few minutes."}
 
 
 @router.post("/reset-password")
@@ -39,5 +54,5 @@ async def reset_password(
 ):
     raise HTTPException(
         status_code=410,
-        detail="Password reset is handled by Supabase Auth. Use the Supabase recovery session on the frontend to update the password.",
+        detail="Password authentication is removed. Use POST /auth/otp/request with your email to receive a magic link. Google sign-in still works via Supabase OAuth.",
     )

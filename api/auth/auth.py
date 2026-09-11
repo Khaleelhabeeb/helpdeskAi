@@ -7,13 +7,15 @@ from db import models
 from services.supabase_auth import get_db, get_supabase_client, upsert_local_user, verify_supabase_token
 from dotenv import load_dotenv
 from datetime import datetime, timezone
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from utils.rate_limit import create_limiter
 
 limiter = create_limiter()
 router = APIRouter()
 
 load_dotenv()
+
+FRONTEND_URL = os.getenv("FRONTEND_URL")
 
 
 class OAuthCodeExchange(BaseModel):
@@ -24,6 +26,16 @@ class OAuthCodeExchange(BaseModel):
 
 class RefreshTokenPayload(BaseModel):
     refresh_token: str
+
+
+class OtpRequest(BaseModel):
+    email: EmailStr
+
+
+class OtpVerifyRequest(BaseModel):
+    email: EmailStr
+    token: str
+    type: str | None = "email"
 
 
 def _read_attr(obj, name: str, default=None):
@@ -62,57 +74,142 @@ def supabase_config():
         raise HTTPException(status_code=500, detail="Supabase config is missing")
     return {"url": url, "anon_key": anon_key}
 
-@router.post("/signup")
+
+# ---------------------------------------------------------------------------
+# Magic-link (passwordless) — Supabase email auth
+# We intentionally use ONLY the magic link (ConfirmationURL), not the 6-digit
+# OTP code. The email template should contain {{ .ConfirmationURL }}.
+# All verification is handled by Supabase redirecting to FRONTEND_URL/auth/callback
+# with tokens in the hash; no manual code entry is needed.
+# See: https://supabase.com/docs/guides/auth/auth-magic-link
+# ---------------------------------------------------------------------------
+
+@router.post("/otp/request")
 @limiter.limit("5/minute")
-def signup(request: Request, response: Response, user: schemas.UserCreate, db: Session = Depends(get_db)):
-    normalized_email = user.email.lower()
+def request_otp(request: Request, response: Response, body: OtpRequest):
+    """
+    Send a magic link to the given email.
+    Creates the Supabase user automatically if it doesn't exist.
+    Always returns a generic success message to avoid email enumeration.
+    """
+    normalized_email = body.email.lower().strip()
+    redirect_to = f"{FRONTEND_URL}/auth/callback" if FRONTEND_URL else None
+
+    payload: dict = {"email": normalized_email}
+    if redirect_to:
+        payload["options"] = {"email_redirect_to": redirect_to, "should_create_user": True}
+    else:
+        payload["options"] = {"should_create_user": True}
+
     try:
-        response = get_supabase_client().auth.sign_up(
-            {"email": normalized_email, "password": user.password}
-        )
+        get_supabase_client().auth.sign_in_with_otp(payload)
     except Exception as exc:
         if _is_rate_limit_error(exc):
             raise HTTPException(
                 status_code=429,
-                detail="Email signup rate limit exceeded. Please wait and try again.",
+                detail="Too many email requests. Please wait a minute and try again.",
             ) from exc
+        # Don't leak internal errors – return generic message for security
+        # but raise 400 for truly bad inputs (invalid email format already handled by pydantic)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    supabase_user = getattr(response, "user", None)
-    if supabase_user:
-        upsert_local_user(db, str(supabase_user.id), normalized_email)
+    return {"message": "Check your email for a magic link to sign in. It expires in a few minutes."}
 
-    session = getattr(response, "session", None)
+
+# Legacy OTP code verification — kept for backward compat but not used in
+# magic-link-only flow. The magic link is verified automatically via the
+# Supabase redirect + AuthCallback. This endpoint remains for API compat.
+@router.post("/otp/verify")
+@limiter.limit("10/minute")
+def verify_otp(request: Request, response: Response, body: OtpVerifyRequest, db: Session = Depends(get_db)):
+    """
+    (Legacy) Verify the OTP code / magic-link token sent to the email.
+    In magic-link-only mode this is not used — the link verification happens
+    via the Supabase redirect to /auth/callback. Kept for backward compat.
+    """
+    normalized_email = body.email.lower().strip()
+    token = body.token.strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Token is required")
+
+    allowed_types = {"email", "magiclink", "signup", "invite", "recovery", "email_change"}
+    requested_type = (body.type or "email").strip().lower()
+    if requested_type not in allowed_types:
+        requested_type = "email"
+
+    # Build candidate type list – try requested first, then the other common one
+    candidates = [requested_type]
+    if requested_type == "email" and "magiclink" not in candidates:
+        candidates.append("magiclink")
+    elif requested_type == "magiclink" and "email" not in candidates:
+        candidates.append("email")
+
+    last_exc: Exception | None = None
+    resp = None
+    for otp_type in candidates:
+        try:
+            resp = get_supabase_client().auth.verify_otp(
+                {"email": normalized_email, "token": token, "type": otp_type}
+            )
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            # if it's a rate-limit error, surface immediately
+            if _is_rate_limit_error(exc):
+                raise HTTPException(status_code=429, detail="Too many verification attempts. Please wait and try again.") from exc
+            continue
+
+    if last_exc is not None or resp is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired code. Please request a new link.") from last_exc
+
+    supabase_user = getattr(resp, "user", None)
+    session = getattr(resp, "session", None)
+    if not supabase_user and session:
+        supabase_user = getattr(session, "user", None)
+    if not supabase_user:
+        raise HTTPException(status_code=401, detail="Could not verify code. Please request a new link.")
+
+    email_for_upsert = str(getattr(supabase_user, "email", "") or normalized_email).lower()
+    db_user = upsert_local_user(db, str(supabase_user.id), email_for_upsert)
+
+    access_token, refresh_token = _extract_session_data(resp)
+    # Fallback: session may be nested inside resp.session already extracted
+    if not access_token and session:
+        access_token = getattr(session, "access_token", None)
+        refresh_token = getattr(session, "refresh_token", None)
+
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Verification succeeded but no session was returned. Please try again.")
+
     return {
-        "message": "User created successfully",
-        "access_token": getattr(session, "access_token", None),
-        "refresh_token": getattr(session, "refresh_token", None),
+        "access_token": access_token,
+        "refresh_token": refresh_token,
         "token_type": "bearer",
+        "user_type": db_user.user_type,
     }
 
+
+# ---------------------------------------------------------------------------
+# Legacy password endpoints — deprecated in favor of OTP/magic-link
+# Kept as 410 Gone so existing clients get a clear migration message.
+# Google OAuth via Supabase remains fully supported (see /oauth/exchange).
+# ---------------------------------------------------------------------------
+
+@router.post("/signup")
+def signup_legacy(user: schemas.UserCreate):
+    raise HTTPException(
+        status_code=410,
+        detail="Password sign-up is disabled. Use POST /auth/otp/request with your email to receive a magic link. Google sign-in still works via Supabase OAuth.",
+    )
+
+
 @router.post("/login")
-@limiter.limit("10/minute")
-def login(request: Request, response: Response, user: schemas.UserLogin, db: Session = Depends(get_db)):
-    normalized_email = user.email.lower()
-    try:
-        response = get_supabase_client().auth.sign_in_with_password(
-            {"email": normalized_email, "password": user.password}
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=401, detail="Invalid credentials") from exc
-
-    supabase_user = getattr(response, "user", None)
-    if not supabase_user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    db_user = upsert_local_user(db, str(supabase_user.id), normalized_email)
-    session = getattr(response, "session", None)
-    return {
-        "access_token": getattr(session, "access_token", None),
-        "refresh_token": getattr(session, "refresh_token", None),
-        "token_type": "bearer",
-        "user_type": db_user.user_type
-    } 
+def login_legacy(user: schemas.UserLogin):
+    raise HTTPException(
+        status_code=410,
+        detail="Password login is disabled. Use POST /auth/otp/request with your email to receive a magic link. Google sign-in still works via Supabase OAuth.",
+    )
 
 
 @router.get("/google/callback")
