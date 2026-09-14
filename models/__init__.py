@@ -4,6 +4,7 @@ from .knowledge_base import KnowledgeBase, KBIngestJob
 from .widget_deployment import ChatMessage, ChatSession, WidgetDeployment
 from .kb_chunk import KbChunk
 from .enums import KBSourceType, KBStatus, JobState
+from .handoff import HumanAgent, AgentAssignment, Conversation
 
 __all__ = [
     "User",
@@ -21,4 +22,7 @@ __all__ = [
     "KBSourceType",
     "KBStatus",
     "JobState",
+    "HumanAgent",
+    "AgentAssignment",
+    "Conversation",
 ]

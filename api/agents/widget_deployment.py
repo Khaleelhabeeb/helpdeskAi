@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, joinedload
@@ -27,7 +27,14 @@ from services.redis_client import (
     redis_get_json,
     redis_set_json,
 )
-from services.rag_service import build_messages, aretrieve_context, astream_answer
+from services.rag_service import build_messages, aretrieve_context, astream_answer, astream_answer_with_tools
+from services.handoff_service import (
+    TRANSFER_TO_HUMAN_TOOL,
+    build_handoff_ack_message,
+    broadcast_to_conversation,
+    get_or_create_conversation,
+    transition_status,
+)
 from utils.jwt import get_current_user
 from utils.widget_security import (
     generate_widget_token,
@@ -566,6 +573,25 @@ async def public_widget_chat(
     user_id_value = agent.user_id
     agent_model = agent.model
     user_message = payload.message
+    deployment_int_id = deployment.id
+
+    # Get or create the Conversation row (handoff state machine)
+    conversation = get_or_create_conversation(
+        db,
+        agent_id=agent_id_value,
+        deployment_id=deployment_int_id,
+        session_id=session_id_value,
+        visitor_id=visitor_id,
+    )
+    conversation_id_value = conversation.id
+    conv_status_value = conversation.status
+
+    # If the conversation is already in human/queued/resolved state, block bot replies
+    if conv_status_value in ("queued", "human", "resolved"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Conversation is in '{conv_status_value}' state — bot replies are paused.",
+        )
 
     async def generate():
         answer_parts: list[str] = []
@@ -573,7 +599,12 @@ async def public_widget_chat(
         first_token_ms = None
         retrieval_ms = 0.0
         chat_logged = False
-        yield _sse("meta", {"session_id": str(session_id_value)})
+        handoff_triggered = False
+
+        yield _sse("meta", {
+            "session_id": str(session_id_value),
+            "conversation_id": str(conversation_id_value),
+        })
 
         history_task = asyncio.create_task(_history_for_prompt_async(session_id_value))
         try:
@@ -581,22 +612,63 @@ async def public_widget_chat(
             if use_retrieval and namespace:
                 retrieval_started = time.perf_counter()
                 try:
-                    context = await aretrieve_context(db, namespace, str(agent.id), payload.message, top_k=top_k)
+                    context = await aretrieve_context(db, namespace, str(agent_id_value), payload.message, top_k=top_k)
                 except Exception:
-                    logger.exception("public_widget_retrieval_failed deployment_id=%s agent_id=%s", deployment_id, agent.id)
+                    logger.exception("public_widget_retrieval_failed deployment_id=%s agent_id=%s", deployment_id, agent_id_value)
                 finally:
                     retrieval_ms = (time.perf_counter() - retrieval_started) * 1000
 
             history = await history_task
             messages = build_messages(agent.instructions or "", context, payload.message, history=history)
 
-            async for token in astream_answer(agent_model, messages):
-                if first_token_ms is None:
-                    first_token_ms = (time.perf_counter() - stream_started) * 1000
-                answer_parts.append(token)
-                yield _sse("token", {"content": token})
+            async for event in astream_answer_with_tools(agent_model, messages, [TRANSFER_TO_HUMAN_TOOL]):
+                if event["type"] == "token":
+                    token = event["content"]
+                    if first_token_ms is None:
+                        first_token_ms = (time.perf_counter() - stream_started) * 1000
+                    answer_parts.append(token)
+                    yield _sse("token", {"content": token})
+
+                elif event["type"] == "tool_call" and event["name"] == "transfer_to_human":
+                    handoff_triggered = True
+                    reason = event["arguments"].get("reason", "")
+                    logger.info(
+                        "handoff_triggered deployment_id=%s session_id=%s reason=%s",
+                        deployment_id, session_id_value, reason,
+                    )
+
+                    # Determine next status: need email? → collecting_email, else → queued
+                    visitor_email_known = bool(
+                        payload.visitor_email
+                        or (payload.identity and payload.identity.get("email"))
+                        or session.email
+                    )
+                    next_status = "queued" if visitor_email_known else "collecting_email"
+
+                    # Persist the state transition
+                    await asyncio.to_thread(
+                        transition_status,
+                        db,
+                        conversation,
+                        next_status,
+                        visitor_email=payload.visitor_email or (payload.identity or {}).get("email") or session.email,
+                        notify=True,
+                    )
+
+                    # Send the bot's acknowledgement message
+                    ack = build_handoff_ack_message(agent.name or "Support")
+                    answer_parts.append(ack)
+                    yield _sse("token", {"content": ack})
+
+                    # Tell the widget about the status change
+                    yield _sse("handoff", {
+                        "status": next_status,
+                        "conversation_id": str(conversation_id_value),
+                    })
+                    break  # Stop streaming after handoff
+
             answer = "".join(answer_parts).strip()
-            
+
             background_tasks.add_task(
                 _log_public_chat,
                 session_id=session_id_value,
@@ -604,18 +676,23 @@ async def public_widget_chat(
                 agent_id=agent_id_value,
                 user_message=user_message,
                 answer=answer,
+                sender_type="bot",
             )
             chat_logged = True
-            
+
             logger.info(
-                "widget_chat_latency deployment_id=%s agent_id=%s retrieval_ms=%.2f llm_ttft_ms=%.2f total_ms=%.2f",
+                "widget_chat_latency deployment_id=%s agent_id=%s retrieval_ms=%.2f llm_ttft_ms=%.2f total_ms=%.2f handoff=%s",
                 deployment_id,
                 agent_id_value,
                 retrieval_ms,
                 first_token_ms or 0.0,
                 (time.perf_counter() - started) * 1000,
+                handoff_triggered,
             )
-            yield _sse("done", {"session_id": str(session_id_value)})
+            yield _sse("done", {
+                "session_id": str(session_id_value),
+                "conversation_id": str(conversation_id_value),
+            })
         except asyncio.CancelledError:
             logger.info("public_widget_stream_cancelled deployment_id=%s session_id=%s", deployment_id, session_id_value)
             if not history_task.done():
@@ -632,6 +709,7 @@ async def public_widget_chat(
                             agent_id_value,
                             user_message,
                             "",
+                            "bot",
                         )
                     )
             raise
@@ -648,6 +726,7 @@ async def public_widget_chat(
                 agent_id=agent_id_value,
                 user_message=user_message,
                 answer="",
+                sender_type="bot",
             )
             chat_logged = True
             yield _sse("error", {"detail": "Sorry, I could not answer that right now."})
@@ -658,12 +737,194 @@ async def public_widget_chat(
     return StreamingResponse(generate(), media_type="text/event-stream", headers=headers, background=background_tasks)
 
 
-def _log_public_chat(session_id, user_id, agent_id, user_message, answer):
+# ── Email capture endpoint ─────────────────────────────────────────────────────
+
+class EmailCaptureRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=255)
+
+
+@public_router.post("/{deployment_id}/conversations/{conversation_id}/email")
+async def capture_visitor_email(
+    deployment_id: str,
+    conversation_id: str,
+    payload: EmailCaptureRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Called by the widget after the visitor submits their email in the
+    collecting_email inline card.  Transitions the conversation to 'queued'
+    and broadcasts the status change via pg_notify + in-process WS registry.
+    """
+    # Validate deployment
+    deployment = (
+        db.query(models.WidgetDeployment)
+        .filter(models.WidgetDeployment.deployment_id == deployment_id)
+        .first()
+    )
+    if not deployment or not deployment.is_enabled:
+        raise HTTPException(status_code=404, detail="Widget is not available")
+
+    host = _origin_host(request)
+    if not _host_allowed(host, deployment.allowed_domains or []):
+        raise HTTPException(status_code=403, detail="Domain not allowed")
+
+    # Basic email format check
+    import re as _re
+    if not _re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", payload.email):
+        raise HTTPException(status_code=422, detail="Invalid email address")
+
+    # Load conversation
+    try:
+        conv_uuid = uuid.UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    conv = (
+        db.query(models.Conversation)
+        .filter(
+            models.Conversation.id == conv_uuid,
+            models.Conversation.deployment_id == deployment.id,
+        )
+        .first()
+    )
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    if conv.status not in ("bot", "collecting_email"):
+        # Already transitioned — idempotent OK
+        return {"status": conv.status, "conversation_id": str(conv.id)}
+
+    transition_status(
+        db,
+        conv,
+        "queued",
+        visitor_email=payload.email,
+        notify=True,
+    )
+
+    # Fan-out to any open WebSocket for this conversation
+    await broadcast_to_conversation(str(conv.id), {
+        "type": "status_change",
+        "status": "queued",
+        "conversation_id": str(conv.id),
+    })
+
+    logger.info(
+        "visitor_email_captured deployment_id=%s conversation_id=%s",
+        deployment_id, conv.id,
+    )
+    return {"status": "queued", "conversation_id": str(conv.id)}
+
+
+# ── Widget WebSocket endpoint ──────────────────────────────────────────────────
+
+@public_router.websocket("/ws/{conversation_id}")
+async def widget_ws(
+    websocket: WebSocket,
+    conversation_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Real-time channel for a visitor's conversation.
+
+    The widget connects here after a handoff is triggered.  The server pushes
+    JSON frames whenever the conversation status changes or a human agent sends
+    a message.
+
+    Frame shapes (server → client):
+        {"type": "status_change", "status": "...", "conversation_id": "..."}
+        {"type": "message", "sender_type": "human_agent", "content": "...", "sender_name": "..."}
+        {"type": "agent_claimed", "agent_name": "..."}
+        {"type": "resolved"}
+        {"type": "ping"}   ← heartbeat every 25 s
+
+    Frame shapes (client → server):
+        {"type": "pong"}   ← heartbeat reply (optional)
+    """
+    # Validate conversation exists
+    try:
+        conv_uuid = uuid.UUID(conversation_id)
+    except ValueError:
+        await websocket.close(code=4004)
+        return
+
+    conv = db.query(models.Conversation).filter(models.Conversation.id == conv_uuid).first()
+    if not conv:
+        await websocket.close(code=4004)
+        return
+
+    await websocket.accept()
+
+    from services.handoff_service import register_ws, unregister_ws
+
+    q = await register_ws(conversation_id)
+    logger.info("widget_ws_connected conversation_id=%s", conversation_id)
+
+    # Send current status immediately so the widget can sync on reconnect
+    await websocket.send_json({
+        "type": "status_change",
+        "status": conv.status,
+        "conversation_id": conversation_id,
+        **({"agent_name": conv.assigned_human_agent.name or conv.assigned_human_agent.email}
+           if conv.assigned_human_agent else {}),
+    })
+
+    ping_interval = 25  # seconds
+
+    async def _pump():
+        """Drain the queue and forward to the WebSocket."""
+        while True:
+            msg = await q.get()
+            try:
+                await websocket.send_json(msg)
+            except Exception:
+                break
+
+    pump_task = asyncio.create_task(_pump())
+
+    try:
+        while True:
+            # Wait for a client frame or timeout (heartbeat)
+            try:
+                data = await asyncio.wait_for(websocket.receive_json(), timeout=ping_interval)
+                # Client frames are informational only (pong, etc.)
+            except asyncio.TimeoutError:
+                # Send ping
+                try:
+                    await websocket.send_json({"type": "ping"})
+                except Exception:
+                    break
+            except WebSocketDisconnect:
+                break
+            except Exception:
+                break
+    finally:
+        pump_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pump_task
+        await unregister_ws(conversation_id, q)
+        logger.info("widget_ws_disconnected conversation_id=%s", conversation_id)
+
+
+def _log_public_chat(session_id, user_id, agent_id, user_message, answer, sender_type="bot"):
     db = BackgroundSession()
     try:
-        db.add(models.ChatMessage(session_id=session_id, role="user", content=user_message, created_at=datetime.now(timezone.utc)))
+        db.add(models.ChatMessage(
+            session_id=session_id,
+            role="user",
+            content=user_message,
+            sender_type="visitor",
+            created_at=datetime.now(timezone.utc),
+        ))
         if answer:
-            db.add(models.ChatMessage(session_id=session_id, role="assistant", content=answer, created_at=datetime.now(timezone.utc)))
+            db.add(models.ChatMessage(
+                session_id=session_id,
+                role="assistant",
+                content=answer,
+                sender_type=sender_type,
+                created_at=datetime.now(timezone.utc),
+            ))
             db.add(models.UsageLog(
                 user_id=user_id,
                 agent_id=agent_id,

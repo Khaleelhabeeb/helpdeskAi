@@ -15,6 +15,9 @@ from models import (
     KBSourceType,
     KBStatus,
     JobState,
+    HumanAgent,
+    AgentAssignment,
+    Conversation,
 )
 
 __all__ = [
@@ -33,4 +36,7 @@ __all__ = [
     "KBSourceType",
     "KBStatus",
     "JobState",
+    "HumanAgent",
+    "AgentAssignment",
+    "Conversation",
 ]

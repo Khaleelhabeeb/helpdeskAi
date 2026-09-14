@@ -290,3 +290,65 @@ async def astream_answer(model: str, messages: list[dict[str, str]]) -> AsyncIte
             content = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)  # type: ignore[union-attr]
             if content:
                 yield content
+
+
+async def astream_answer_with_tools(
+    model: str,
+    messages: list[dict[str, str]],
+    tools: list[dict],
+) -> AsyncIterator[dict]:
+    """
+    Async streaming with tool-call support.
+
+    Yields dicts:
+        {"type": "token",    "content": str}
+        {"type": "tool_call","name": str, "arguments": dict}
+
+    The caller is responsible for acting on tool_call events (e.g. triggering
+    the handoff state machine) and deciding whether to continue streaming.
+
+    Tool calls are detected from the *non-streaming* first pass when the model
+    decides to call a tool (Groq returns finish_reason="tool_calls" with no
+    streamed content). We use a two-phase approach:
+      1. Non-streaming call with tools to detect tool invocations.
+      2. If no tool call → fall back to streaming for tokens.
+    This avoids the complexity of reassembling streamed tool-call deltas.
+    """
+    client = get_async_groq_client()
+    normalized = normalize_groq_model(model)
+
+    async with _llm_semaphore:
+        # Phase 1: non-streaming with tools to detect tool calls cheaply
+        response = await client.chat.completions.create(
+            model=normalized,
+            messages=messages,  # type: ignore[arg-type]
+            tools=tools,  # type: ignore[arg-type]
+            tool_choice="auto",
+            temperature=0.2,
+            max_completion_tokens=700,
+            stream=False,
+        )
+
+    choice = response.choices[0] if response.choices else None
+    if not choice:
+        return
+
+    # Tool call branch
+    if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
+        for tc in choice.message.tool_calls:
+            fn = tc.function
+            try:
+                import json as _json
+                args = _json.loads(fn.arguments or "{}")
+            except Exception:
+                args = {}
+            yield {"type": "tool_call", "name": fn.name, "arguments": args}
+        return
+
+    # Normal text branch — stream the content we already have, then done
+    content = choice.message.content or ""
+    if content:
+        # Yield in small chunks to keep the streaming feel
+        chunk_size = 8
+        for i in range(0, len(content), chunk_size):
+            yield {"type": "token", "content": content[i : i + chunk_size]}

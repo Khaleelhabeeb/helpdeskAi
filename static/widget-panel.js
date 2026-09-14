@@ -444,7 +444,7 @@
   function connectWs(conversationId) {
     if (state.ws) return;
     const wsBase = apiBase.replace(/^http/, "ws");
-    const wsUrl  = `${wsBase}/widget/ws/${conversationId}`;
+    const wsUrl  = `${wsBase}/public/widget/ws/${conversationId}`;
     try {
       const ws = new WebSocket(wsUrl);
       state.ws = ws;

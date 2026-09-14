@@ -64,4 +64,10 @@ class ChatMessage(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False, index=True)
 
+    # Handoff columns — added in migration add_handoff_tables
+    # visitor | bot | human_agent | system
+    sender_type: Mapped[str] = mapped_column(String(16), nullable=False, default="visitor")
+    # human_agents.id when sender_type = 'human_agent'
+    sender_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+
     session: Mapped["ChatSession"] = relationship("ChatSession", back_populates="messages")
