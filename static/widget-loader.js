@@ -1,9 +1,9 @@
 /**
- * HelpdeskAI Widget Loader v2.0.0
+ * HelpdeskAI Widget Loader v2.1.2 — fix: human chat unmuted, neutral bubble, no flicker
  * Lightweight loader that creates launcher and lazy-loads panel iframe
  */
 (function () {
-  const WIDGET_VERSION = "2.0.0";
+  const WIDGET_VERSION = "2.1.2";
   const script = document.currentScript;
   const deploymentId = script && script.getAttribute("data-deployment-id");
   const apiBase = (script && script.getAttribute("data-api-base")) || new URL(script.src).origin;

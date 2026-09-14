@@ -37,8 +37,10 @@ def get_redis() -> Optional[Redis]:
         return redis.Redis.from_url(
             url,
             decode_responses=True,
-            socket_connect_timeout=float(os.getenv("REDIS_CONNECT_TIMEOUT_SECONDS", "2")),
-            socket_timeout=float(os.getenv("REDIS_SOCKET_TIMEOUT_SECONDS", "2")),
+            socket_connect_timeout=float(os.getenv("REDIS_CONNECT_TIMEOUT_SECONDS", "5")),
+            socket_timeout=float(os.getenv("REDIS_SOCKET_TIMEOUT_SECONDS", "5")),
+            socket_keepalive=True,
+            retry_on_timeout=True,
             health_check_interval=30,
             max_connections=int(os.getenv("REDIS_MAX_CONNECTIONS", "20")),
         )
@@ -59,8 +61,10 @@ def get_async_redis() -> Optional[AsyncRedis]:
             client = AsyncRedis.from_url(
                 url,
                 decode_responses=True,
-                socket_connect_timeout=float(os.getenv("REDIS_CONNECT_TIMEOUT_SECONDS", "2")),
-                socket_timeout=float(os.getenv("REDIS_SOCKET_TIMEOUT_SECONDS", "2")),
+                socket_connect_timeout=float(os.getenv("REDIS_CONNECT_TIMEOUT_SECONDS", "5")),
+                socket_timeout=float(os.getenv("REDIS_SOCKET_TIMEOUT_SECONDS", "5")),
+                socket_keepalive=True,
+                retry_on_timeout=True,
                 health_check_interval=30,
                 max_connections=int(os.getenv("REDIS_MAX_CONNECTIONS", "20")),
             )
@@ -108,8 +112,11 @@ async def aredis_get_json(key: str) -> Optional[Any]:
     if not client:
         return None
     try:
-        value = await client.get(key)
+        value = await asyncio.wait_for(client.get(key), timeout=1.5)
         return json.loads(value) if value else None
+    except asyncio.TimeoutError:
+        logger.warning("async_redis_get_timeout key=%s", key)
+        return None
     except Exception:
         logger.warning("async_redis_get_failed key=%s", key, exc_info=True)
         return None
@@ -120,7 +127,9 @@ async def aredis_set_json(key: str, value: Any, ttl_seconds: int) -> None:
     if not client:
         return
     try:
-        await client.setex(key, ttl_seconds, json.dumps(value, default=str))
+        await asyncio.wait_for(client.setex(key, ttl_seconds, json.dumps(value, default=str)), timeout=1.5)
+    except asyncio.TimeoutError:
+        logger.warning("async_redis_set_timeout key=%s", key)
     except Exception:
         logger.warning("async_redis_set_failed key=%s", key, exc_info=True)
 

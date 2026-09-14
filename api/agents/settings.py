@@ -83,7 +83,7 @@ def get_agent_settings(
     deployment = _get_or_create_widget_deployment(db, agent)
     embed_script = f'''<!-- {agent.name} Chat Widget -->
 <script
-    src="{base_url}/static/widget.js"
+    src="{base_url}/static/widget.js?v=2.1.2"
     data-deployment-id="{deployment.deployment_id}"
     defer
 ></script>'''
@@ -298,7 +298,7 @@ def get_embed_code(
     deployment = _get_or_create_widget_deployment(db, agent)
     embed_script = f'''<!-- {agent.name} Chat Widget -->
 <script
-    src="{base_url}/static/widget.js"
+    src="{base_url}/static/widget.js?v=2.1.2"
     data-deployment-id="{deployment.deployment_id}"
     defer
 ></script>'''

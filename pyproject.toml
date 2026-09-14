@@ -76,4 +76,6 @@ dependencies = [
     "yarl>=1.22.0",
     "zstandard==0.23.0",
     "defusedxml>=0.7.1",
+    "bcrypt>=5.0.0",
+    "pyjwt>=2.12.1",
 ]

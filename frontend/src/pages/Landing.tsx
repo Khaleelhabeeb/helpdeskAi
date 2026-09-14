@@ -122,7 +122,7 @@ export default function Landing() {
               transition={{ delay: 0.12 }}
               className="mx-auto mt-6 max-w-2xl text-base leading-relaxed text-on-surface-variant md:text-xl"
             >
-              Integrate precise, reliable AI agents with Slack, WhatsApp, and your website.
+              Integrate precise, reliable AI agents on your  website with  WhatsApp, Slack and email.
               Resolve tickets faster with uncompromising technical accuracy.
             </motion.p>
 

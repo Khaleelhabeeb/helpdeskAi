@@ -14,10 +14,12 @@ api_instance = sib_api_v3_sdk.TransactionalEmailsApi(
 )
 
 def send_email(subject, html_content, to_email, to_name=None):
+    sender_email = (os.getenv("BREVO_SENDER_EMAIL") or "no-reply@frelo.com.ng").strip()
+    sender_name = (os.getenv("BREVO_SENDER_NAME") or "HelpDeskAI").strip() or "HelpDeskAI"
     email = sib_api_v3_sdk.SendSmtpEmail(
         subject=subject,
         html_content=html_content,
-        sender={"name": "HelpDeskAi", "email": "no-reply@helpdeskai.web.app"},
+        sender={"name": sender_name, "email": sender_email},
         to=[{"email": to_email, "name": to_name}] if to_name else [{"email": to_email}]
     )
 

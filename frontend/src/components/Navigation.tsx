@@ -13,6 +13,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   ChevronsUpDown,
+  Users,
 } from 'lucide-react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { motion } from 'motion/react';
@@ -26,6 +27,7 @@ const SIDEBAR_COLLAPSED = 72;
 const navItems = [
   { icon: LayoutDashboard, label: 'Dashboard', path: '/dashboard' },
   { icon: Bot, label: 'Agents', path: '/agents' },
+  { icon: Users, label: 'Team', path: '/team' },
   { icon: CreditCard, label: 'Billing', path: '/billing' },
 ];
 

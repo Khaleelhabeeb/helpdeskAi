@@ -1,9 +1,9 @@
 /**
- * HelpdeskAI Widget Panel v2.1.0
+ * HelpdeskAI Widget Panel v2.1.2 — fix: human chat unmuted, neutral human bubble, no flicker
  * Runs inside iframe sandbox — supports bot / collecting_email / queued / human / resolved states
  */
 (function () {
-  const WIDGET_VERSION = "2.1.0";
+  const WIDGET_VERSION = "2.1.2";
   const params = new URLSearchParams(window.location.search);
   const deploymentId = params.get("deployment_id");
   const apiBase = params.get("api_base");
@@ -255,6 +255,10 @@
       state.visitorEmail = localStorage.getItem(emailKey) || null;
       state.conversationId = localStorage.getItem(convKey) || null;
       applyStatusUI(savedStatus, null, /* silent */ true);
+      if (savedStatus === "collecting_email" || savedStatus === "queued" || savedStatus === "human") {
+        const cid = state.conversationId || localStorage.getItem(convKey);
+        if (cid) connectWs(cid);
+      }
     }
   }
 
@@ -397,11 +401,14 @@
     if (status === "collecting_email") {
       formEl.classList.add("disabled");
       inputEl.disabled = true;
-      if (!silent) renderEmailCard();
+      // Always ensure the card exists, even on silent restore (user reloads mid-handoff)
+      if (!state.emailCardEl) renderEmailCard();
+      else if (!silent) renderEmailCard();
     } else if (status === "queued") {
       formEl.classList.add("disabled");
       inputEl.disabled = true;
-      if (!silent) renderHandoffBanner(agentName);
+      if (!state.handoffBannerEl) renderHandoffBanner(agentName);
+      else if (!silent) renderHandoffBanner(agentName);
     } else if (status === "human") {
       formEl.classList.remove("disabled");
       inputEl.disabled = false;
@@ -424,10 +431,10 @@
     // Optimistically transition to queued
     state.convStatus = "queued";
     applyStatusUI("queued", null, false);
-
-    // If we have a conversation ID, notify the backend
     const convId = state.conversationId || localStorage.getItem(convKey);
     if (convId) {
+      // Ensure we have a live channel for the queued→human transition
+      connectWs(convId);
       try {
         await fetch(`${apiBase}/public/widget/${deploymentId}/conversations/${convId}/email`, {
           method: "POST",
@@ -527,8 +534,10 @@
     }
     if (eventName === "token") {
       answerParts.push(data.content || "");
-      botBubble.innerHTML = renderMarkdownLite(answerParts.join(""));
-      scrollBottom(false);
+      if (botBubble) {
+        botBubble.innerHTML = renderMarkdownLite(answerParts.join(""));
+        scrollBottom(false);
+      }
     }
     if (eventName === "handoff") {
       // Backend signals a handoff is needed
@@ -538,7 +547,10 @@
       if (data.conversation_id) {
         state.conversationId = data.conversation_id;
         localStorage.setItem(convKey, data.conversation_id);
-        if (newStatus === "queued" || newStatus === "human") {
+        // Need live updates for all handoff states, including collecting_email
+        // (so the queued transition after email submission is received even if
+        // the optimistic update in onEmailSubmitted is missed)
+        if (newStatus === "collecting_email" || newStatus === "queued" || newStatus === "human") {
           connectWs(data.conversation_id);
         }
       }
@@ -552,8 +564,10 @@
   async function sendMessage(value) {
     const text = value.trim();
     if (!text || state.sending) return;
-    // Block sending while in queued/resolved state
-    if (state.convStatus === "queued" || state.convStatus === "resolved") return;
+    // Block sending while waiting for email or queued. Human is *not* blocked —
+    // visitor ↔ human chat flows via the same endpoint and is broadcast live.
+    // Resolved is terminal.
+    if (state.convStatus === "collecting_email" || state.convStatus === "queued" || state.convStatus === "resolved") return;
 
     state.sending = true;
     inputEl.value = "";
@@ -561,8 +575,15 @@
     sendEl.disabled = true;
     playTone("send");
     addMessage("user", text, { save: true });
-    const { row: typingRow, bubble: botBubble } = addTyping();
+    const isHumanChat = state.convStatus === "human";
+    let typingRow = null;
+    let botBubble = null;
     const answerParts = [];
+    if (!isHumanChat) {
+      const typing = addTyping();
+      typingRow = typing.row;
+      botBubble = typing.bubble;
+    }
     const chatStartTime = performance.now();
     let firstTokenTime = null;
 
@@ -611,30 +632,43 @@
         }
       }
 
-      const answer = answerParts.join("").trim() || "Sorry, I could not answer that right now.";
-      botBubble.innerHTML = renderMarkdownLite(answer);
-
-      // Add timestamp row to the typing row
-      const ts = document.createElement("div");
-      ts.className = "msg-time";
-      ts.textContent = fmtTime(new Date());
-      typingRow.appendChild(ts);
-
-      const messages = loadHistory();
-      messages.push({ role: "bot", content: answer, time: Date.now() });
-      saveHistory(messages);
-
-      sendTelemetry("response_complete", {
-        latency_ms: performance.now() - chatStartTime,
-        token_count: answer.length,
-      });
+      if (!isHumanChat) {
+        const answer = answerParts.join("").trim() || "Sorry, I could not answer that right now.";
+        if (botBubble) botBubble.innerHTML = renderMarkdownLite(answer);
+        if (typingRow) {
+          const ts = document.createElement("div");
+          ts.className = "msg-time";
+          ts.textContent = fmtTime(new Date());
+          typingRow.appendChild(ts);
+        }
+        const messages = loadHistory();
+        messages.push({ role: "bot", content: answer, time: Date.now() });
+        saveHistory(messages);
+        sendTelemetry("response_complete", {
+          latency_ms: performance.now() - chatStartTime,
+          token_count: answer.length,
+        });
+      } else {
+        // Human chat: no bot bubble, just telemetry
+        sendTelemetry("human_message_sent", {
+          latency_ms: performance.now() - chatStartTime,
+        });
+        // Remove the typing placeholder if it somehow exists (shouldn't for human)
+        if (typingRow && typingRow.parentNode) typingRow.remove();
+      }
     } catch (error) {
       console.error("[HelpdeskAI Panel] Chat failed:", error);
-      botBubble.textContent = "Sorry, I could not answer that right now.";
+      if (botBubble) botBubble.textContent = "Sorry, I could not answer that right now.";
+      else if (typingRow && typingRow.parentNode) typingRow.remove();
       sendToParent({ type: "WIDGET_ERROR", code: "CHAT_FAIL", message: error.message, details: { deploymentId } });
     } finally {
       state.sending = false;
-      sendEl.disabled = false;
+      // Don't re-enable send when we're in a handoff pause (email/queued/resolved)
+      if (state.convStatus === "collecting_email" || state.convStatus === "queued" || state.convStatus === "resolved") {
+        sendEl.disabled = true;
+      } else {
+        sendEl.disabled = false;
+      }
       if (!inputEl.disabled) inputEl.focus();
       scrollBottom(true);
     }

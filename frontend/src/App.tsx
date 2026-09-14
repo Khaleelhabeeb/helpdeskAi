@@ -13,6 +13,10 @@ import ChannelComingSoonPage from './pages/deploy/ChannelComingSoonPage';
 import Guides from './pages/Guides';
 import { ProtectedRoute } from './lib/auth';
 import AuthCallback from './pages/AuthCallback';
+import Team from './pages/Team';
+import HumanAgentLogin from './pages/humanAgent/HumanAgentLogin';
+import HumanAgentAcceptInvite from './pages/humanAgent/HumanAgentAcceptInvite';
+import HumanAgentDashboard from './pages/humanAgent/HumanAgentDashboard';
 
 function RootRoute() {
   const params = new URLSearchParams(window.location.search);
@@ -49,6 +53,12 @@ export default function App() {
       <Route path="/guides" element={<ProtectedRoute><Guides /></ProtectedRoute>} />
       <Route path="/billing" element={<ProtectedRoute><Billing /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
+      <Route path="/team" element={<ProtectedRoute><Team /></ProtectedRoute>} />
+      {/* Human agent — separate auth, no ProtectedRoute */}
+      <Route path="/human-agent/login" element={<HumanAgentLogin />} />
+      <Route path="/human-agent/accept-invite" element={<HumanAgentAcceptInvite />} />
+      <Route path="/human-agent/dashboard" element={<HumanAgentDashboard />} />
+      <Route path="/human-agent" element={<Navigate to="/human-agent/dashboard" replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

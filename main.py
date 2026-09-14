@@ -18,6 +18,7 @@ from api.scrape import scrape
 from api.storage import storage, upload
 from api.users import users
 from api import models as model_catalog
+from api import owner_human_agents, human_agent as human_agent_api, owner_team
 from db.database import Base, engine
 from api.analytics import analytics
 from fastapi.staticfiles import StaticFiles
@@ -169,6 +170,33 @@ app.include_router(scrape.router, prefix="/scrape", tags=["Scrape"])
 app.include_router(analytics.router, tags=["KPI"])
 app.include_router(model_catalog.router, prefix="/models", tags=["Models"])
 
+# Human handoff (§2, §5, §8)
+app.include_router(owner_human_agents.router, prefix="/owner/human-agents", tags=["Owner — Human Agents"])
+app.include_router(owner_team.router, prefix="/owner/team", tags=["Owner — Team"])
+app.include_router(human_agent_api.auth_router, prefix="/human-agent/auth", tags=["Human Agent — Auth"])
+app.include_router(human_agent_api.router, prefix="/human-agent", tags=["Human Agent"])
+
+# Debug: mock email outbox (dev only, no auth — gated to non-prod inside handler)
+from fastapi import Depends
+from services.email_provider import get_sent_emails
+
+@app.get("/debug/emails", include_in_schema=False)
+def debug_emails():
+    import os as _os
+    if _os.getenv("ENV") == "production":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404)
+    return {"emails": [
+        {
+            "to_email": e.to_email,
+            "subject": e.subject,
+            "provider": e.provider,
+            "sent_at": e.sent_at.isoformat(),
+            "html_snippet": e.html_content[:400],
+        }
+        for e in get_sent_emails()[-50:]
+    ]}
+
 # Custom static file handler with proper cache headers
 from starlette.staticfiles import StaticFiles
 
@@ -178,12 +206,15 @@ class CachedStaticFiles(StaticFiles):
     
     def file_response(self, *args, **kwargs):
         response = super().file_response(*args, **kwargs)
-        # Add cache headers for widget files
         path = str(args[0]) if args else ""
-        if "widget-loader" in path or "widget-panel" in path:
-            # Immutable cache for hashed files
-            if any(x in path for x in [".js", ".html", ".css"]):
-                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        # Hashed build files can be immutable; raw widget files must not be (we just fixed a handoff loop)
+        if ("widget-loader" in path or "widget-panel" in path):
+            if "/build/" in path:
+                if any(x in path for x in [".js", ".html", ".css"]):
+                    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            else:
+                # Raw dev files — short cache so fixes propagate immediately
+                response.headers["Cache-Control"] = "public, max-age=60"
         elif path.endswith((".png", ".jpg", ".jpeg", ".gif", ".svg")):
             response.headers["Cache-Control"] = "public, max-age=86400"
         else:

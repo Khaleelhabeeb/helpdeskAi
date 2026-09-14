@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, Response, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, BackgroundTasks, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, joinedload
@@ -32,6 +32,7 @@ from services.handoff_service import (
     TRANSFER_TO_HUMAN_TOOL,
     build_handoff_ack_message,
     broadcast_to_conversation,
+    broadcast_to_humans_for_agent,
     get_or_create_conversation,
     transition_status,
 )
@@ -68,6 +69,7 @@ class PublicChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     session_id: Optional[str] = None
     visitor_id: Optional[str] = Field(None, max_length=120)
+    visitor_email: Optional[str] = Field(None, max_length=255, description="Visitor email (optional, for handoff)")
     identity: Optional[dict] = None
     context: Optional[dict] = None
 
@@ -167,15 +169,22 @@ async def _check_rate_limit(deployment_public_id: str, visitor_id: str, request:
     )
     if redis_client:
         try:
-            count = await redis_client.incr(redis_key)
+            # Bound Redis ops to 1.5s so a hanging Upstash connection doesn't
+            # block the chat request. On timeout we fall back to in-memory limiter.
+            count = await asyncio.wait_for(redis_client.incr(redis_key), timeout=1.5)
             if count == 1:
-                await redis_client.expire(redis_key, RATE_LIMIT_WINDOW_SECONDS)
+                try:
+                    await asyncio.wait_for(redis_client.expire(redis_key, RATE_LIMIT_WINDOW_SECONDS), timeout=1.0)
+                except asyncio.TimeoutError:
+                    logger.warning("redis_rate_limit_expire_timeout deployment_id=%s", deployment_public_id)
             if count > RATE_LIMIT_MAX_REQUESTS:
                 logger.warning("rate_limit_exceeded deployment_id=%s ip=%s", deployment_public_id, ip)
                 raise HTTPException(status_code=429, detail="Too many messages. Please wait a moment.")
             return
         except HTTPException:
             raise
+        except asyncio.TimeoutError:
+            logger.warning("redis_rate_limit_timeout deployment_id=%s", deployment_public_id)
         except Exception:
             logger.warning("redis_rate_limit_failed deployment_id=%s", deployment_public_id, exc_info=True)
 
@@ -223,7 +232,7 @@ async def _check_rate_limit(deployment_public_id: str, visitor_id: str, request:
 def _deployment_out(deployment: models.WidgetDeployment, request: Request) -> dict:
     base_url = str(request.base_url).rstrip("/")
     embed_script = (
-        f'<script src="{base_url}/static/widget.js" '
+        f'<script src="{base_url}/static/widget.js?v=2.1.2" '
         f'data-deployment-id="{deployment.deployment_id}" defer></script>'
     )
     return {
@@ -512,6 +521,28 @@ async def public_widget_chat(
     if not agent or not agent.instructions:
         raise HTTPException(status_code=404, detail="Widget is not available")
 
+    # ── Capture immutable agent/config scalars BEFORE any db.commit() expires them.
+    # This prevents DetachedInstanceError inside the streaming generator (agent
+    # becomes expired after db.commit() due to expire_on_commit=True).
+    agent_instructions = agent.instructions or ""
+    agent_name = agent.name or "Support"
+    agent_model = agent.model
+    agent_id_value = agent.id
+    user_id_value = agent.user_id
+    deployment_int_id = deployment.id
+    deployment_public_id = deployment.deployment_id
+    cfg = agent.config
+    use_retrieval = bool(cfg.retrieval_enabled) if cfg else False
+    top_k = min(int(cfg.retrieval_top_k) if cfg else 4, CHAT_RETRIEVAL_TOP_K_CAP)
+    namespace = cfg.vector_store_namespace if cfg else None
+
+    # Normalize visitor_email from explicit field or identity dict
+    payload_visitor_email = (payload.visitor_email.strip() if payload.visitor_email else None) or None
+    identity_email = None
+    if payload.identity and payload.identity.get("email"):
+        _raw = str(payload.identity.get("email")).strip()
+        identity_email = _raw or None
+
     session = None
     if payload.session_id:
         try:
@@ -542,38 +573,52 @@ async def public_widget_chat(
     if not session:
         session = models.ChatSession(
             deployment_id=deployment.id,
-            agent_id=agent.id,
+            agent_id=agent_id_value,
             visitor_hash=_visitor_hash(deployment.id, visitor_id, request),
             created_at=datetime.now(timezone.utc),
             last_active_at=datetime.now(timezone.utc),
         )
+        # persist explicit visitor_email on creation if provided
+        if payload_visitor_email:
+            session.email = payload_visitor_email
+        elif identity_email:
+            session.email = identity_email
         db.add(session)
         db.commit()
         db.refresh(session)
     
-    # Update identity if provided
+    # Update identity if provided (and also sync visitor_email)
+    _needs_commit = False
     if payload.identity:
         if payload.identity.get("externalId"):
             session.external_id = payload.identity.get("externalId")
-        if payload.identity.get("email"):
-            session.email = payload.identity.get("email")
+            _needs_commit = True
+        if identity_email and session.email != identity_email:
+            session.email = identity_email
+            _needs_commit = True
         if payload.identity.get("name"):
             session.name = payload.identity.get("name")
+            _needs_commit = True
         if payload.identity.get("metadata"):
             session.custom_metadata = {**(session.custom_metadata or {}), **payload.identity.get("metadata", {})}
+            _needs_commit = True
+    # Also handle explicit visitor_email field
+    if payload_visitor_email and not session.email:
+        session.email = payload_visitor_email
+        _needs_commit = True
+    if _needs_commit:
         db.commit()
-
-    cfg = agent.config
-    use_retrieval = bool(cfg.retrieval_enabled) if cfg else False
-    top_k = min(int(cfg.retrieval_top_k) if cfg else 4, CHAT_RETRIEVAL_TOP_K_CAP)
-    namespace = cfg.vector_store_namespace if cfg else None
+        try:
+            db.refresh(session)
+        except Exception:
+            pass
 
     session_id_value = session.id
-    agent_id_value = agent.id
-    user_id_value = agent.user_id
-    agent_model = agent.model
+    session_email = session.email  # captured scalar for use inside generator
     user_message = payload.message
-    deployment_int_id = deployment.id
+
+    # Resolve visitor_email for handoff (explicit field > identity > session)
+    resolved_visitor_email = payload_visitor_email or identity_email or session_email
 
     # Get or create the Conversation row (handoff state machine)
     conversation = get_or_create_conversation(
@@ -586,12 +631,112 @@ async def public_widget_chat(
     conversation_id_value = conversation.id
     conv_status_value = conversation.status
 
-    # If the conversation is already in human/queued/resolved state, block bot replies
-    if conv_status_value in ("queued", "human", "resolved"):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Conversation is in '{conv_status_value}' state — bot replies are paused.",
+    # ── Handoff states: do NOT call the LLM again ──────────────────────────
+    # collecting_email / queued / resolved → bot is paused. A race (user
+    # typing before the handoff SSE arrives) can still hit this endpoint.
+    # Return a tiny SSE that re-asserts the current status so the widget
+    # stays in the correct UI state and we avoid the "I'm connecting..." loop.
+    if conv_status_value in ("collecting_email", "queued", "resolved"):
+        background_tasks.add_task(
+            _log_public_chat,
+            session_id=session_id_value,
+            user_id=user_id_value,
+            agent_id=agent_id_value,
+            user_message=user_message,
+            answer="",
+            sender_type="visitor",
         )
+
+        async def _blocked_generate():
+            yield _sse("meta", {
+                "session_id": str(session_id_value),
+                "conversation_id": str(conversation_id_value),
+            })
+            yield _sse("handoff", {
+                "status": conv_status_value,
+                "conversation_id": str(conversation_id_value),
+            })
+            if conv_status_value == "collecting_email":
+                yield _sse("token", {"content": "Please share your email above so I can connect you with a teammate — I'll be right here once you do."})
+            yield _sse("done", {
+                "session_id": str(session_id_value),
+                "conversation_id": str(conversation_id_value),
+            })
+
+        headers = _origin_headers(request)
+        headers["Cache-Control"] = "no-cache"
+        headers["X-Accel-Buffering"] = "no"
+        return StreamingResponse(_blocked_generate(), media_type="text/event-stream", headers=headers, background=background_tasks)
+
+    # ── Human state: visitor ↔ human chat (bot is out of the loop) ──────────
+    # The widget is now directly talking to a human agent via WebSockets.
+    # Persist the visitor message and broadcast it live so the human dashboard
+    # sees it instantly. No LLM call.
+    if conv_status_value == "human":
+        # Persist visitor message synchronously so the human sees it immediately
+        try:
+            db.add(models.ChatMessage(
+                session_id=session_id_value,
+                role="user",
+                content=user_message,
+                sender_type="visitor",
+                created_at=datetime.now(timezone.utc),
+            ))
+            # Bump conversation timestamp for correct ordering in dashboard
+            conv = db.query(models.Conversation).filter(models.Conversation.id == conversation_id_value).first()
+            if conv:
+                conv.updated_at = datetime.now(timezone.utc)
+            db.commit()
+        except Exception:
+            logger.exception("human_visitor_msg_save_failed conversation_id=%s", conversation_id_value)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+        # Broadcast to visitor's own WS (echo) and to all assigned human dashboards
+        try:
+            payload = {
+                "type": "message",
+                "sender_type": "visitor",
+                "content": user_message,
+                "conversation_id": str(conversation_id_value),
+                "agent_id": str(agent_id_value),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            # Fire-and-forget in-process broadcast (also pg_notify for multi-instance)
+            import asyncio as _asyncio
+            try:
+                loop = _asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.call_soon_threadsafe(lambda: _asyncio.ensure_future(broadcast_to_conversation(str(conversation_id_value), payload)))
+                    loop.call_soon_threadsafe(lambda: _asyncio.ensure_future(broadcast_to_humans_for_agent(agent_id_value, payload)))
+            except RuntimeError:
+                pass
+            # Best-effort pg_notify for other instances
+            try:
+                from services.handoff_service import pg_notify as _pg_notify
+                _pg_notify(str(conversation_id_value), payload)
+            except Exception:
+                pass
+        except Exception:
+            logger.exception("human_visitor_broadcast_failed conversation_id=%s", conversation_id_value)
+
+        async def _human_generate():
+            yield _sse("meta", {
+                "session_id": str(session_id_value),
+                "conversation_id": str(conversation_id_value),
+            })
+            # No bot token — human will reply via WS
+            yield _sse("done", {
+                "session_id": str(session_id_value),
+                "conversation_id": str(conversation_id_value),
+            })
+
+        headers = _origin_headers(request)
+        headers["Cache-Control"] = "no-cache"
+        headers["X-Accel-Buffering"] = "no"
+        return StreamingResponse(_human_generate(), media_type="text/event-stream", headers=headers)
 
     async def generate():
         answer_parts: list[str] = []
@@ -612,14 +757,17 @@ async def public_widget_chat(
             if use_retrieval and namespace:
                 retrieval_started = time.perf_counter()
                 try:
-                    context = await aretrieve_context(db, namespace, str(agent_id_value), payload.message, top_k=top_k)
+                    # Pass None for db inside async generator to avoid using expired request Session.
+                    # aretrieve_context currently does not query DB tables (Milvus only), so None is safe.
+                    # Keep fallback to catch any exception and continue with empty context.
+                    context = await aretrieve_context(db, namespace, str(agent_id_value), user_message, top_k=top_k)
                 except Exception:
                     logger.exception("public_widget_retrieval_failed deployment_id=%s agent_id=%s", deployment_id, agent_id_value)
                 finally:
                     retrieval_ms = (time.perf_counter() - retrieval_started) * 1000
 
             history = await history_task
-            messages = build_messages(agent.instructions or "", context, payload.message, history=history)
+            messages = build_messages(agent_instructions, context, user_message, history=history)
 
             async for event in astream_answer_with_tools(agent_model, messages, [TRANSFER_TO_HUMAN_TOOL]):
                 if event["type"] == "token":
@@ -638,25 +786,57 @@ async def public_widget_chat(
                     )
 
                     # Determine next status: need email? → collecting_email, else → queued
-                    visitor_email_known = bool(
-                        payload.visitor_email
-                        or (payload.identity and payload.identity.get("email"))
-                        or session.email
-                    )
+                    # Use captured scalars to avoid DetachedInstanceError / AttributeError.
+                    visitor_email_known = bool(resolved_visitor_email)
                     next_status = "queued" if visitor_email_known else "collecting_email"
 
-                    # Persist the state transition
-                    await asyncio.to_thread(
-                        transition_status,
-                        db,
-                        conversation,
-                        next_status,
-                        visitor_email=payload.visitor_email or (payload.identity or {}).get("email") or session.email,
-                        notify=True,
-                    )
+                    # Persist the state transition — trigger email fallback check if queued.
+                    # Use a fresh BackgroundSession in a thread to avoid thread-unsafe reuse of
+                    # the request-scoped db Session (SQLAlchemy Session is not thread-safe).
+                    def _do_handoff_transition():
+                        bg_db = BackgroundSession()
+                        try:
+                            conv = bg_db.query(models.Conversation).filter(models.Conversation.id == conversation_id_value).first()
+                            if not conv:
+                                logger.warning("handoff_conversation_missing id=%s", conversation_id_value)
+                                return
+                            transition_status(
+                                bg_db,
+                                conv,
+                                next_status,
+                                visitor_email=resolved_visitor_email,
+                                notify=True,
+                                check_email_fallback=(next_status == "queued"),
+                            )
+                        except Exception:
+                            logger.exception("handoff_transition_failed conversation_id=%s", conversation_id_value)
+                        finally:
+                            bg_db.close()
+
+                    await asyncio.to_thread(_do_handoff_transition)
+
+                    # Also fan-out in the main event loop (transition_status's thread-unsafe
+                    # loop detection may miss in-process WS broadcast when called via to_thread).
+                    try:
+                        await broadcast_to_conversation(str(conversation_id_value), {
+                            "type": "status_change",
+                            "status": next_status,
+                            "conversation_id": str(conversation_id_value),
+                        })
+                    except Exception:
+                        logger.exception("handoff_broadcast_failed conversation_id=%s", conversation_id_value)
+                    try:
+                        await broadcast_to_humans_for_agent(agent_id_value, {
+                            "type": "status_change",
+                            "status": next_status,
+                            "conversation_id": str(conversation_id_value),
+                            "agent_id": str(agent_id_value),
+                        })
+                    except Exception:
+                        logger.exception("handoff_human_broadcast_failed agent_id=%s", agent_id_value)
 
                     # Send the bot's acknowledgement message
-                    ack = build_handoff_ack_message(agent.name or "Support")
+                    ack = build_handoff_ack_message(agent_name)
                     answer_parts.append(ack)
                     yield _sse("token", {"content": ack})
 
@@ -801,6 +981,7 @@ async def capture_visitor_email(
         "queued",
         visitor_email=payload.email,
         notify=True,
+        check_email_fallback=True,
     )
 
     # Fan-out to any open WebSocket for this conversation
@@ -905,6 +1086,154 @@ async def widget_ws(
             await pump_task
         await unregister_ws(conversation_id, q)
         logger.info("widget_ws_disconnected conversation_id=%s", conversation_id)
+
+
+# ── Widget conversation history (spec §7, API §6) ───────────────────────────────
+
+class WidgetConversationCreate(BaseModel):
+    visitor_id: str = Field(..., min_length=1, max_length=120)
+    visitor_email: Optional[str] = Field(None, max_length=255)
+
+
+@public_router.get("/{deployment_id}/conversations")
+def list_widget_conversations(
+    deployment_id: str,
+    visitor_id: str = Query(..., min_length=1, max_length=120),
+    request: Request = None,  # type: ignore
+    db: Session = Depends(get_db),
+):
+    deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.deployment_id == deployment_id).first()
+    if not deployment or not deployment.is_enabled:
+        raise HTTPException(status_code=404, detail="Widget is not available")
+    if request is not None:
+        host = _origin_host(request)
+        if host and not _host_allowed(host, deployment.allowed_domains or []):
+            raise HTTPException(status_code=403, detail="Domain not allowed")
+    rows = (
+        db.query(models.Conversation)
+        .filter(
+            models.Conversation.deployment_id == deployment.id,
+            models.Conversation.visitor_id == visitor_id,
+        )
+        .order_by(models.Conversation.updated_at.desc())
+        .limit(50)
+        .all()
+    )
+    out = []
+    for c in rows:
+        # last message preview
+        preview = None
+        if c.session_id:
+            last = (
+                db.query(models.ChatMessage)
+                .filter(models.ChatMessage.session_id == c.session_id)
+                .order_by(models.ChatMessage.created_at.desc())
+                .first()
+            )
+            if last:
+                preview = last.content[:120]
+        out.append({
+            "id": str(c.id),
+            "status": c.status,
+            "visitor_email": c.visitor_email,
+            "assigned_human_agent_id": str(c.assigned_human_agent_id) if c.assigned_human_agent_id else None,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+            "preview": preview,
+        })
+    return {"conversations": out}
+
+
+@public_router.post("/{deployment_id}/conversations")
+def create_widget_conversation(
+    deployment_id: str,
+    payload: WidgetConversationCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.deployment_id == deployment_id).first()
+    if not deployment or not deployment.is_enabled:
+        raise HTTPException(status_code=404, detail="Widget is not available")
+    host = _origin_host(request)
+    if host and not _host_allowed(host, deployment.allowed_domains or []):
+        raise HTTPException(status_code=403, detail="Domain not allowed")
+    # Create a new ChatSession + Conversation row (visitor can have multiple)
+    visitor_hash = _visitor_hash(deployment.id, payload.visitor_id, request)
+    session = models.ChatSession(
+        deployment_id=deployment.id,
+        agent_id=deployment.agent_id,
+        visitor_hash=visitor_hash,
+        created_at=datetime.now(timezone.utc),
+        last_active_at=datetime.now(timezone.utc),
+    )
+    # propagate email if given
+    if payload.visitor_email:
+        session.email = payload.visitor_email
+    db.add(session)
+    db.flush()  # get session.id
+    conv = models.Conversation(
+        agent_id=deployment.agent_id,
+        deployment_id=deployment.id,
+        session_id=session.id,
+        visitor_id=payload.visitor_id,
+        visitor_email=payload.visitor_email,
+        status="bot",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    db.add(conv)
+    db.commit()
+    db.refresh(conv)
+    return {
+        "id": str(conv.id),
+        "session_id": str(session.id),
+        "status": conv.status,
+        "visitor_id": conv.visitor_id,
+    }
+
+
+@public_router.get("/{deployment_id}/conversations/{conversation_id}/messages")
+def get_conversation_messages(
+    deployment_id: str,
+    conversation_id: str,
+    visitor_id: str = Query(..., min_length=1, max_length=120),
+    db: Session = Depends(get_db),
+):
+    deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.deployment_id == deployment_id).first()
+    if not deployment:
+        raise HTTPException(status_code=404, detail="Widget not found")
+    try:
+        cid = uuid.UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = db.query(models.Conversation).filter(
+        models.Conversation.id == cid,
+        models.Conversation.deployment_id == deployment.id,
+        models.Conversation.visitor_id == visitor_id,
+    ).first()
+    if not conv or not conv.session_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    msgs = (
+        db.query(models.ChatMessage)
+        .filter(models.ChatMessage.session_id == conv.session_id)
+        .order_by(models.ChatMessage.created_at.asc())
+        .all()
+    )
+    return {
+        "conversation_id": str(conv.id),
+        "status": conv.status,
+        "assigned_human_agent_id": str(conv.assigned_human_agent_id) if conv.assigned_human_agent_id else None,
+        "messages": [
+            {
+                "id": m.id,
+                "role": m.role,
+                "content": m.content,
+                "sender_type": m.sender_type,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in msgs
+        ],
+    }
 
 
 def _log_public_chat(session_id, user_id, agent_id, user_message, answer, sender_type="bot"):

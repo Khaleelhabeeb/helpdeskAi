@@ -48,8 +48,8 @@
       --system-text: rgba(255,255,255,.42);
       --glass: rgba(255,255,255,.03);
       --glass-border: rgba(255,255,255,.08);
-      --human-bubble: #1e1e2e;
-      --human-bubble-border: rgba(139,92,246,.18);
+      --human-bubble: #27272a;
+      --human-bubble-border: rgba(255,255,255,.08);
     }
 
     /* ── Light theme ── */
@@ -80,8 +80,8 @@
       --system-text: rgba(0,0,0,.42);
       --glass: rgba(0,0,0,.02);
       --glass-border: rgba(0,0,0,.07);
-      --human-bubble: #f5f0ff;
-      --human-bubble-border: rgba(139,92,246,.15);
+      --human-bubble: #ffffff;
+      --human-bubble-border: #e4e4e7;
     }
 
     /* ── Scrollbar ── */
@@ -281,10 +281,11 @@
     }
     .email-card-icon {
       width: 32px; height: 32px; border-radius: 9px; flex-shrink: 0;
-      background: rgba(99,102,241,.14);
+      background: var(--bg-3);
       display: grid; place-items: center;
+      border: 1px solid var(--border);
     }
-    .email-card-icon svg { color: #818cf8; }
+    .email-card-icon svg { color: var(--muted); }
     .email-card-label {
       font-size: 13px; font-weight: 700; color: var(--bubble-bot-text);
       line-height: 1.3;
@@ -302,7 +303,10 @@
     }
     .email-field:focus {
       border-color: var(--input-border-focus);
-      box-shadow: 0 0 0 3px rgba(99,102,241,.1);
+      box-shadow: 0 0 0 3px rgba(0,0,0,.06);
+    }
+    body.dark .email-field:focus {
+      box-shadow: 0 0 0 3px rgba(255,255,255,.08);
     }
     .email-field.error { border-color: #ef4444; box-shadow: 0 0 0 3px rgba(239,68,68,.1); }
     .email-submit {
@@ -318,18 +322,19 @@
     /* ── Queued / handoff banner ── */
     .handoff-banner {
       align-self: stretch;
-      background: linear-gradient(135deg, rgba(99,102,241,.1) 0%, rgba(168,85,247,.07) 100%);
-      border: 1px solid rgba(99,102,241,.18);
+      background: var(--bg-3);
+      border: 1px solid var(--border);
       border-radius: 16px; padding: 13px 14px;
       display: flex; align-items: flex-start; gap: 11px;
       animation: msgIn .25s cubic-bezier(.22,.68,0,1.2) both;
     }
     .handoff-icon {
       width: 34px; height: 34px; border-radius: 9px; flex-shrink: 0;
-      background: rgba(99,102,241,.14);
+      background: var(--bg-4);
       display: grid; place-items: center;
+      border: 1px solid var(--border);
     }
-    .handoff-icon svg { color: #818cf8; }
+    .handoff-icon svg { color: var(--muted); }
     .handoff-text { flex: 1; min-width: 0; }
     .handoff-title { font-size: 13px; font-weight: 700; margin-bottom: 3px; }
     .handoff-sub { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
@@ -377,7 +382,10 @@
     }
     .inputwrap:focus-within {
       border-color: var(--input-border-focus);
-      box-shadow: 0 0 0 3px rgba(99,102,241,.08);
+      box-shadow: 0 0 0 3px rgba(0,0,0,.06);
+    }
+    body.dark .inputwrap:focus-within {
+      box-shadow: 0 0 0 3px rgba(255,255,255,.08);
     }
 
     .input {
@@ -502,6 +510,6 @@
 
   <div class="powered">Powered by <a href="https://helpdeskAI.com" target="_blank" rel="noopener">HelpdeskAI</a></div>
 
-  <script src="/static/widget-panel.js"></script>
+  <script src="/static/widget-panel.js?v=2.1.2"></script>
 </body>
 </html>
