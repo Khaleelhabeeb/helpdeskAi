@@ -154,7 +154,6 @@ def get_dashboard_summary(db: Session = Depends(get_db), user=Depends(get_curren
 
 @router.get("/kpi/credits")
 def get_credits_kpi(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """Return total credits used, credits remaining, and usage trend for the user."""
     total_credits_used = db.query(models.UsageLog).filter(models.UsageLog.user_id == user.id).count()
     credits_remaining = user.credits_remaining
     
@@ -182,7 +181,6 @@ def get_credits_kpi(db: Session = Depends(get_db), user=Depends(get_current_user
 
 @router.get("/kpi/agent-interactions")
 def get_agent_interactions_kpi(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """Return number of questions asked, responses received, and most active agent."""
     # Get counts per agent in one query
     agent_counts_query = (
         db.query(models.Agent.name, func.count(models.UsageLog.id).label('count'))
@@ -205,7 +203,6 @@ def get_agent_interactions_kpi(db: Session = Depends(get_db), user=Depends(get_c
 
 @router.get("/kpi/activity-timeline")
 def get_activity_timeline_kpi(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """Return recent activity and peak usage times."""
     # Recent activity is fine with limit
     logs = (
         db.query(
@@ -253,7 +250,6 @@ def get_activity_timeline_kpi(db: Session = Depends(get_db), user=Depends(get_cu
 
 @router.get("/kpi/agent-performance")
 def get_agent_performance_kpi(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """Return number of agents created and usage per agent."""
     agent_usage_query = (
         db.query(models.Agent.name, func.count(models.UsageLog.id).label('usage_count'))
         .outerjoin(models.UsageLog, 
@@ -273,7 +269,6 @@ def get_agent_performance_kpi(db: Session = Depends(get_db), user=Depends(get_cu
 
 @router.get("/kpi/engagement")
 def get_engagement_kpi(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """Return days active and average questions per day."""
     stats = (
         db.query(
             func.count(models.UsageLog.id).label('total_logs'),

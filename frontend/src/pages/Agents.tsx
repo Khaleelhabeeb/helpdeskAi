@@ -7,6 +7,7 @@ import {
   Code2,
   Database,
   FileText,
+  Handshake,
   Link as LinkIcon,
   Loader2,
   MessageCircle,
@@ -17,12 +18,15 @@ import {
   Save,
   Settings,
   ShieldCheck,
+  Sparkles,
   Sun,
   Trash2,
   Upload,
   RefreshCw,
   Send,
+  Users,
   X,
+  Zap,
 } from 'lucide-react';
 import { AppLayout } from '../components/Layout';
 import { cn } from '../lib/utils';
@@ -62,6 +66,13 @@ type AgentSettingsResponse = {
     position: string;
     greeting: string;
     use_color_header: boolean;
+  };
+  human_handoff?: {
+    enabled: boolean;
+    difficulty: 'easy' | 'balanced' | 'hard';
+    effective: boolean;
+    has_team: boolean;
+    active_human_count: number;
   };
 };
 
@@ -281,6 +292,11 @@ export default function Agents() {
   const [deleteTarget, setDeleteTarget] = useState<Agent | null>(null);
   const [deleteKbTarget, setDeleteKbTarget] = useState<KnowledgeBase | null>(null);
   const [isFetchingBranding, setFetchingBranding] = useState(false);
+  const [handoffEnabled, setHandoffEnabled] = useState(false);
+  const [handoffDifficulty, setHandoffDifficulty] = useState<'easy' | 'balanced' | 'hard'>('balanced');
+  const [handoffHasTeam, setHandoffHasTeam] = useState(false);
+  const [handoffEffective, setHandoffEffective] = useState(false);
+  const [handoffActiveCount, setHandoffActiveCount] = useState(0);
   const playgroundEndRef = useRef<HTMLDivElement | null>(null);
 
   const selectedAgent = useMemo(() => agents.find((agent) => agent.id === selectedId) ?? null, [agents, selectedId]);
@@ -323,6 +339,19 @@ export default function Agents() {
           color: settingsData.widget.color,
           useColorHeader: settingsData.widget.use_color_header,
         }));
+      }
+      if (settingsData?.human_handoff) {
+        setHandoffEnabled(settingsData.human_handoff.enabled);
+        setHandoffDifficulty(settingsData.human_handoff.difficulty);
+        setHandoffHasTeam(settingsData.human_handoff.has_team);
+        setHandoffEffective(settingsData.human_handoff.effective);
+        setHandoffActiveCount(settingsData.human_handoff.active_human_count);
+      } else {
+        setHandoffEnabled(false);
+        setHandoffDifficulty('balanced');
+        setHandoffHasTeam(false);
+        setHandoffEffective(false);
+        setHandoffActiveCount(0);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load agent details');
@@ -549,9 +578,22 @@ export default function Agents() {
           widget_theme: wizard.theme,
           widget_color: wizard.color,
           widget_use_color_header: wizard.useColorHeader,
+          human_handoff_enabled: handoffEnabled,
+          human_handoff_difficulty: handoffDifficulty,
         }),
       });
       setAgents((current) => current.map((agent) => (agent.id === selectedAgent.id ? { ...agent, ...updated.agent } : agent)));
+      // refresh handoff meta after save
+      try {
+        const fresh = await apiFetch<AgentSettingsResponse>(`/agents/${selectedAgent.id}/settings`);
+        if (fresh?.human_handoff) {
+          setHandoffEnabled(fresh.human_handoff.enabled);
+          setHandoffDifficulty(fresh.human_handoff.difficulty);
+          setHandoffHasTeam(fresh.human_handoff.has_team);
+          setHandoffEffective(fresh.human_handoff.effective);
+          setHandoffActiveCount(fresh.human_handoff.active_human_count);
+        }
+      } catch {}
       setNotice('Agent settings saved.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save agent');
@@ -1098,6 +1140,126 @@ export default function Agents() {
                     <span className="text-xs font-black uppercase tracking-widest text-on-surface-variant">Instructions (System prompt)</span>
                     <textarea rows={14} value={editInstructions} onChange={(event) => setEditInstructions(event.target.value)} className="w-full p-4 bg-surface-container-low border border-surface-container-highest rounded-lg text-xs font-mono focus:outline-none focus:border-brand-primary resize-none leading-relaxed" />
                   </label>
+                </div>
+              </section>
+
+              {/* Human Handoff — beautiful owner control */}
+              <section className="bg-surface-container-lowest border border-surface-container-highest rounded-xl shadow-sm overflow-hidden">
+                <div className="px-6 pt-6 pb-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-3">
+                      <div className={cn('grid h-10 w-10 place-items-center rounded-xl border shadow-sm', handoffEffective ? 'bg-emerald-500 text-white border-emerald-600' : handoffEnabled ? 'bg-amber-500 text-white border-amber-600' : 'bg-zinc-900 text-white border-zinc-800')}>
+                        <Handshake className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-black text-brand-primary tracking-tight">Human handoff</h3>
+                        <p className="text-xs text-on-surface-variant mt-0.5 leading-relaxed">Decide when your AI should bring a person in.</p>
+                      </div>
+                    </div>
+                    <span className={cn('text-[10px] font-black uppercase tracking-widest px-2 py-1 rounded-full border', handoffEffective ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-zinc-100 border-zinc-200 text-zinc-600')}>
+                      {handoffEffective ? 'Live' : handoffEnabled ? 'On · idle' : 'Off'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="px-6 pb-6 space-y-5">
+                  {/* Toggle */}
+                  <div className="flex items-center justify-between rounded-xl border border-surface-container-highest bg-surface-container-low p-4">
+                    <div className="min-w-0">
+                      <div className="text-sm font-bold text-brand-primary">Enable handoff</div>
+                      <div className="text-xs text-on-surface-variant">
+                        {handoffHasTeam ? `${handoffActiveCount} active team member${handoffActiveCount===1?'':'s'} assigned` : 'No team assigned — assign in Team page'}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={handoffEnabled}
+                      onClick={() => {
+                        const next = !handoffEnabled;
+                        setHandoffEnabled(next);
+                        setHandoffEffective(next && handoffHasTeam);
+                      }}
+                      className={cn('relative h-6 w-11 shrink-0 rounded-full transition-colors duration-200', handoffEnabled ? 'bg-emerald-500' : 'bg-zinc-300')}
+                    >
+                      <span className={cn('absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform', handoffEnabled && 'translate-x-5')} />
+                    </button>
+                  </div>
+
+                  {!handoffHasTeam ? (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-3">
+                      <Users className="h-4 w-4 text-amber-700 mt-0.5 shrink-0" />
+                      <div className="text-xs leading-relaxed text-amber-800">
+                        <span className="font-bold">No team on this agent.</span> You can turn handoff on, but it stays idle until you assign an active human in <button onClick={() => navigate('/team')} className="font-bold underline underline-offset-4">Team</button>. {handoffEnabled ? 'Turn on now, assign later — it will become live automatically.' : ''}
+                      </div>
+                    </div>
+                  ) : !handoffEffective && handoffEnabled ? (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-3">
+                      <Users className="h-4 w-4 text-amber-700 mt-0.5 shrink-0" />
+                      <div className="text-xs leading-relaxed text-amber-800">
+                        Handoff is <span className="font-bold">on but idle</span> — no human is online for this agent right now. Visitors will see fallback email.
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* Difficulty */}
+                  <div className={cn('space-y-3 transition-opacity', !handoffEnabled && 'opacity-50 pointer-events-none')}>
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="h-4 w-4 text-brand-primary" />
+                      <span className="text-xs font-black uppercase tracking-widest text-on-surface-variant">Eagerness</span>
+                      <span className="text-[11px] text-on-surface-variant">· how quickly AI offers a human</span>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { id: 'easy', label: 'Easy', sub: 'Quick', icon: Zap, desc: 'One hint → offer' },
+                        { id: 'balanced', label: 'Balanced', sub: 'Thoughtful', icon: Handshake, desc: '1–2 tries → offer' },
+                        { id: 'hard', label: 'Hard', sub: 'Persistent', icon: ShieldCheck, desc: 'Insist twice' },
+                      ].map((opt) => {
+                        const active = handoffDifficulty === opt.id;
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            disabled={!handoffEnabled}
+                            onClick={() => setHandoffDifficulty(opt.id as any)}
+                            className={cn(
+                              'group flex flex-col items-start gap-2 rounded-xl border p-3 text-left transition-all',
+                              active ? 'bg-brand-primary text-brand-on-primary border-brand-primary shadow-sm' : 'bg-surface border-surface-container-highest hover:border-brand-primary hover:bg-surface-container-low text-brand-primary',
+                              !handoffEnabled && 'cursor-not-allowed'
+                            )}
+                          >
+                            <span className={cn('grid h-7 w-7 place-items-center rounded-lg border text-xs', active ? 'bg-white text-brand-primary border-white' : 'bg-surface-container-low border-surface-container-highest text-on-surface-variant group-hover:text-brand-primary')}>
+                              <opt.icon className="h-3.5 w-3.5" />
+                            </span>
+                            <span className="text-xs font-black leading-none">{opt.label}</span>
+                            <span className={cn('text-[10px] font-bold uppercase tracking-widest', active ? 'text-white/80' : 'text-on-surface-variant')}>{opt.sub}</span>
+                            <span className={cn('text-[11px] leading-tight', active ? 'text-white/90' : 'text-on-surface-variant')}>{opt.desc}</span>
+                            {active && <span className="mt-1 inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-widest bg-white text-brand-primary px-1.5 py-0.5 rounded-full"><Check className="h-3 w-3" /> Active</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="rounded-xl bg-surface-container-low border border-surface-container-highest p-3">
+                      <div className="text-xs font-bold text-brand-primary flex items-center gap-2">
+                        <span className={cn('h-2 w-2 rounded-full', handoffDifficulty==='easy' ? 'bg-emerald-500' : handoffDifficulty==='hard' ? 'bg-rose-500' : 'bg-amber-500')} />
+                        {handoffDifficulty==='easy' ? 'Easy — AI is generous' : handoffDifficulty==='hard' ? 'Hard — AI is persistent' : 'Balanced — AI is thoughtful'}
+                      </div>
+                      <p className="text-xs text-on-surface-variant mt-1 leading-relaxed">
+                        {handoffDifficulty==='easy' && 'After one brief try or any hint of “human”, the AI will offer to connect you. Best for high-touch support.'}
+                        {handoffDifficulty==='balanced' && 'The AI tries one or two helpful steps, asks a clarifying question, then offers a human if still stuck. The default.'}
+                        {handoffDifficulty==='hard' && 'The AI exhausts its knowledge, asks 2–3 questions, and only hands off if the visitor insists twice. Best for deflecting easy tickets.'}
+                      </p>
+                      <p className="text-[11px] text-on-surface-variant/70 mt-2 italic">
+                        Example: visitor says “I want a human” → {handoffDifficulty==='easy' ? 'offered immediately' : handoffDifficulty==='hard' ? 'AI first says “Let me try one more fix, then I’ll connect you — fair?” and only hands off on the second insistence' : 'tries a quick fix, then offers'}.
+                      </p>
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] leading-relaxed text-on-surface-variant">
+                    {handoffEffective ? 'Live · visitors can be connected right now.' : handoffEnabled ? 'On but idle · handoff will activate once a teammate is online.' : 'Off · AI will answer alone and never trigger the “connecting…” flow.'}
+                  </p>
                 </div>
               </section>
             </aside>

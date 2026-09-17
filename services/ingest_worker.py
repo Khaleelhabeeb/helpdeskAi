@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 async def _try_assign_branding_to_agent(db: Session, agent: models.Agent, favicon_url: Optional[str], theme_color: Optional[str]) -> None:
     """Assign favicon/logo and theme color to agent/widget if not already set."""
-    # Assign avatar/logo if missing
     if favicon_url and not agent.avatar_url:
         try:
             from services.web_scraper import download_image_bytes, is_safe_url
@@ -86,7 +85,6 @@ async def _try_assign_branding_to_agent(db: Session, agent: models.Agent, favico
         except Exception as exc:
             logger.info("ingest_favicon_assign_failed agent_id=%s err=%s", agent.id, exc)
 
-    # Assign theme color to config/deployment if valid and not already customized
     if theme_color and isinstance(theme_color, str) and theme_color.startswith("#") and len(theme_color) == 7:
         try:
             int(theme_color[1:], 16)
@@ -113,14 +111,10 @@ async def process_kb_ingest_job(
     transient_text_path: Optional[str] = None,
 ) -> None:
     """
-    Worker function to process a KB ingest job.
-    - Looks up the job and KB
-    - Marks job running, then succeeded/failed
-    - Sets KB status accordingly
-    - Does NOT store chunks or embeddings in Postgres
-    - Writes embeddings to the configured vector store
+    Process a KB ingest job: mark it running, write embeddings to the vector store,
+    then record success/failure and the resulting KB status.
 
-    transient_text_path: temporary spool file supplied by the ingest queue.
+    `transient_text_path` is the spool file supplied by the ingest queue.
     """
     db: Session = BackgroundSession()
     try:
@@ -134,13 +128,11 @@ async def process_kb_ingest_job(
             db.commit()
             return
 
-        # Mark running
         job.state = models.JobState.running
         job.processed_chunks = 0
         job.total_chunks = None
         db.commit()
 
-        # Read minimal info for vector upsert
         agent = db.query(models.Agent).filter(models.Agent.id == kb.agent_id).first()
         config = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == kb.agent_id).first()
         namespace = config.vector_store_namespace if config else None
@@ -157,7 +149,6 @@ async def process_kb_ingest_job(
             kb.title = kb.title or scraped_data.get("title")
             kb.extracted_size_bytes = enforce_text_limit(text_content)
             db.commit()
-            # Try to assign favicon/logo to agent if not already set (branding propagation)
             try:
                 if agent and not agent.avatar_url:
                     favicon_candidate = scraped_data.get("logo_url") or scraped_data.get("favicon_url") or scraped_data.get("og_image_url")
@@ -199,11 +190,9 @@ async def process_kb_ingest_job(
             on_batch=update_progress,
         )
 
-        # Update KB with chunk count
         kb.chunk_count = chunk_count
         kb.status = models.KBStatus.ready
         
-        # Mark job success
         job.state = models.JobState.succeeded
         job.error = None
         db.commit()

@@ -103,49 +103,112 @@ export default function HumanAgentDashboard() {
 
   useEffect(() => { loadConversations(false); }, [tab, activeAgentId]);
 
-  // WebSocket for live updates — single connection, no flicker
+  // Live updates: ws-ticket auth, pong deadline, dedupe by message_id
   useEffect(() => {
     if (!token) return;
-    const wsBase = API_BASE_URL.replace(/^http/, 'ws');
-    const wsUrl = `${wsBase}/human-agent/ws?token=${encodeURIComponent(token)}`;
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-    ws.onopen = () => setWsConnected(true);
-    ws.onclose = () => { setWsConnected(false); wsRef.current = null; };
-    ws.onerror = () => { try { ws.close(); } catch {} };
-    ws.onmessage = (ev) => {
+    let cancelled = false;
+    let ws: WebSocket | null = null;
+    let reconnectAttempts = 0;
+    let reconnectTimer: number | null = null;
+    let pingTimer: number | null = null;
+
+    async function getTicket(): Promise<string> {
       try {
-        const msg = JSON.parse(ev.data);
-        const currentSelected = selectedIdRef.current;
-        if (msg.type === 'status_change' || msg.type === 'resolved' || msg.type === 'agent_claimed') {
-          // Silent list refresh — no spinner, no detail refetch (detail status updated locally)
-          loadConversations(true);
-          if (currentSelected && msg.conversation_id === currentSelected) {
-            setDetail((prev) => prev ? { ...prev, status: msg.status || prev.status, assigned_human_agent_id: msg.human_agent_id || prev.assigned_human_agent_id } : prev);
+        const data = await humanAgentFetch<{ ticket: string }>('/human-agent/ws-ticket');
+        return data.ticket;
+      } catch {
+        return token as string; // fallback to JWT
+      }
+    }
+
+    async function connect() {
+      if (cancelled) return;
+      const ticket = await getTicket();
+      if (cancelled) return;
+      const wsBase = API_BASE_URL.replace(/^http/, 'ws');
+      // Prefer Sec-WebSocket-Protocol for auth; the query param stays for compatibility
+      const wsUrl = `${wsBase}/human-agent/ws?token=${encodeURIComponent(ticket)}`;
+      const sock = new WebSocket(wsUrl, ticket); // ticket as subprotocol
+      ws = sock;
+      wsRef.current = sock;
+
+      sock.onopen = () => {
+        if (cancelled) return;
+        setWsConnected(true);
+        reconnectAttempts = 0;
+        // start heartbeat: respond to ping, track pong deadline
+        if (pingTimer) window.clearInterval(pingTimer);
+        pingTimer = window.setInterval(() => {
+          try { sock.send(JSON.stringify({ type: 'ping' })); } catch {}
+        }, 25000);
+      };
+      sock.onclose = () => {
+        setWsConnected(false);
+        wsRef.current = null;
+        if (pingTimer) { window.clearInterval(pingTimer); pingTimer = null; }
+        if (cancelled) return;
+        // Reconnect with exponential backoff
+        const delay = Math.min(30000, 1000 * Math.pow(1.8, reconnectAttempts));
+        reconnectAttempts += 1;
+        reconnectTimer = window.setTimeout(connect, delay + Math.random() * 500);
+      };
+      sock.onerror = () => { try { sock.close(); } catch {} };
+      sock.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'ping') {
+            try { sock.send(JSON.stringify({ type: 'pong' })); } catch {}
+            return;
           }
-          return;
-        }
-        if (msg.type === 'message' && msg.conversation_id) {
-          // Update list preview silently
-          setConversations((prev) => prev.map((c) => c.id === msg.conversation_id ? { ...c, updated_at: msg.created_at || new Date().toISOString() } : c));
-          if (currentSelected === msg.conversation_id) {
-            // Append without full refetch — instant, no flicker
-            setDetail((prev) => {
-              if (!prev) return prev;
-              // Dedupe by content+time to avoid double-append from openConversation
-              const exists = prev.messages?.some((m) => m.content === msg.content && m.created_at === msg.created_at);
-              if (exists) return prev;
-              return { ...prev, messages: [...(prev.messages || []), { id: msg.message_id || Date.now(), role: msg.sender_type === 'visitor' ? 'user' : 'assistant', content: msg.content, sender_type: msg.sender_type, created_at: msg.created_at }] };
-            });
-            setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
-          } else {
-            // Not viewing this conv — just silent list refresh to bump preview
+          const currentSelected = selectedIdRef.current;
+          if (msg.type === 'status_change' || msg.type === 'resolved' || msg.type === 'agent_claimed') {
             loadConversations(true);
+            if (currentSelected && msg.conversation_id === currentSelected) {
+              setDetail((prev) => prev ? { ...prev, status: msg.status || prev.status, assigned_human_agent_id: msg.human_agent_id || prev.assigned_human_agent_id } : prev);
+            }
+            return;
           }
-        }
-      } catch {}
+          if (msg.type === 'message' && msg.conversation_id) {
+            setConversations((prev) => prev.map((c) => c.id === msg.conversation_id ? { ...c, updated_at: msg.created_at || new Date().toISOString() } : c));
+            if (currentSelected === msg.conversation_id) {
+              setDetail((prev) => {
+                if (!prev) return prev;
+                // Dedupe by message_id, then reconcile the optimistic temp id
+                const incomingId = msg.message_id;
+                if (incomingId != null && prev.messages?.some((m) => String(m.id) === String(incomingId))) return prev;
+                // Fallback content+time for visitor echoes that lack id in older backend
+                if (incomingId == null && prev.messages?.some((m) => m.content === msg.content && m.created_at === msg.created_at)) return prev;
+                // Reconcile: if we have an optimistic message with same content that hasn't been confirmed, replace its id
+                const withoutOptimistic = prev.messages || [];
+                // If optimistic exists with Date.now id and same content, swap it
+                let replaced = false;
+                const newMessages = withoutOptimistic.map((m) => {
+                  if (!replaced && String(m.id).length === 13 && m.content === msg.content && m.sender_type === msg.sender_type) {
+                    replaced = true;
+                    return { ...m, id: incomingId || m.id, created_at: msg.created_at || m.created_at };
+                  }
+                  return m;
+                });
+                if (replaced) return { ...prev, messages: newMessages };
+                return { ...prev, messages: [...(prev.messages || []), { id: incomingId || Date.now(), role: msg.sender_type === 'visitor' ? 'user' : 'assistant', content: msg.content, sender_type: msg.sender_type, created_at: msg.created_at }] };
+              });
+              setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
+            } else {
+              loadConversations(true);
+            }
+          }
+        } catch {}
+      };
+    }
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (pingTimer) window.clearInterval(pingTimer);
+      try { ws?.close(); } catch {} wsRef.current = null; setWsConnected(false);
     };
-    return () => { try { ws.close(); } catch {} wsRef.current = null; setWsConnected(false); };
   }, [token]);
 
   async function openConversation(id: string, silent = false) {
@@ -187,18 +250,21 @@ export default function HumanAgentDashboard() {
     if (!selectedId || !reply.trim() || !detail) return;
     const content = reply.trim();
     const tempId = Date.now();
-    // Optimistic append — no flicker
+    // Optimistic append; the placeholder id is reconciled when the server echoes
     setDetail((prev) => prev ? { ...prev, messages: [...(prev.messages || []), { id: tempId, role: 'assistant', content, sender_type: 'human_agent', created_at: new Date().toISOString() }] } : prev);
     setReply('');
     setSending(true); setError('');
     try {
-      await humanAgentFetch<{ id: number; created_at: string }>(`/human-agent/conversations/${selectedId}/messages`, { method: 'POST', body: JSON.stringify({ content }) });
-      // Keep optimistic message; just bump list preview silently
+      const res = await humanAgentFetch<{ id: number; created_at: string }>(`/human-agent/conversations/${selectedId}/messages`, { method: 'POST', body: JSON.stringify({ content }) });
+      // Reconcile the optimistic temp id with the server id
+      setDetail((prev) => {
+        if (!prev) return prev;
+        return { ...prev, messages: (prev.messages || []).map((m) => m.id === tempId ? { ...m, id: res.id, created_at: res.created_at } : m) };
+      });
       setConversations((prev) => prev.map((c) => c.id === selectedId ? { ...c, updated_at: new Date().toISOString() } : c));
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Send failed');
-      // Rollback optimistic on error
       setDetail((prev) => prev ? { ...prev, messages: prev.messages?.filter((m) => m.id !== tempId) } : prev);
       setReply(content);
     } finally {

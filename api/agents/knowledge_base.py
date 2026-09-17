@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 
 def validate_uuid(uuid_str: str) -> bool:
-    # Validate if string is a valid UUID
     try:
         uuid_lib.UUID(uuid_str)
         return True
@@ -73,7 +72,6 @@ async def add_knowledge_base(
     extracted_size_bytes = 0
     extracted_text = ""
 
-    # Handle file upload (PDF/TXT)
     if source_type in (schemas.KBSourceType.upload_pdf, schemas.KBSourceType.upload_txt, schemas.KBSourceType.other):
         if not file:
             raise HTTPException(status_code=400, detail="File is required for upload_* source types")
@@ -101,7 +99,6 @@ async def add_knowledge_base(
         source_content_sha256 = stored.sha256
         source_uri = original_filename
         
-    # Handle URL scraping
     elif source_type == schemas.KBSourceType.url:
         if not url:
             raise HTTPException(status_code=400, detail="url is required for source_type=url")
@@ -110,7 +107,6 @@ async def add_knowledge_base(
         source_uri = url
         original_filename = title or url
         
-    # Handle structured text
     elif source_type == schemas.KBSourceType.text:
         if not structured_text:
             raise HTTPException(status_code=400, detail="structured_text is required for source_type=text")
@@ -157,7 +153,6 @@ async def add_knowledge_base(
     db.commit()
     db.refresh(kb)
 
-    # Create ingest job
     job = models.KBIngestJob(
         kb_id=kb.id,
         state=models.JobState.queued
@@ -238,7 +233,6 @@ async def delete_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(ge
     if not kb:
         raise HTTPException(status_code=404, detail="KB not found")
     
-    # Check ownership via agent
     agent = db.query(models.Agent).filter(models.Agent.id == kb.agent_id, models.Agent.user_id == user.id).first()
     if not agent:
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -344,7 +338,6 @@ def get_kb_download_url(kb_id: str, db: Session = Depends(get_db), user = Depend
 
 @router.get("/{kb_id}/details", response_model=schemas.KnowledgeBaseOut)
 def get_kb_details(kb_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
-    """Get detailed information about a specific knowledge base entry"""
     if not validate_uuid(kb_id):
         raise HTTPException(status_code=400, detail="Invalid KB ID format")
     
@@ -366,7 +359,6 @@ def update_kb_metadata(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
-    """Update KB metadata (currently only title)"""
     if not validate_uuid(kb_id):
         raise HTTPException(status_code=400, detail="Invalid KB ID format")
     
@@ -406,14 +398,12 @@ class CrawlAddRequest(BaseModel):
 
 @router.post("/discover")
 async def discover_pages(body: DiscoverRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """Discover internal pages on a website (same-origin links + branding)."""
     result = await discover_site_links(body.url, limit=body.limit)
     return result
 
 
 @router.post("/bulk-add", response_model=List[schemas.KnowledgeBaseOut])
 async def bulk_add_urls(body: BulkUrlAddRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """Add multiple URLs as knowledge bases in one call (for site scraping)."""
     if not validate_uuid(body.agent_id):
         raise HTTPException(status_code=400, detail="Invalid agent ID format")
     agent = db.query(models.Agent).filter(models.Agent.id == body.agent_id, models.Agent.user_id == user.id).first()
@@ -421,7 +411,6 @@ async def bulk_add_urls(body: BulkUrlAddRequest, db: Session = Depends(get_db), 
         raise HTTPException(status_code=404, detail="Agent not found")
     if len(body.urls) > 10:
         raise HTTPException(status_code=400, detail="Too many URLs (max 10)")
-    # Validate titles length matches urls if provided
     titles = body.titles or []
     kbs: List[models.KnowledgeBase] = []
     jobs: List[models.KBIngestJob] = []
@@ -458,13 +447,11 @@ async def bulk_add_urls(body: BulkUrlAddRequest, db: Session = Depends(get_db), 
 
 @router.post("/crawl-add", response_model=List[schemas.KnowledgeBaseOut])
 async def crawl_and_add(body: CrawlAddRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """Crawl a site starting from url and add discovered pages as KB entries."""
     if not validate_uuid(body.agent_id):
         raise HTTPException(status_code=400, detail="Invalid agent ID format")
     agent = db.query(models.Agent).filter(models.Agent.id == body.agent_id, models.Agent.user_id == user.id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    # Discover + limit
     crawl_result = await crawl_site(body.url, max_pages=body.max_pages)
     pages = crawl_result.get("pages", [])
     kbs: List[models.KnowledgeBase] = []
@@ -500,10 +487,7 @@ async def crawl_and_add(body: CrawlAddRequest, db: Session = Depends(get_db), us
 
 @router.get("/{kb_id}/status")
 def get_kb_ingestion_status(kb_id: str, db: Session = Depends(get_db), user = Depends(get_current_user)):
-    """
-    Check the ingestion/vectorization status of a KB entry.
-    Returns KB status and associated job information.
-    """
+    """Ingestion/vectorization status of a KB entry, with its latest job."""
     if not validate_uuid(kb_id):
         raise HTTPException(status_code=400, detail="Invalid KB ID format")
     
@@ -515,7 +499,6 @@ def get_kb_ingestion_status(kb_id: str, db: Session = Depends(get_db), user = De
     if not agent:
         raise HTTPException(status_code=403, detail="Forbidden - not your agent")
     
-    # Get latest ingest job for this KB
     latest_job = db.query(models.KBIngestJob).filter(
         models.KBIngestJob.kb_id == kb_id
     ).order_by(models.KBIngestJob.created_at.desc()).first()

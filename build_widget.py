@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Widget Build Script
-Minifies and optimizes widget files for production
-"""
+"""Minify and gzip the widget bundles into static/build."""
 import hashlib
 import os
 import re
@@ -12,33 +9,23 @@ from pathlib import Path
 
 
 def minify_js(content):
-    """Basic JavaScript minification"""
-    # Remove comments
     content = re.sub(r'//.*?$', '', content, flags=re.MULTILINE)
     content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-    # Remove extra whitespace
     content = re.sub(r'\s+', ' ', content)
     content = re.sub(r'\s*([{}();,:])\s*', r'\1', content)
     return content.strip()
 
 
 def minify_css(content):
-    """Basic CSS minification"""
-    # Remove comments
     content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-    # Remove extra whitespace
     content = re.sub(r'\s+', ' ', content)
     content = re.sub(r'\s*([{}:;,])\s*', r'\1', content)
     return content.strip()
 
 
 def minify_html(content):
-    """Basic HTML minification"""
-    # Remove comments
     content = re.sub(r'<!--.*?-->', '', content, flags=re.DOTALL)
-    # Remove extra whitespace between tags
     content = re.sub(r'>\s+<', '><', content)
-    # Minify inline CSS
     def minify_style(match):
         return '<style>' + minify_css(match.group(1)) + '</style>'
     content = re.sub(r'<style>(.*?)</style>', minify_style, content, flags=re.DOTALL)
@@ -46,29 +33,24 @@ def minify_html(content):
 
 
 def get_content_hash(content):
-    """Generate content hash for cache busting"""
     return hashlib.md5(content.encode()).hexdigest()[:8]
 
 
 def create_gzip_version(file_path):
-    """Create gzipped version of file"""
     with open(file_path, 'rb') as f_in:
         with gzip.open(f"{file_path}.gz", 'wb', compresslevel=9) as f_out:
             shutil.copyfileobj(f_in, f_out)
 
 
 def build_widget():
-    """Build optimized widget files"""
     static_dir = Path("static")
     build_dir = static_dir / "build"
     build_dir.mkdir(exist_ok=True)
     
-    # Build loader
     print("Building widget-loader.js...")
     with open(static_dir / "widget-loader.js", "r") as f:
         loader_content = f.read()
     
-    # Minify loader
     loader_minified = minify_js(loader_content)
     loader_hash = get_content_hash(loader_minified)
     loader_filename = f"widget-loader.{loader_hash}.js"
@@ -76,7 +58,6 @@ def build_widget():
     with open(build_dir / loader_filename, "w") as f:
         f.write(loader_minified)
     
-    # Create gzip version
     create_gzip_version(build_dir / loader_filename)
     
     loader_size = len(loader_content)
@@ -88,7 +69,6 @@ def build_widget():
     print(f"  Gzipped:  {loader_gz_size:,} bytes ({100 - loader_gz_size*100//loader_size}% total reduction)")
     print(f"  Output:   {loader_filename}")
     
-    # Build panel JS
     print("\nBuilding widget-panel.js...")
     with open(static_dir / "widget-panel.js", "r") as f:
         panel_js_content = f.read()
@@ -111,12 +91,10 @@ def build_widget():
     print(f"  Gzipped:  {panel_js_gz_size:,} bytes ({100 - panel_js_gz_size*100//panel_js_size}% total reduction)")
     print(f"  Output:   {panel_js_filename}")
     
-    # Build panel HTML
     print("\nBuilding widget-panel.html...")
     with open(static_dir / "widget-panel.html", "r") as f:
         panel_html_content = f.read()
     
-    # Update script reference to use hashed filename
     panel_html_content = panel_html_content.replace(
         '/static/widget-panel.js',
         f'/static/build/{panel_js_filename}'
@@ -140,7 +118,6 @@ def build_widget():
     print(f"  Gzipped:  {panel_html_gz_size:,} bytes ({100 - panel_html_gz_size*100//panel_html_size}% total reduction)")
     print(f"  Output:   {panel_html_filename}")
     
-    # Create manifest file
     manifest = {
         "loader": loader_filename,
         "panel_html": panel_html_filename,

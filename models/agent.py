@@ -32,12 +32,17 @@ class AgentConfig(Base):
     vector_store_namespace = Column(String, nullable=True)
     system_prompt_locked = Column(Boolean, default=True)
     
-    # Widget/Embed Configuration
     widget_theme = Column(String, default="light")
     widget_color = Column(String, default="#4a6cf7")
     widget_position = Column(String, default="bottom-right")
     widget_greeting = Column(Text, nullable=True)
     widget_use_color_header = Column(Boolean, default=False)
+
+    # Human handoff toggle (owner-controlled). No effect unless an active human
+    # agent is assigned to this agent.
+    human_handoff_enabled = Column(Boolean, default=False, nullable=False)
+    # How eagerly the AI offers handoff: easy (one hint) / balanced / hard (insist twice)
+    human_handoff_difficulty = Column(String, default="balanced", nullable=False)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

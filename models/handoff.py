@@ -1,20 +1,6 @@
-"""
-Human-handoff data models.
-
-New tables
-----------
-human_agents        – human support staff created by an account owner
-agent_assignments   – which AI agents a human agent can see conversations for
-conversations       – one row per chat thread (replaces the loose ChatSession
-                      for handoff purposes; ChatSession is kept for the bot-only
-                      analytics path and is linked 1-to-1 via session_id)
-
-The existing chat_messages table gains two new columns:
-  sender_type  text  not null default 'visitor'
-  sender_id    uuid  nullable  (human_agents.id when sender_type = 'human_agent')
-
-Those columns are added via the Alembic migration; the ChatMessage ORM model is
-extended in models/widget_deployment.py (see the migration for the ALTER TABLE).
+"""Human-handoff models: human agents, their AI-agent assignments, and conversation
+threads. `ChatMessage` gains `sender_type`/`sender_id` columns via migration; the ORM
+model itself lives in models/widget_deployment.py.
 """
 
 import uuid
@@ -38,8 +24,6 @@ from db.database import Base
 
 
 class HumanAgent(Base):
-    """A human support staff account, created by an account owner."""
-
     __tablename__ = "human_agents"
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -72,8 +56,6 @@ class HumanAgent(Base):
 
 
 class AgentAssignment(Base):
-    """Which AI agents a human agent is allowed to see conversations for."""
-
     __tablename__ = "agent_assignments"
 
     human_agent_id: Mapped[uuid.UUID] = mapped_column(
@@ -93,42 +75,30 @@ class AgentAssignment(Base):
 
 
 class Conversation(Base):
-    """
-    A single chat thread — the canonical object for the handoff lifecycle.
-
-    Status state machine:
-        bot → collecting_email → queued → human → resolved
-
-    The session_id links back to the existing ChatSession row so the bot
-    analytics path is unaffected.
-    """
+    """A chat thread and its handoff state machine: bot → collecting_email → queued → human → resolved."""
 
     __tablename__ = "conversations"
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True
     )
-    # The AI-agent deployment this conversation belongs to
     agent_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True
     )
     deployment_id: Mapped[int] = mapped_column(
         ForeignKey("widget_deployments.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    # Link to the existing ChatSession (1-to-1, nullable until first bot message)
+    # Null until the first bot message
     session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
-    # Visitor identity
     visitor_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     visitor_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
-    # State machine
     # bot | collecting_email | queued | human | resolved
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="bot", index=True)
 
-    # Human agent assigned after claiming
     assigned_human_agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("human_agents.id", ondelete="SET NULL"),
@@ -136,7 +106,6 @@ class Conversation(Base):
         index=True,
     )
 
-    # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=func.now(), onupdate=func.now(), nullable=False

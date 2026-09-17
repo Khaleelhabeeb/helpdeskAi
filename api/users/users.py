@@ -12,7 +12,6 @@ router = APIRouter()
 
 @router.get("/credits", response_model=dict)
 def get_credit_info(db: Session = Depends(get_db), user = Depends(get_current_user)):
-    """Get information about the user's credits and usage"""
     next_reset = user.last_reset_date + timedelta(days=30)
     if next_reset.tzinfo is None:
         next_reset = next_reset.replace(tzinfo=timezone.utc)
@@ -34,7 +33,6 @@ def get_credit_info(db: Session = Depends(get_db), user = Depends(get_current_us
         models.Agent.name
     ).all()
     
-    # Format the results
     agent_breakdown = [
         {
             "agent_id": str(agent.id),
@@ -55,10 +53,7 @@ def get_credit_info(db: Session = Depends(get_db), user = Depends(get_current_us
 
 @router.post("/reset-credits")
 def reset_credits(db: Session = Depends(get_db), user = Depends(get_current_user)):
-    """
-    Manually reset a user's credits. In a production, this would be triggered
-    by a scheduled job at the end of each billing cycle.
-    """
+    """Reset a user's credits (normally a scheduled job at the end of a billing cycle)."""
     if getattr(user, "user_type", "") != "admin":
         raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
     
@@ -100,7 +95,6 @@ def create_user_settings(
     if existing_settings:
         raise HTTPException(status_code=400, detail="User settings already exist. Use PUT to update.")
     
-    # Create new settings
     settings = models.UserSettings(
         user_id=user.id,
         **settings_data.dict(exclude_unset=True)
@@ -152,7 +146,6 @@ def delete_user_settings(db: Session = Depends(get_db), user = Depends(get_curre
 
 @router.get("/settings/widget-config", response_model=dict)
 def get_widget_config(db: Session = Depends(get_db), user = Depends(get_current_user)):
-    """Get widget configuration for the chat widget."""
     settings = db.query(models.UserSettings).filter(models.UserSettings.user_id == user.id).first()
     
     if not settings:

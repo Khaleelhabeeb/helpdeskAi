@@ -1,23 +1,8 @@
-"""
-Transactional email abstraction — Brevo implementation (§5 and §2).
+"""Transactional email via Brevo (direct HTTPS POST), with a mock outbox for tests/local dev.
 
-Converted from Go EmailService sample provided by user.
-Primary provider is Brevo via direct HTTPS POST to https://api.brevo.com/v3/smtp/email
-(avoiding the old sib_api_v3_sdk for explicit timeout/wrapping control).
-Mock fallback is retained for tests/local dev when BREVO_API_KEY is missing
-or EMAIL_PROVIDER=mock is forced.
-
-Usage:
-    from services.email_provider import send_transactional_email
-    send_transactional_email(to_email="a@b.com", subject="hi", html_content="<p>hi</p>")
-
-All typed helpers funnel through send_transactional_email so provider swap is one place.
-Env:
-    BREVO_API_KEY       – required for real sends (from .env)
-    BREVO_SENDER_EMAIL  – verified sender, default no-reply@helpdeskai.web.app
-    BREVO_SENDER_NAME   – default HelpDeskAI
-    FRONTEND_URL        – for invite / reopen links
-    EMAIL_PROVIDER      – mock|brevo (default: brevo if BREVO_API_KEY set, else mock)
+All typed helpers funnel through `send_transactional_email`, so the provider swap lives
+in one place. Env: BREVO_API_KEY, BREVO_SENDER_EMAIL, BREVO_SENDER_NAME, FRONTEND_URL,
+EMAIL_PROVIDER (mock|brevo; defaults to brevo when the key is set).
 """
 from __future__ import annotations
 
@@ -37,8 +22,6 @@ except Exception:
     pass
 
 logger = logging.getLogger(__name__)
-
-# ── In-memory outbox (mock + debug) ─────────────────────────────────────────
 
 @dataclass
 class SentEmail:
@@ -61,10 +44,8 @@ def clear_sent_emails() -> None:
     _SENT_OUTBOX.clear()
 
 
-# ── Brevo service (ported from Go) ──────────────────────────────────────────
-
 class BrevoEmailService:
-    """Direct HTTP Brevo sender, mirroring Go EmailService."""
+    """Direct HTTP Brevo sender."""
 
     def __init__(self, api_key: str, sender_email: str, sender_name: str, frontend_url: str):
         self.api_key = api_key
@@ -80,14 +61,12 @@ class BrevoEmailService:
                 import httpx
                 self._http = httpx.Client(timeout=10.0)
             except Exception as exc:
-                # fallback to stdlib http.client if httpx unavailable
                 logger.warning("httpx unavailable, falling back to urllib: %s", exc)
                 self._http = None
         return self._http
 
     def wrap_html(self, content: str) -> str:
         year = datetime.now().year
-        # HelpDeskAI system design — minimal, zinc/black, Inter
         return f"""
 <html>
 <body style="font-family:Inter, -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif; background:#f8f8f7; padding:32px 16px; color:#18181b; margin:0;">
@@ -212,16 +191,13 @@ def _should_mock() -> bool:
     # If no API key, must mock
     if not (os.getenv("BREVO_API_KEY") or "").strip():
         return True
-    # If provider explicitly brevo, use real
     if provider == "brevo":
         return False
-    # Default: if key exists and provider empty/unset, use real (user has verified domain)
-    # but force mock when running under pytest to avoid real network calls
+    # Key present and provider unset → real, except under pytest
     if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
         return True
     if provider == "":
         return False
-    # Unknown provider -> mock
     return True
 
 
@@ -233,16 +209,9 @@ def send_transactional_email(
     to_name: Optional[str] = None,
     text_content: Optional[str] = None,
 ) -> bool:
-    """
-    Unified sender. `html_content` is the *inner* content (will be wrapped via
-    Brevo's wrapHTML). For mock, we store the wrapped version as well so
-    /debug/emails preview matches what Brevo would send.
-    """
-    # Always store a wrapped preview for debugging, even when mocked
+    """Unified sender; `html_content` is the inner body (wrapped before sending)."""
     svc = _get_brevo_service()
-    # Decide mock vs real
     if _should_mock() or svc is None:
-        # For mock, wrap as well so preview is faithful, but mark provider mock
         wrapped = svc.wrap_html(html_content) if svc else html_content
         entry = SentEmail(
             to_email=to_email,
@@ -256,9 +225,8 @@ def send_transactional_email(
         logger.info("mock_email_sent to=%s subject=%s outbox=%d", to_email, subject, len(_SENT_OUTBOX))
         return True
 
-    # Real Brevo path
     ok = svc.send_brevo(to=to_email, name=to_name or "", subject=subject, html_content=html_content)
-    # Also keep a copy in outbox for /debug/emails auditing
+    # Outbox copy for /debug/emails auditing
     wrapped = svc.wrap_html(html_content)
     _SENT_OUTBOX.append(SentEmail(
         to_email=to_email, to_name=to_name, subject=subject,
@@ -269,8 +237,6 @@ def send_transactional_email(
         logger.warning("brevo_send_returned_false to=%s subject=%s — stored as brevo-failed", to_email, subject)
     return ok
 
-
-# ── Typed helpers (port of Go helpers + handoff specifics) ───────────────────
 
 def send_invite_email(*, to_email: str, invite_token: str, inviter_email: str | None = None) -> bool:
     frontend = (os.getenv("FRONTEND_URL") or "http://localhost:3000").rstrip("/")
@@ -343,8 +309,7 @@ def send_human_reply_email(
     return send_transactional_email(to_email=to_email, to_name=None, subject=subject, html_content=html_inner)
 
 
-# ── Additional Go-ported helpers (optional, for future use) ──────────────────
-
+# Not wired into any route yet
 def send_email_verification_otp(*, to_email: str, to_name: str, otp: str) -> bool:
     svc = _get_brevo_service()
     sender = svc.sender_name if svc else "HelpDeskAI"

@@ -9,7 +9,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.exceptions import RequestValidationError
-# JSONResponse imported from starlette.responses above for compatibility with slowapi
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from api.agents import agents, chat, knowledge_base, settings, widget_deployment
@@ -84,10 +83,8 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         content={"detail": "Internal server error", "request_id": request_id},
     )
 
-# Custom exception handler for 422 validation errors
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    # Extract form data safely
     try:
         body_str = str(exc.body) if exc.body else "No body"
     except Exception:
@@ -131,7 +128,6 @@ class PublicWidgetCORSMiddleware(BaseHTTPMiddleware):
             
         return await call_next(request)
 
-# rate limiting middleware
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -170,20 +166,25 @@ app.include_router(scrape.router, prefix="/scrape", tags=["Scrape"])
 app.include_router(analytics.router, tags=["KPI"])
 app.include_router(model_catalog.router, prefix="/models", tags=["Models"])
 
-# Human handoff (§2, §5, §8)
+# Human handoff
 app.include_router(owner_human_agents.router, prefix="/owner/human-agents", tags=["Owner — Human Agents"])
 app.include_router(owner_team.router, prefix="/owner/team", tags=["Owner — Team"])
 app.include_router(human_agent_api.auth_router, prefix="/human-agent/auth", tags=["Human Agent — Auth"])
 app.include_router(human_agent_api.router, prefix="/human-agent", tags=["Human Agent"])
 
-# Debug: mock email outbox (dev only, no auth — gated to non-prod inside handler)
+# Debug mock-email outbox: 404 in production, owner auth otherwise, HTML stripped
 from fastapi import Depends
 from services.email_provider import get_sent_emails
+from utils.jwt import get_current_user as _get_current_user_for_debug
 
 @app.get("/debug/emails", include_in_schema=False)
-def debug_emails():
+def debug_emails(user=Depends(_get_current_user_for_debug)):
     import os as _os
     if _os.getenv("ENV") == "production":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404)
+    # Only allow when explicitly enabled (defense in depth for S3)
+    if _os.getenv("ENABLE_DEBUG_EMAILS", "0") != "1":
         from fastapi import HTTPException
         raise HTTPException(status_code=404)
     return {"emails": [
@@ -192,12 +193,12 @@ def debug_emails():
             "subject": e.subject,
             "provider": e.provider,
             "sent_at": e.sent_at.isoformat(),
-            "html_snippet": e.html_content[:400],
+            # Never return the HTML body (it can contain token links)
+            "has_html": bool(e.html_content),
         }
         for e in get_sent_emails()[-50:]
     ]}
 
-# Custom static file handler with proper cache headers
 from starlette.staticfiles import StaticFiles
 
 class CachedStaticFiles(StaticFiles):

@@ -98,7 +98,6 @@ export default function Team() {
       const data = await apiFetch<Analytics>('/owner/team/analytics', { cacheMs: 0, dedupe: false });
       setAnalytics(data);
     } catch (e) {
-      // silent
     } finally {
       setALoading(false);
     }
@@ -115,7 +114,6 @@ export default function Team() {
       setConvs(data.conversations);
       setCTotal(data.total);
     } catch (e) {
-      // silent
     } finally {
       setCLoading(false);
     }

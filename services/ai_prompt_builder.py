@@ -41,10 +41,6 @@ def generate_system_prompt_from_text(training_text: str, agent_name: str) -> str
 
 
 def send_message_to_groq(system_prompt: str, user_message: str) -> str:
-    """
-    Sync helper — direct Groq API (no LiteLLM overhead).
-    Keeps legacy `groq/llama-3.1-8b-instant` string normalized internally.
-    """
     from services.groq_client import get_groq_client, normalize_groq_model
 
     client = get_groq_client()

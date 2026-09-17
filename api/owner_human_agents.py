@@ -1,14 +1,11 @@
-"""
-Owner-facing Human Agent management (§2, §5).
+"""Owner-facing Human Agent management, mounted under /owner/human-agents.
 
-Routes are mounted under /owner/human-agents and require the standard
-Supabase owner auth (verify_supabase_token). They never leak human-agent
-password hashes or invite tokens to the client except where needed.
+Requires the standard Supabase owner auth. Password hashes and invite tokens are
+never returned to the client.
 
-Invite flow:
-  POST /owner/human-agents  → creates human_agents row status=invited,
-                               generates invite_token, sends transactional email
-                               via send_invite_email (mock), returns {id,email,status,invite_link?}
+Invite flow: POST /owner/human-agents creates a human_agents row with status=invited,
+generates an invite token, sends it via send_invite_email, and returns
+{id, email, status, invite_link?}.
 """
 from __future__ import annotations
 
@@ -24,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from db import models
 from services.supabase_auth import get_db
-from services.human_agent_auth import create_invite_token
+from services.human_agent_auth import create_invite_token, hash_invite_token
 from services.email_provider import send_invite_email
 from utils.jwt import get_current_user
 
@@ -32,12 +29,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ── Schemas ──────────────────────────────────────────────────────────────────
 
 class InviteRequest(BaseModel):
     email: EmailStr
     name: Optional[str] = Field(None, max_length=120)
-    # Optional: immediately assign to these AI agents
     agent_ids: Optional[List[uuid.UUID]] = None
 
 
@@ -68,7 +63,6 @@ def _to_out(ha: models.HumanAgent, assignments: Optional[List[models.AgentAssign
     }
 
 
-# ── POST /owner/human-agents — invite ───────────────────────────────────────
 
 @router.post("", status_code=201)
 def invite_human_agent(
@@ -80,7 +74,6 @@ def invite_human_agent(
     if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
         raise HTTPException(status_code=422, detail="Invalid email address")
 
-    # Check duplicate per owner
     existing = db.query(models.HumanAgent).filter(
         models.HumanAgent.owner_user_id == user.id,
         models.HumanAgent.email == email,
@@ -94,7 +87,7 @@ def invite_human_agent(
         email=email,
         name=(payload.name or "").strip() or None,
         status="invited",
-        invite_token=token,
+        invite_token=hash_invite_token(token),
         invite_token_expires=expires,
         created_at=datetime.now(timezone.utc),
     )
@@ -102,13 +95,12 @@ def invite_human_agent(
     db.commit()
     db.refresh(ha)
 
-    # Optional initial assignments
     if payload.agent_ids:
         # Validate ownership of each agent_id
         for aid in payload.agent_ids:
             agent = db.query(models.Agent).filter(models.Agent.id == aid, models.Agent.user_id == user.id).first()
             if not agent:
-                # rollback assignment creation? keep human agent but error
+                # Roll back the human agent row on validation failure
                 db.delete(ha)
                 db.commit()
                 raise HTTPException(status_code=404, detail=f"Agent {aid} not found or not owned by you")
@@ -117,7 +109,6 @@ def invite_human_agent(
         db.commit()
         db.refresh(ha)
 
-    # Send invite email (mock stores it in outbox; real provider would send transactional)
     try:
         send_invite_email(to_email=email, invite_token=token, inviter_email=user.email)
     except Exception:
@@ -126,9 +117,8 @@ def invite_human_agent(
 
     logger.info("human_agent_invited id=%s owner=%s email=%s", ha.id, user.id, email)
 
-    # For dev convenience, return invite_token in non-prod (so frontend can show copy-link)
-    # In prod you would not return it.
-    is_dev = (logging.getLogger().level <= logging.DEBUG) or (__import__("os").getenv("ENV") != "production")
+    # Only expose the invite token outside production, and only when explicitly enabled
+    is_dev = (__import__("os").getenv("ENV") != "production") and (__import__("os").getenv("EXPOSE_INVITE_TOKEN", "1") == "1")
     resp = _to_out(ha)
     if is_dev:
         resp["invite_token"] = token  # type: ignore
@@ -138,7 +128,6 @@ def invite_human_agent(
     return resp
 
 
-# ── GET /owner/human-agents — list ───────────────────────────────────────────
 
 @router.get("")
 def list_human_agents(
@@ -149,7 +138,6 @@ def list_human_agents(
     return [_to_out(ha) for ha in agents]
 
 
-# ── GET /owner/human-agents/:id — single ─────────────────────────────────────
 
 @router.get("/{human_agent_id}")
 def get_human_agent(
@@ -170,7 +158,6 @@ def get_human_agent(
     return _to_out(ha)
 
 
-# ── PATCH /owner/human-agents/:id/assignments — replace assignments ───────────
 
 @router.patch("/{human_agent_id}/assignments")
 def update_assignments(
@@ -198,16 +185,59 @@ def update_assignments(
             raise HTTPException(status_code=404, detail=f"Agent {aid} not found or not owned by you")
 
     # Replace: delete existing, insert desired
+    old_ids = {r.agent_id for r in db.query(models.AgentAssignment).filter(models.AgentAssignment.human_agent_id == ha.id).all()}
     db.query(models.AgentAssignment).filter(models.AgentAssignment.human_agent_id == ha.id).delete()
     for aid in desired:
         db.add(models.AgentAssignment(human_agent_id=ha.id, agent_id=aid))
     db.commit()
     db.refresh(ha)
+    # Invalidate the agent→humans cache for changed agents
+    try:
+        from services import handoff_service as _hs
+        import asyncio
+        affected = old_ids | desired
+        for aid in affected:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.call_soon_threadsafe(lambda a=aid: asyncio.ensure_future(_hs.invalidate_agent_human_cache(str(a))))
+            except Exception:
+                pass
+    except Exception:
+        pass
     logger.info("human_agent_assignments_updated id=%s count=%s", ha.id, len(desired))
     return _to_out(ha)
 
 
-# ── PATCH /owner/human-agents/:id — update name/status ───────────────────────
+def _requeue_conversations_for_human(db: Session, human_agent_id: uuid.UUID):
+    """Requeue every open conversation assigned to a human agent being removed/disabled."""
+    from services import handoff_service
+    convs = db.query(models.Conversation).filter(
+        models.Conversation.assigned_human_agent_id == human_agent_id,
+        models.Conversation.status == "human",
+    ).all()
+    for c in convs:
+        c.status = "queued"
+        c.assigned_human_agent_id = None
+        c.updated_at = datetime.now(timezone.utc)
+    if convs:
+        db.commit()
+        for c in convs:
+            try:
+                payload = {"type": "status_change", "status": "queued", "conversation_id": str(c.id)}
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.call_soon_threadsafe(lambda cc=c: asyncio.ensure_future(handoff_service.broadcast_to_conversation(str(cc.id), payload)))
+                        loop.call_soon_threadsafe(lambda cc=c: asyncio.ensure_future(handoff_service.broadcast_to_humans_for_agent(cc.agent_id, {**payload, "agent_id": str(cc.agent_id)})))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        logger.info("requeued_conversations_on_human_remove human_agent_id=%s count=%s", human_agent_id, len(convs))
+
+
 
 class HumanAgentPatch(BaseModel):
     name: Optional[str] = Field(None, max_length=120)
@@ -234,13 +264,15 @@ def patch_human_agent(
     if payload.name is not None:
         ha.name = payload.name.strip() or None
     if payload.status is not None:
+        # Disabling requeues their open conversations first
+        if payload.status == "disabled" and ha.status != "disabled":
+            _requeue_conversations_for_human(db, ha.id)
         ha.status = payload.status
     db.commit()
     db.refresh(ha)
     return _to_out(ha)
 
 
-# ── POST /owner/human-agents/:id/resend-invite ───────────────────────────────
 
 @router.post("/{human_agent_id}/resend-invite")
 def resend_invite(
@@ -261,7 +293,7 @@ def resend_invite(
     if ha.status == "active":
         raise HTTPException(status_code=400, detail="Human agent is already active")
     token, expires = create_invite_token()
-    ha.invite_token = token
+    ha.invite_token = hash_invite_token(token)
     ha.invite_token_expires = expires
     ha.status = "invited"
     db.commit()
@@ -272,14 +304,13 @@ def resend_invite(
     logger.info("human_agent_invite_resent id=%s", ha.id)
     resp = _to_out(ha)
     import os
-    if os.getenv("ENV") != "production":
+    if os.getenv("ENV") != "production" and os.getenv("EXPOSE_INVITE_TOKEN", "1") == "1":
         resp["invite_token"] = token  # type: ignore
         frontend = (os.getenv("FRONTEND_URL") or "http://localhost:3000").rstrip("/")
         resp["invite_link"] = f"{frontend}/human-agent/accept-invite?token={token}"  # type: ignore
     return resp
 
 
-# ── DELETE /owner/human-agents/:id ───────────────────────────────────────────
 
 @router.delete("/{human_agent_id}")
 def delete_human_agent(
@@ -297,6 +328,8 @@ def delete_human_agent(
     ).first()
     if not ha:
         raise HTTPException(status_code=404, detail="Human agent not found")
+    # Requeue before deleting
+    _requeue_conversations_for_human(db, ha.id)
     db.delete(ha)
     db.commit()
     logger.info("human_agent_deleted id=%s owner=%s", ha_uuid, user.id)

@@ -28,7 +28,6 @@ from .knowledge_base import (
 from .enums import KBSourceType, KBStatus, JobState
 
 __all__ = [
-    # User schemas
     "UserCreate",
     "UserLogin",
     "UserOut",
@@ -40,7 +39,6 @@ __all__ = [
     "UserSettingsCreate",
     "UserSettingsUpdate",
     "UserSettingsOut",
-    # Agent schemas
     "AgentCreate",
     "AgentOut",
     "AgentConfigOut",
@@ -48,11 +46,9 @@ __all__ = [
     "WidgetConfig",
     "EmbedConfig",
     "AgentSettingsOut",
-    # Knowledge base schemas
     "KnowledgeBaseCreate",
     "KnowledgeBaseOut",
     "KBIngestJobOut",
-    # Enums
     "KBSourceType",
     "KBStatus",
     "JobState",

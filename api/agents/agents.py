@@ -43,7 +43,6 @@ async def _try_assign_favicon_to_agent(agent: models.Agent, db: Session, favicon
             agent.avatar_url = favicon_url
             db.commit()
             db.refresh(agent)
-            # also update widget deployment if exists
             deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.agent_id == agent.id).first()
             if deployment:
                 deployment.logo_url = favicon_url
@@ -51,9 +50,7 @@ async def _try_assign_favicon_to_agent(agent: models.Agent, db: Session, favicon
                 db.commit()
             return favicon_url
 
-        # Guess filename and content_type
         parsed = favicon_url.split("?")[0].split("/")[-1] or "favicon"
-        # ensure extension
         ext = mimetypes.guess_extension(content_type or "") or ".png"
         if "." not in parsed:
             parsed = f"favicon{ext}"
@@ -115,7 +112,6 @@ async def create_agent(
 ):
     instructions = default_system_prompt(name)
     
-    # Create agent
     new_agent = models.Agent(
         name=name,
         instructions=instructions,
@@ -126,7 +122,7 @@ async def create_agent(
     db.commit()
     db.refresh(new_agent)
 
-    # Handle avatar upload if provided (previously ignored)
+    # Handle avatar upload if provided
     if avatar and getattr(avatar, "filename", None):
         try:
             if avatar.content_type and avatar.content_type not in ALLOWED_AVATAR_TYPES:
@@ -160,7 +156,6 @@ async def create_agent(
             if favicon_candidate:
                 await _try_assign_favicon_to_agent(new_agent, db, favicon_candidate)
 
-    # Create agent configuration
     namespace = f"{user.id}:{new_agent.id}"
     config = models.AgentConfig(
         agent_id=new_agent.id,
@@ -175,7 +170,6 @@ async def create_agent(
         theme_color = branding.get("theme_color")
         if theme_color and isinstance(theme_color, str) and theme_color.startswith("#") and len(theme_color) == 7:
             try:
-                # Validate hex
                 int(theme_color[1:], 16)
                 config.widget_color = theme_color
                 config.widget_use_color_header = True
@@ -323,10 +317,8 @@ async def delete_agent(agent_id: UUID, db: Session = Depends(get_db), user = Dep
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    # Get all KBs for this agent
     kbs = db.query(models.KnowledgeBase).filter(models.KnowledgeBase.agent_id == agent.id).all()
     
-    # Calculate total storage to decrement in one go
     total_storage_bytes = 0
     total_chunks = 0
     for kb in kbs:
@@ -387,7 +379,6 @@ def update_agent_config(agent_id: UUID, update: AgentConfigUpdate, db: Session =
         db.add(cfg)
         db.commit()
         db.refresh(cfg)
-    # Apply partial updates
     for field, value in update.model_dump(exclude_unset=True).items():
         setattr(cfg, field, value)
     db.commit()

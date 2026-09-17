@@ -35,7 +35,6 @@ class AgentConfigOut(BaseModel):
 
 
 class AgentSettingsUpdate(BaseModel):
-    """Schema for updating agent settings (instructions and widget configuration)"""
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     instructions: Optional[str] = Field(None, max_length=5000)
     model: Optional[str] = Field(None, max_length=120)
@@ -44,10 +43,11 @@ class AgentSettingsUpdate(BaseModel):
     widget_position: Optional[str] = Field(None, pattern="^(bottom-right|bottom-left|top-right|top-left)$")
     widget_greeting: Optional[str] = Field(None, max_length=200)
     widget_use_color_header: Optional[bool] = None
+    human_handoff_enabled: Optional[bool] = None
+    human_handoff_difficulty: Optional[str] = Field(None, pattern="^(easy|balanced|hard)$")
 
 
 class WidgetConfig(BaseModel):
-    """Widget configuration response"""
     theme: str
     color: str
     position: str
@@ -56,7 +56,6 @@ class WidgetConfig(BaseModel):
 
 
 class EmbedConfig(BaseModel):
-    """Embed code configuration response"""
     script: str
     preview_url: str
     test_url: str
@@ -64,7 +63,6 @@ class EmbedConfig(BaseModel):
 
 
 class AgentSettingsOut(BaseModel):
-    """Complete agent settings response"""
     agent_id: str
     name: str
     instructions: str
@@ -72,3 +70,4 @@ class AgentSettingsOut(BaseModel):
     widget: WidgetConfig
     embed: EmbedConfig
     statistics: Dict[str, Any]
+    human_handoff: Optional[Dict[str, Any]] = None

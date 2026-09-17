@@ -25,12 +25,10 @@ def extract_text_from_txt_file(file: BinaryIO) -> str:
 
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
-    # Extract text from PDF bytes
     return extract_text_from_pdf_file(BytesIO(file_bytes))
 
 
 def extract_text_from_txt(file_bytes: bytes) -> str:
-    # Extract text from TXT bytes
     return file_bytes.decode("utf-8")
 
 

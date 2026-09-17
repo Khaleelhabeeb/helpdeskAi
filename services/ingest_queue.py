@@ -74,7 +74,6 @@ def _release_slot(future: Future) -> None:
 
 
 # Cache one event loop per thread instead of creating one per job
-# via asyncio.run().  Saves ~200-500KB of temporary allocation per job.
 _thread_loops: dict[int, asyncio.AbstractEventLoop] = {}
 
 def _get_thread_loop() -> asyncio.AbstractEventLoop:

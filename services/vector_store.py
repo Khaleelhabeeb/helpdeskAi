@@ -13,10 +13,7 @@ RAG_CONTEXT_MAX_CHARS = int(os.getenv("RAG_CONTEXT_MAX_CHARS", "3500"))
 
 
 def ensure_collection() -> None:
-    """
-    Ensure pgvector table exists (migration `pgvector_20250911` should have run).
-    Silent no-op in sqlite tests.
-    """
+    """Warn when the kb_chunks table is missing; silent no-op in sqlite tests."""
     try:
         from db.database import engine
         from sqlalchemy import inspect
@@ -29,7 +26,7 @@ def ensure_collection() -> None:
 
 
 def _get_session():
-    """Create a short-lived session for vector ops (isolated from caller's transaction)."""
+    """Short-lived session, isolated from the caller's transaction."""
     from db.database import SessionLocal
 
     return SessionLocal()
@@ -59,15 +56,13 @@ def upsert_texts(
 ) -> int:
     """
     Insert chunks into `kb_chunks` (pgvector).
-    - Replaces Milvus `upsert` (which was idempotent on `id`).
-    - Uses bulk insert via SQLAlchemy ORM for speed.
-    - `chunk_offset` allows global chunk_index across batches (rag_service passes batch start).
-    - `ids` if provided are used as primary key `id`; otherwise gen_random_uuid().
+
+    `chunk_offset` keeps `chunk_index` global across batches; `ids` (when given) become
+    the primary keys, otherwise UUIDs are generated.
     """
     if not texts or not embeddings:
         return 0
 
-    # Lazy import to avoid circular deps at module load
     from models.kb_chunk import KbChunk
 
     session = _get_session()
@@ -77,19 +72,16 @@ def upsert_texts(
         for i, (txt, emb) in enumerate(zip(texts, embeddings)):
             if not txt:
                 continue
-            # Use provided id as PK if valid UUID, else generate
             raw_id = ids[i] if ids and i < len(ids) else None
             try:
                 pk = uuid.UUID(raw_id) if raw_id else uuid.uuid4()
             except Exception:
                 pk = uuid.uuid4()
 
-            # chunk_index should be global for stable ordering; fall back to batch i + offset
             c_idx = chunk_offset + i
 
-            # For sqlite tests, embedding column is Text — serialize
+            # sqlite has no vector type: serialize so tests can introspect the value
             if is_sqlite:
-                # store as comma-separated string for test introspection (not used for search)
                 emb_val = ",".join(map(str, emb)) if isinstance(emb, list) else str(emb)  # type: ignore
             else:
                 emb_val = emb  # type: ignore
@@ -108,7 +100,6 @@ def upsert_texts(
         if not objects:
             return 0
 
-        # Bulk insert — use add_all for simplicity; for high throughput could use executemany
         session.add_all(objects)
         session.commit()
         return len(objects)
@@ -123,15 +114,13 @@ def upsert_texts(
 def search(namespace: str, query_vector: List[float], top_k: int = 4) -> List[tuple[str, float]]:
     """
     Cosine-similarity search filtered by namespace.
-    Returns List[(text, distance)] sorted by increasing cosine distance (most similar first).
-    Distance = 1 - cosine_similarity for normalized Jina vectors, matching previous Milvus COSINE.
-
-    Uses pgvector HNSW index `ix_kb_chunks_embedding_hnsw` (vector_cosine_ops) for fast top-k.
+    Returns (text, cosine_distance) pairs, most similar first, using the pgvector
+    HNSW `vector_cosine_ops` index.
     """
     if not query_vector:
         return []
 
-    # In sqlite/pytest env, fallback to simple namespace-filtered fetch (no vector ordering)
+    # sqlite/pytest has no vector operator: fall back to unordered namespace hits
     if _is_sqlite_test():
         session = _get_session()
         try:
@@ -151,10 +140,8 @@ def search(namespace: str, query_vector: List[float], top_k: int = 4) -> List[tu
 
     session = _get_session()
     try:
-        # Use raw SQL with explicit CAST for pgvector to ensure index usage and no ORM overhead.
-        # `embedding <=> :vec` is cosine distance operator for vector_cosine_ops.
-        # We format vector as pgvector string "[1,2,...]" and cast to vector.
-        # For performance, keep LIMIT small (top_k 3-4).
+        # Raw SQL avoids ORM overhead; `<=>` is the cosine-distance operator for
+        # vector_cosine_ops, and the vector is passed as a "[1,2,...]" literal cast to vector.
         vec_str = "[" + ",".join(map(str, query_vector)) + "]"
         sql = text(
             """
@@ -166,7 +153,6 @@ def search(namespace: str, query_vector: List[float], top_k: int = 4) -> List[tu
             """
         )
         rows = session.execute(sql, {"vec": vec_str, "ns": namespace, "limit": top_k}).fetchall()
-        # rows: [(text, distance)]
         hits: List[tuple[str, float]] = []
         for r in rows:
             txt = r[0]
@@ -175,7 +161,7 @@ def search(namespace: str, query_vector: List[float], top_k: int = 4) -> List[tu
                 hits.append((txt, dist))
         return hits
     except Exception as exc:
-        # If table doesn't exist or vector op missing, return empty gracefully (e.g. migration not yet run)
+        # Degrade gracefully when the table/extension is missing (migration not run yet)
         msg = str(exc).lower()
         if "kb_chunks" in msg or "no such table" in msg or "does not exist" in msg or "vector" in msg or "operator" in msg:
             logger.debug("pgvector_search_no_table namespace=%s", namespace)
@@ -200,17 +186,15 @@ def delete_for_kb(namespace: str, kb_id: str) -> int:
     """Delete all chunks for a specific KB (filtered by namespace for safety)."""
     session = _get_session()
     try:
-        # Use ORM delete for clarity; raw SQL also fine
         from models.kb_chunk import KbChunk
 
-        # Need to cast kb_id string to UUID
         try:
             kb_uuid = uuid.UUID(kb_id)
         except Exception:
             kb_uuid = kb_id  # type: ignore
 
         q = session.query(KbChunk).filter(KbChunk.kb_id == kb_uuid, KbChunk.namespace == namespace)
-        count = q.count()  # for logging
+        count = q.count()
         q.delete(synchronize_session=False)
         session.commit()
         logger.info("pgvector_delete_kb namespace=%s kb_id=%s count=%s", namespace, kb_id, count)
@@ -243,7 +227,6 @@ def delete_namespace(namespace: str) -> int:
         session.close()
 
 
-# Backward compat aliases (some callers import `search as milvus_search`)
-# Keep `get_milvus_client` stub to avoid ImportError during transition
+# Kept as a stub so stale Milvus imports fail with a clear message
 def get_milvus_client():  # pragma: no cover
     raise RuntimeError("Milvus is removed — pgvector is now used. See services/vector_store.py")

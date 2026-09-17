@@ -44,8 +44,6 @@ def get_agent_settings(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
-    # Get complete settings: basic info, widget config, embed script, and statistics
-    # Verify agent ownership
     agent = db.query(models.Agent).filter(
         models.Agent.id == agent_id,
         models.Agent.user_id == user.id
@@ -54,22 +52,23 @@ def get_agent_settings(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    # Get agent config
-    config = db.query(models.AgentConfig).filter(
-        models.AgentConfig.agent_id == agent_id
-    ).first()
+    try:
+        config = db.query(models.AgentConfig).filter(
+            models.AgentConfig.agent_id == agent_id
+        ).first()
+    except Exception:
+        # Column human_handoff_enabled may not exist yet (pre-migration) — feature defaults OFF
+        db.rollback()
+        config = None
     
-    # Get knowledge base count
     kb_count = db.query(models.KnowledgeBase).filter(
         models.KnowledgeBase.agent_id == agent_id
     ).count()
     
-    # Get total conversations
     total_conversations = db.query(models.UsageLog).filter(
         models.UsageLog.agent_id == agent_id
     ).count()
     
-    # Get widget configuration (from AgentConfig or use defaults)
     widget_config = {
         "theme": (getattr(config, 'widget_theme', None) if config else None) or 'light',
         "color": (getattr(config, 'widget_color', None) if config else None) or '#4a6cf7',
@@ -77,8 +76,22 @@ def get_agent_settings(
         "greeting": (getattr(config, 'widget_greeting', None) if config else None) or f'Hi! How can {agent.name} help you today?',
         "use_color_header": bool(getattr(config, 'widget_use_color_header', False)) if config else False,
     }
+    # Human handoff toggle + difficulty — effective only if team exists
+    has_team = False
+    active_human_count = 0
+    if agent:
+        active_human_count = db.query(models.HumanAgent).join(
+            models.AgentAssignment, models.HumanAgent.id == models.AgentAssignment.human_agent_id
+        ).filter(
+            models.AgentAssignment.agent_id == agent_id,
+            models.HumanAgent.status == 'active'
+        ).count()
+        has_team = active_human_count > 0
+    handoff_enabled_cfg = bool(getattr(config, 'human_handoff_enabled', False)) if config else False
+    raw_diff = (getattr(config, 'human_handoff_difficulty', 'balanced') or 'balanced') if config else 'balanced'
+    handoff_difficulty = raw_diff if raw_diff in ('easy','balanced','hard') else 'balanced'
+    handoff_effective = handoff_enabled_cfg and has_team
     
-    # Generate embed script
     base_url = str(request.base_url).rstrip('/')
     deployment = _get_or_create_widget_deployment(db, agent)
     embed_script = f'''<!-- {agent.name} Chat Widget -->
@@ -88,7 +101,6 @@ def get_agent_settings(
     defer
 ></script>'''
     
-    # Alternative: npm/yarn package instructions
     npm_install = f"# Coming soon: npm install @helpdeskAi/widget"
     
     return {
@@ -108,6 +120,18 @@ def get_agent_settings(
             "total_conversations": total_conversations,
             "created_at": agent.created_at.isoformat() if agent.created_at else None,
             "updated_at": config.updated_at.isoformat() if config and config.updated_at else None
+        },
+        "human_handoff": {
+            "enabled": handoff_enabled_cfg,
+            "difficulty": handoff_difficulty,
+            "effective": handoff_effective,
+            "has_team": has_team,
+            "active_human_count": active_human_count,
+            "options": {
+                "easy": {"label": "Easy — offers human quickly after one try", "short": "Quick handoff"},
+                "balanced": {"label": "Balanced — tries 1–2 steps then offers", "short": "Thoughtful"},
+                "hard": {"label": "Hard — persists, needs insistence twice", "short": "Persistent"},
+            },
         }
     }
 
@@ -119,8 +143,6 @@ def update_agent_settings(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
-    # Update agent settings: name, instructions, widget theme/color/position/greeting (partial updates supported)
-    # Verify agent ownership
     agent = db.query(models.Agent).filter(
         models.Agent.id == agent_id,
         models.Agent.user_id == user.id
@@ -129,19 +151,24 @@ def update_agent_settings(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    # Get or create agent config
     config = db.query(models.AgentConfig).filter(
         models.AgentConfig.agent_id == agent_id
     ).first()
     
+    try:
+        config = db.query(models.AgentConfig).filter(
+            models.AgentConfig.agent_id == agent_id
+        ).first()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Human handoff toggle requires DB migration. Run `alembic upgrade head`.")
+
     if not config:
         config = models.AgentConfig(agent_id=agent_id)
         db.add(config)
     
-    # Track what was updated
     updates = []
     
-    # Update agent basic info
     if settings.name is not None:
         agent.name = settings.name
         updates.append("name")
@@ -154,7 +181,6 @@ def update_agent_settings(
         agent.model = settings.model
         updates.append("model")
     
-    # Update widget configuration in AgentConfig
     if settings.widget_theme is not None:
         config.widget_theme = settings.widget_theme
         updates.append("widget_theme")
@@ -174,8 +200,25 @@ def update_agent_settings(
     if settings.widget_use_color_header is not None:
         config.widget_use_color_header = settings.widget_use_color_header
         updates.append("widget_use_color_header")
+
+    if settings.human_handoff_enabled is not None:
+        # Allow toggling even without team — effective will remain false until a human is assigned & active.
+        # Previously we blocked here with 400 and the UI looked like it "snapped back" off.
+        config.human_handoff_enabled = bool(settings.human_handoff_enabled)
+        updates.append("human_handoff_enabled")
+
+    if settings.human_handoff_difficulty is not None:
+        if settings.human_handoff_difficulty not in ('easy','balanced','hard'):
+            raise HTTPException(status_code=422, detail="Difficulty must be one of: easy, balanced, hard")
+        # Only allow setting difficulty if handoff is enabled or being enabled in same patch
+        cfg_enabled = bool(getattr(config, 'human_handoff_enabled', False))
+        will_be_enabled = settings.human_handoff_enabled if settings.human_handoff_enabled is not None else cfg_enabled
+        if not will_be_enabled and settings.human_handoff_difficulty != 'balanced':
+            # Still allow but warn — difficulty is stored but not effective until enabled
+            pass
+        config.human_handoff_difficulty = settings.human_handoff_difficulty
+        updates.append("human_handoff_difficulty")
     
-    # Update timestamp
     config.updated_at = datetime.now(timezone.utc)
     
     try:
@@ -210,8 +253,6 @@ def reset_widget_settings(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
-    # Reset widget to defaults: light theme, #4a6cf7 color, bottom-right position, auto-generated greeting
-    # Verify agent ownership
     agent = db.query(models.Agent).filter(
         models.Agent.id == agent_id,
         models.Agent.user_id == user.id
@@ -220,7 +261,6 @@ def reset_widget_settings(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    # Get or create agent config
     config = db.query(models.AgentConfig).filter(
         models.AgentConfig.agent_id == agent_id
     ).first()
@@ -229,7 +269,6 @@ def reset_widget_settings(
         config = models.AgentConfig(agent_id=agent_id)
         db.add(config)
     
-    # Reset to defaults
     config.widget_theme = 'light'
     config.widget_color = '#4a6cf7'
     config.widget_position = 'bottom-right'
@@ -261,6 +300,69 @@ def reset_widget_settings(
         raise HTTPException(status_code=500, detail=f"Failed to reset widget settings: {str(e)}")
 
 
+@router.get("/{agent_id}/handoff")
+def get_handoff_settings(
+    agent_id: UUID,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user)
+):
+    agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    try:
+        config = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent_id).first()
+        enabled_cfg = bool(getattr(config, 'human_handoff_enabled', False)) if config else False
+        raw_diff = (getattr(config, 'human_handoff_difficulty', 'balanced') or 'balanced') if config else 'balanced'
+        difficulty = raw_diff if raw_diff in ('easy','balanced','hard') else 'balanced'
+    except Exception:
+        db.rollback()
+        enabled_cfg = False
+        difficulty = 'balanced'
+    active_count = db.query(models.HumanAgent).join(models.AgentAssignment, models.HumanAgent.id == models.AgentAssignment.human_agent_id).filter(models.AgentAssignment.agent_id == agent_id, models.HumanAgent.status=='active').count()
+    has_team = active_count > 0
+    return {"agent_id": str(agent_id), "enabled": enabled_cfg, "difficulty": difficulty, "effective": enabled_cfg and has_team, "has_team": has_team, "active_human_count": active_count}
+
+
+@router.patch("/{agent_id}/handoff")
+def patch_handoff_settings(
+    agent_id: UUID,
+    payload: dict,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user)
+):
+    agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if "enabled" not in payload and "difficulty" not in payload:
+        raise HTTPException(status_code=422, detail="Provide 'enabled' boolean and/or 'difficulty' (easy|balanced|hard)")
+    try:
+        config = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent_id).first()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Handoff feature requires DB migration. Run `alembic upgrade head`.")
+    if not config:
+        config = models.AgentConfig(agent_id=agent_id)
+        db.add(config)
+        db.flush()
+    if "enabled" in payload:
+        enabled = bool(payload["enabled"])
+        # Allow enabling even without assigned humans — effective stays false until assignment happens
+        config.human_handoff_enabled = enabled
+    if "difficulty" in payload:
+        diff = str(payload["difficulty"]).strip().lower()
+        if diff not in ('easy','balanced','hard'):
+            raise HTTPException(status_code=422, detail="Difficulty must be one of: easy, balanced, hard")
+        config.human_handoff_difficulty = diff
+    config.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(config)
+    invalidate_agent_runtime(str(agent.id), agent.user_id)
+    active_count2 = db.query(models.HumanAgent).join(models.AgentAssignment, models.HumanAgent.id == models.AgentAssignment.human_agent_id).filter(models.AgentAssignment.agent_id == agent_id, models.HumanAgent.status=='active').count()
+    enabled2 = bool(getattr(config, 'human_handoff_enabled', False))
+    diff2 = getattr(config, 'human_handoff_difficulty', 'balanced') or 'balanced'
+    return {"agent_id": str(agent_id), "enabled": enabled2, "difficulty": diff2, "effective": enabled2 and active_count2>0, "has_team": active_count2>0, "active_human_count": active_count2}
+
+
 @router.get("/{agent_id}/embed-code")
 def get_embed_code(
     agent_id: UUID,
@@ -270,8 +372,6 @@ def get_embed_code(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
-    # Generate embed code with optional theme/color overrides for testing before saving
-    # Verify agent ownership
     agent = db.query(models.Agent).filter(
         models.Agent.id == agent_id,
         models.Agent.user_id == user.id
@@ -280,20 +380,16 @@ def get_embed_code(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    # Get saved config
     config = db.query(models.AgentConfig).filter(
         models.AgentConfig.agent_id == agent_id
     ).first()
     
-    # Use overrides or fall back to saved config or defaults
     widget_color = color or (getattr(config, 'widget_color', '#4a6cf7') if config else '#4a6cf7')
     widget_theme = theme or (getattr(config, 'widget_theme', 'light') if config else 'light')
     
-    # Validate color format if provided
     if color and not color.startswith('#'):
         raise HTTPException(status_code=400, detail="Color must be in hex format (e.g., #4a6cf7)")
     
-    # Generate embed script
     base_url = str(request.base_url).rstrip('/')
     deployment = _get_or_create_widget_deployment(db, agent)
     embed_script = f'''<!-- {agent.name} Chat Widget -->

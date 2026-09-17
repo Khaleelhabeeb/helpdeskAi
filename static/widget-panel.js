@@ -14,7 +14,6 @@
     return;
   }
 
-  // ── State ──────────────────────────────────────────────────────────────────
   const state = {
     config: {
       display_name: "Support Agent",
@@ -43,7 +42,6 @@
   const convKey       = `${storagePrefix}:conv_id`;
   const statusKey     = `${storagePrefix}:conv_status`;
 
-  // ── DOM refs ───────────────────────────────────────────────────────────────
   const messagesEl  = document.getElementById("messages");
   const inputEl     = document.getElementById("input");
   const sendEl      = document.getElementById("send");
@@ -56,7 +54,6 @@
   const closeBtn    = document.querySelector(".close-btn");
   const resolvedBar = document.getElementById("resolvedBar");
 
-  // ── Utilities ──────────────────────────────────────────────────────────────
   function escapeHtml(v) {
     return String(v || "")
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -90,7 +87,6 @@
     }
   }
 
-  // ── Storage ────────────────────────────────────────────────────────────────
   function saveHistory(messages) {
     localStorage.setItem(historyKey, JSON.stringify(messages.slice(-60)));
   }
@@ -119,7 +115,6 @@
     sendToParent({ type: "WIDGET_UNREAD", count: 0 });
   }
 
-  // ── Audio ──────────────────────────────────────────────────────────────────
   function playTone(kind) {
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
@@ -138,7 +133,6 @@
     } catch { /* silent */ }
   }
 
-  // ── Header updates ─────────────────────────────────────────────────────────
   function updateHeader(status, agentName) {
     const dot = statusDotEl;
     const statusEl = headerStatusEl;
@@ -166,7 +160,6 @@
     }
   }
 
-  // ── Message rendering ──────────────────────────────────────────────────────
   function addMessage(role, content, opts) {
     // role: "user" | "bot" | "human_agent" | "system"
     // opts: { save, time, senderLabel }
@@ -262,7 +255,6 @@
     }
   }
 
-  // ── Handoff UI ─────────────────────────────────────────────────────────────
 
   /**
    * Render the inline email-capture card.
@@ -301,7 +293,6 @@
     scrollBottom(true);
     state.emailCardEl = card;
 
-    // Wire up submit
     const field   = card.querySelector("#emailField");
     const submit  = card.querySelector("#emailSubmit");
     const errEl   = card.querySelector("#emailError");
@@ -339,7 +330,6 @@
    * Replace the email card with a "queued" handoff banner.
    */
   function renderHandoffBanner(agentName) {
-    // Remove email card if present
     if (state.emailCardEl) {
       state.emailCardEl.remove();
       state.emailCardEl = null;
@@ -426,7 +416,6 @@
     }
   }
 
-  // ── Email submitted → transition to queued ─────────────────────────────────
   async function onEmailSubmitted(email) {
     // Optimistically transition to queued
     state.convStatus = "queued";
@@ -447,37 +436,80 @@
     }
   }
 
-  // ── WebSocket (for human handoff real-time updates) ────────────────────────
+  // M7: exponential backoff, C2: pong deadline, S1: visitor_token auth
+  var wsReconnectAttempts = 0;
+  var wsReconnectTimer = null;
+  var wsLastPong = Date.now();
+  var wsPingInterval = null;
+  var visitorTokenKey = storagePrefix + ":visitor_token";
+  function getVisitorToken() { try { return localStorage.getItem(visitorTokenKey); } catch { return null; } }
+  function setVisitorToken(t) { try { if (t) localStorage.setItem(visitorTokenKey, t); } catch {} }
   function connectWs(conversationId) {
     if (state.ws) return;
-    const wsBase = apiBase.replace(/^http/, "ws");
-    const wsUrl  = `${wsBase}/public/widget/ws/${conversationId}`;
+    var wsBase = apiBase.replace(/^http/, "ws");
+    var visitorId = initialVisitorId || localStorage.getItem(storagePrefix + ":visitor") || "";
+    var token = getVisitorToken();
+    var qs = "?visitor_id=" + encodeURIComponent(visitorId);
+    if (token) qs += "&visitor_token=" + encodeURIComponent(token);
+    if (deploymentId) qs += "&deployment_id=" + encodeURIComponent(deploymentId);
+    var wsUrl  = wsBase + "/public/widget/ws/" + conversationId + qs;
     try {
-      const ws = new WebSocket(wsUrl);
+      var ws = new WebSocket(wsUrl);
       state.ws = ws;
+      wsLastPong = Date.now();
+      if (wsPingInterval) clearInterval(wsPingInterval);
+      wsPingInterval = setInterval(function() {
+        try { if (ws.readyState === 1) ws.send(JSON.stringify({ type: "ping" })); } catch {}
+        // C2: if no pong in 90s, close to trigger reconnect
+        if (Date.now() - wsLastPong > 90000) {
+          try { ws.close(); } catch {}
+        }
+      }, 25000);
 
-      ws.onmessage = (event) => {
+      ws.onmessage = function(event) {
         try {
-          const msg = JSON.parse(event.data);
+          var msg = JSON.parse(event.data);
+          if (msg.type === "ping") {
+            try { ws.send(JSON.stringify({ type: "pong" })); } catch {}
+            wsLastPong = Date.now();
+            return;
+          }
+          if (msg.type === "pong") { wsLastPong = Date.now(); return; }
+          wsLastPong = Date.now();
           handleWsMessage(msg);
         } catch { /* ignore */ }
       };
 
-      ws.onclose = () => {
+      ws.onclose = function() {
         state.ws = null;
-        // Reconnect after 3s if still in human/queued state
-        if (state.convStatus === "human" || state.convStatus === "queued") {
-          setTimeout(() => connectWs(conversationId), 3000);
+        if (wsPingInterval) { clearInterval(wsPingInterval); wsPingInterval = null; }
+        if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+        // Reconnect with exponential backoff if still in human/queued/collecting_email
+        if (state.convStatus === "human" || state.convStatus === "queued" || state.convStatus === "collecting_email") {
+          var delay = Math.min(30000, 1000 * Math.pow(1.8, wsReconnectAttempts));
+          wsReconnectAttempts += 1;
+          wsReconnectTimer = setTimeout(function() { connectWs(conversationId); }, delay + Math.random()*500);
+        } else {
+          wsReconnectAttempts = 0;
         }
       };
 
-      ws.onerror = () => { ws.close(); };
+      ws.onopen = function() { wsReconnectAttempts = 0; wsLastPong = Date.now(); };
+      ws.onerror = function() { try { ws.close(); } catch {} };
     } catch (e) {
       console.warn("[HelpdeskAI] WebSocket connection failed:", e);
+      if (state.convStatus === "human" || state.convStatus === "queued") {
+        var delay2 = Math.min(30000, 1000 * Math.pow(1.8, wsReconnectAttempts));
+        wsReconnectAttempts += 1;
+        wsReconnectTimer = setTimeout(function() { connectWs(conversationId); }, delay2 + Math.random()*500);
+      }
     }
   }
 
   function disconnectWs() {
+    if (wsPingInterval) { clearInterval(wsPingInterval); wsPingInterval = null; }
+    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+    wsReconnectAttempts = 0;
     if (state.ws) {
       state.ws.onclose = null;
       state.ws.close();
@@ -523,7 +555,6 @@
     }
   }
 
-  // ── SSE event handling (bot stream) ───────────────────────────────────────
   function handleSseEvent(eventName, data, botBubble, answerParts) {
     if (eventName === "meta") {
       if (data.session_id) localStorage.setItem(sessionKey, data.session_id);
@@ -531,6 +562,7 @@
         state.conversationId = data.conversation_id;
         localStorage.setItem(convKey, data.conversation_id);
       }
+      if (data.visitor_token) setVisitorToken(data.visitor_token);
     }
     if (eventName === "token") {
       answerParts.push(data.content || "");
@@ -560,7 +592,6 @@
     }
   }
 
-  // ── Send message ───────────────────────────────────────────────────────────
   async function sendMessage(value) {
     const text = value.trim();
     if (!text || state.sending) return;
@@ -674,7 +705,6 @@
     }
   }
 
-  // ── Config ─────────────────────────────────────────────────────────────────
   function applyConfig(config) {
     state.config = { ...state.config, ...config };
     const cfg     = state.config;
@@ -696,14 +726,12 @@
     );
   }
 
-  // ── Textarea auto-resize ───────────────────────────────────────────────────
   function autoResize() {
     inputEl.style.height = "auto";
     inputEl.style.height = Math.min(inputEl.scrollHeight, 110) + "px";
   }
   inputEl.addEventListener("input", autoResize);
 
-  // ── PostMessage bridge ─────────────────────────────────────────────────────
   function sendToParent(message) {
     try { window.parent.postMessage(message, "*"); } catch { /* silent */ }
   }
@@ -736,7 +764,6 @@
     }
   });
 
-  // ── UI events ──────────────────────────────────────────────────────────────
   closeBtn.addEventListener("click", () => sendToParent({ type: "WIDGET_CLOSE_REQUEST" }));
   clearBtn.addEventListener("click", clearHistory);
 
@@ -752,7 +779,6 @@
     }
   });
 
-  // ── Init ───────────────────────────────────────────────────────────────────
   restoreMessages();
   sendToParent({ type: "WIDGET_READY", version: WIDGET_VERSION });
 })();

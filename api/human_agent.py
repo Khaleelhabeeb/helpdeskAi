@@ -1,54 +1,51 @@
+"""Human-agent API mounted under /human-agent.
+
+Every route except /auth/* requires a human-agent JWT (role=human_agent) via
+get_current_human_agent; listings are scoped to the caller's assigned AI agents.
 """
-Human-agent API (§2, §4, §5, §8).
-
-Mounted under /human-agent . All routes except /auth/* require a
-human-agent JWT (role=human_agent) via get_current_human_agent.
-
-Concepts:
-  - Listing is scoped to assigned AI agents via the join in §2.
-  - Claiming sets assigned_human_agent_id + status=human (only if queued).
-  - Sending a message inserts a ChatMessage (sender_type=human_agent) and
-    broadcasts to the visitor WS via handoff_service + sends a fallback
-    email via email_provider.
-"""
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import json
 import logging
 import re
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session, joinedload
 
 from db import models
+from db.database import SessionLocal, BackgroundSession
 from services.supabase_auth import get_db
 from services.human_agent_auth import (
     create_human_agent_jwt,
     get_current_human_agent,
     hash_password,
     verify_password,
+    verify_password_with_dummy,
+    find_human_by_invite_token,
 )
 from services import handoff_service
 from services.presence import (
     human_agent_connected,
     human_agent_disconnected,
+    human_agent_heartbeat,
     is_any_human_online_for_agent_sync,
 )
 from services.email_provider import send_human_reply_email, send_queued_fallback_email
+from utils.rate_limit import create_limiter
 
 logger = logging.getLogger(__name__)
+limiter = create_limiter()
+# One fallback email per conversation per 5 minutes (in-memory; use Redis for multi-worker)
+_email_debounce: dict[str, float] = {}
 
 router = APIRouter()
 auth_router = APIRouter()
-# We'll mount auth_router under /human-agent/auth and `router` under /human-agent
 
-# ── Schemas ──────────────────────────────────────────────────────────────────
 
 class AcceptInviteRequest(BaseModel):
     token: str = Field(..., min_length=10, max_length=256)
@@ -65,9 +62,8 @@ class SendMessageRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=8000)
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _conversation_out(conv: models.Conversation, include_messages: bool = False, db: Session | None = None) -> dict:
+def _conversation_out(conv: models.Conversation, include_messages: bool = False, db: Session | None = None, message_limit: int = 50, message_after_id: int | None = None) -> dict:
     base = {
         "id": str(conv.id),
         "agent_id": str(conv.agent_id),
@@ -84,12 +80,10 @@ def _conversation_out(conv: models.Conversation, include_messages: bool = False,
     if conv.assigned_human_agent:
         base["assigned_human_agent_name"] = conv.assigned_human_agent.name or conv.assigned_human_agent.email
     if include_messages and db is not None and conv.session_id:
-        rows = (
-            db.query(models.ChatMessage)
-            .filter(models.ChatMessage.session_id == conv.session_id)
-            .order_by(models.ChatMessage.created_at.asc())
-            .all()
-        )
+        q = db.query(models.ChatMessage).filter(models.ChatMessage.session_id == conv.session_id)
+        if message_after_id is not None:
+            q = q.filter(models.ChatMessage.id > message_after_id)
+        rows = q.order_by(models.ChatMessage.created_at.asc()).limit(min(message_limit, 100)).all()
         base["messages"] = [
             {
                 "id": r.id,
@@ -101,13 +95,13 @@ def _conversation_out(conv: models.Conversation, include_messages: bool = False,
             }
             for r in rows
         ]
+        base["messages_has_more"] = len(rows) == min(message_limit, 100)
     elif include_messages:
         base["messages"] = []
     return base
 
 
 def _require_assignment(db: Session, human_agent: models.HumanAgent, conv: models.Conversation) -> None:
-    """Enforce §2 authorization rule."""
     # conv.agent_id must be in human_agent's assignments
     exists = (
         db.query(models.AgentAssignment)
@@ -122,7 +116,6 @@ def _require_assignment(db: Session, human_agent: models.HumanAgent, conv: model
 
 
 def _should_send_fallback(conv: models.Conversation) -> bool:
-    """Gate on notified_at (§5 step 4)."""
     if not conv.visitor_email:
         return False
     if conv.notified_at is None:
@@ -133,16 +126,14 @@ def _should_send_fallback(conv: models.Conversation) -> bool:
 
 
 async def _maybe_send_queued_fallback(db: Session, conv: models.Conversation) -> None:
-    """Called after conversation transitions to `queued`. Implements §5."""
+    """Called after a conversation transitions to queued."""
     if conv.status != "queued":
         return
     if not _should_send_fallback(conv):
         return
-    # Check presence
     if is_any_human_online_for_agent_sync(db, conv.agent_id):
         logger.info("fallback_skipped_human_online conversation_id=%s agent_id=%s", conv.id, conv.agent_id)
         return
-    # Send email
     try:
         agent = db.query(models.Agent).filter(models.Agent.id == conv.agent_id).first()
         agent_name = agent.name if agent else None
@@ -154,22 +145,20 @@ async def _maybe_send_queued_fallback(db: Session, conv: models.Conversation) ->
         logger.exception("fallback_email_failed conversation_id=%s", conv.id)
 
 
-# ── Auth: accept-invite ──────────────────────────────────────────────────────
 
 @auth_router.post("/accept-invite")
-def accept_invite(payload: AcceptInviteRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def accept_invite(payload: AcceptInviteRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     token = payload.token.strip()
-    ha = db.query(models.HumanAgent).filter(models.HumanAgent.invite_token == token).first()
+    ha = find_human_by_invite_token(db, token)
     if not ha:
         raise HTTPException(status_code=404, detail="Invalid or expired invite token")
     if ha.status == "active":
         raise HTTPException(status_code=400, detail="Invite already accepted. Please log in.")
-    # Check expiry
     if ha.invite_token_expires and ha.invite_token_expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         raise HTTPException(status_code=410, detail="Invite link has expired. Ask the account owner to resend it.")
     if ha.status == "disabled":
         raise HTTPException(status_code=403, detail="This invite has been disabled")
-    # Set password
     try:
         ha.password_hash = hash_password(payload.password)
     except ValueError as exc:
@@ -198,11 +187,13 @@ def accept_invite(payload: AcceptInviteRequest, db: Session = Depends(get_db)):
 
 # Also accept GET for debugging invite validity (optional)
 @auth_router.get("/invite-status")
-def invite_status(token: str = Query(..., min_length=10), db: Session = Depends(get_db)):
-    ha = db.query(models.HumanAgent).filter(models.HumanAgent.invite_token == token).first()
+@limiter.limit("10/minute")
+def invite_status(request: Request, response: Response, token: str = Query(..., min_length=10), db: Session = Depends(get_db)):
+    ha = find_human_by_invite_token(db, token)
     if not ha:
         raise HTTPException(status_code=404, detail="Invalid invite token")
     expired = bool(ha.invite_token_expires and ha.invite_token_expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc))
+    # Never return the invite token; keep the payload minimal
     return {
         "email": ha.email,
         "name": ha.name,
@@ -212,30 +203,51 @@ def invite_status(token: str = Query(..., min_length=10), db: Session = Depends(
     }
 
 
-# ── Auth: login ──────────────────────────────────────────────────────────────
 
 @auth_router.post("/login")
-def human_agent_login(payload: LoginRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def human_agent_login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     email = payload.email.lower().strip()
-    # Lookup by email (case-insensitive). If multiple owners share same email, pick the first active one.
-    # For stricter isolation, the invite email could be owner-scoped, but login can't know owner yet.
     candidates = db.query(models.HumanAgent).filter(models.HumanAgent.email == email).all()
     if not candidates:
+        # Always burn a bcrypt compare so a missing user is not detectable by timing
+        verify_password_with_dummy(payload.password, None)
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    # Prefer active; if multiple active, use most recent
+    # The same email may exist under several owners; require disambiguation
+    distinct_owners = {c.owner_user_id for c in candidates if c.status == "active"}
+    if len(distinct_owners) > 1:
+        matches = [c for c in candidates if c.status == "active" and c.password_hash and verify_password(payload.password, c.password_hash)]
+        if len(matches) == 1:
+            matched = matches[0]
+            jwt_token = create_human_agent_jwt(matched)
+            logger.warning("cross_tenant_login_single_match email=%s owners=%s chosen=%s", email, distinct_owners, matched.owner_user_id)
+            return {
+                "access_token": jwt_token,
+                "token_type": "bearer",
+                "human_agent": {"id": str(matched.id), "email": matched.email, "name": matched.name, "owner_user_id": matched.owner_user_id},
+            }
+        elif len(matches) > 1:
+            # Multiple tenants have same email+password — ambiguous
+            logger.warning("cross_tenant_login_ambiguous email=%s owners=%s", email, distinct_owners)
+            raise HTTPException(status_code=409, detail="This email exists in multiple workspaces with same password. Please contact owner for a distinct login link.")
+        else:
+            # no match
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+
     active = [c for c in candidates if c.status == "active" and c.password_hash]
     if not active:
-        # Give specific error for invited-but-not-yet-accepted
         invited = [c for c in candidates if c.status == "invited"]
         if invited:
             raise HTTPException(status_code=403, detail="Invite not yet accepted. Please use the invite link to set your password first.")
+        verify_password_with_dummy(payload.password, None)
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    # If multiple active (same email under different owners — rare), try password against each
     matched: models.HumanAgent | None = None
     for cand in sorted(active, key=lambda x: x.created_at or datetime.min, reverse=True):
         if cand.password_hash and verify_password(payload.password, cand.password_hash):
             matched = cand
             break
+        else:
+            pass
     if not matched:
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
@@ -253,12 +265,10 @@ def human_agent_login(payload: LoginRequest, db: Session = Depends(get_db)):
     }
 
 
-# ── Me ───────────────────────────────────────────────────────────────────────
 
 @router.get("/me")
 def get_me(human_agent: models.HumanAgent = Depends(get_current_human_agent), db: Session = Depends(get_db)):
     assignments = db.query(models.AgentAssignment).filter(models.AgentAssignment.human_agent_id == human_agent.id).all()
-    # Resolve agent names for convenience
     agent_ids = [a.agent_id for a in assignments]
     agents = []
     if agent_ids:
@@ -275,7 +285,13 @@ def get_me(human_agent: models.HumanAgent = Depends(get_current_human_agent), db
     }
 
 
-# ── Agents assigned to this human agent (for switcher) ───────────────────────
+@router.get("/ws-ticket")
+def get_ws_ticket(human_agent: models.HumanAgent = Depends(get_current_human_agent)):
+    from services.human_agent_auth import create_ws_ticket
+    ticket = create_ws_ticket(human_agent)
+    return {"ticket": ticket, "expires_in": 60}
+
+
 
 @router.get("/agents")
 def list_assigned_agents(human_agent: models.HumanAgent = Depends(get_current_human_agent), db: Session = Depends(get_db)):
@@ -287,7 +303,6 @@ def list_assigned_agents(human_agent: models.HumanAgent = Depends(get_current_hu
     return [{"id": str(a.id), "name": a.name, "avatar_url": a.avatar_url, "created_at": a.created_at.isoformat() if a.created_at else None} for a in agents]
 
 
-# ── Conversations list ───────────────────────────────────────────────────────
 
 @router.get("/conversations")
 def list_conversations(
@@ -333,11 +348,12 @@ def list_conversations(
     }
 
 
-# ── Conversation detail ──────────────────────────────────────────────────────
 
 @router.get("/conversations/{conversation_id}")
 def get_conversation(
     conversation_id: str,
+    limit: int = Query(50, ge=1, le=100),
+    after_id: int | None = Query(None, description="Cursor pagination: return messages with id > after_id"),
     human_agent: models.HumanAgent = Depends(get_current_human_agent),
     db: Session = Depends(get_db),
 ):
@@ -349,10 +365,9 @@ def get_conversation(
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
     _require_assignment(db, human_agent, conv)
-    return _conversation_out(conv, include_messages=True, db=db)
+    return _conversation_out(conv, include_messages=True, db=db, message_limit=limit, message_after_id=after_id)
 
 
-# ── Claim ────────────────────────────────────────────────────────────────────
 
 @router.post("/conversations/{conversation_id}/claim")
 async def claim_conversation(
@@ -364,38 +379,40 @@ async def claim_conversation(
         cid = uuid.UUID(conversation_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    conv = db.query(models.Conversation).filter(models.Conversation.id == cid).first()
-    if not conv:
+    # Load conv first to check assignment (requires read)
+    conv_check = db.query(models.Conversation).filter(models.Conversation.id == cid).first()
+    if not conv_check:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    _require_assignment(db, human_agent, conv)
+    _require_assignment(db, human_agent, conv_check)
 
-    if conv.status == "resolved":
+    if conv_check.status == "resolved":
         raise HTTPException(status_code=400, detail="Conversation is already resolved")
-    if conv.status == "human":
-        if conv.assigned_human_agent_id == human_agent.id:
-            return _conversation_out(conv)
+    if conv_check.status == "human":
+        if conv_check.assigned_human_agent_id == human_agent.id:
+            return _conversation_out(conv_check)
         raise HTTPException(status_code=409, detail="Conversation already claimed by another agent")
-    if conv.status not in ("queued", "collecting_email", "bot"):
-        # Allow claiming from queued only per spec, but be lenient for collecting_email with email present
-        if conv.status != "queued":
-            raise HTTPException(status_code=400, detail=f"Cannot claim conversation in '{conv.status}' status")
 
-    # Perform transition
-    from services.handoff_service import transition_status
+    # H1: atomic conditional update
+    from services.handoff_service import atomic_claim_conversation
 
-    # Need to run transition_status in thread if db session is used elsewhere? It's sync.
-    # Wrap in asyncio.to_thread to avoid blocking? Keep sync for now.
-    transition_status(db, conv, "human", human_agent=human_agent, notify=True)
-
-    # Also fan-out via presence-aware broadcast for human ws
+    conv = atomic_claim_conversation(db, cid, human_agent)
+    # Single fan-out: broadcast_to_conversation reaches the visitor and subscribed humans
     await handoff_service.broadcast_to_conversation(str(conv.id), {
-        "type": "agent_claimed",
-        "agent_name": human_agent.name or human_agent.email,
+        "type": "status_change",
+        "status": "human",
         "conversation_id": str(conv.id),
+        "agent_name": human_agent.name or human_agent.email,
         "human_agent_id": str(human_agent.id),
     })
-    # Also send a system message?
-    # Add ChatMessage system note
+    await handoff_service.broadcast_to_humans_for_agent(conv.agent_id, {
+        "type": "status_change",
+        "status": "human",
+        "conversation_id": str(conv.id),
+        "agent_id": str(conv.agent_id),
+        "agent_name": human_agent.name or human_agent.email,
+        "human_agent_id": str(human_agent.id),
+    })
+    # Also send a system message
     if conv.session_id:
         try:
             db.add(models.ChatMessage(
@@ -414,7 +431,6 @@ async def claim_conversation(
     return _conversation_out(conv)
 
 
-# ── Send message ─────────────────────────────────────────────────────────────
 
 @router.post("/conversations/{conversation_id}/messages")
 async def send_message(
@@ -447,7 +463,6 @@ async def send_message(
     if not content:
         raise HTTPException(status_code=422, detail="Message content is required")
 
-    # Insert ChatMessage
     msg = models.ChatMessage(
         session_id=conv.session_id,
         role="assistant",
@@ -472,40 +487,36 @@ async def send_message(
         "created_at": msg.created_at.isoformat() if msg.created_at else None,
         "agent_id": str(conv.agent_id),
     }
-    # Broadcast to visitor WS (and any human ws listening on same conversation channel)
+    # Single fan-out: no separate broadcast_to_humans_for_agent, so nothing is delivered twice
     await handoff_service.broadcast_to_conversation(str(conv.id), payload)
-    # Also fan-out to any other human dashboards assigned to this AI agent (§4 live updates)
-    try:
-        await handoff_service.broadcast_to_humans_for_agent(conv.agent_id, payload)
-    except Exception:
-        logger.exception("human_message_human_broadcast_failed conversation_id=%s", conv.id)
 
-    # Also pg_notify for multi-instance
-    try:
-        handoff_service.pg_notify(str(conv.id), {
-            "type": "message",
-            "sender_type": "human_agent",
-            "sender_name": human_agent.name or human_agent.email,
-            "content": content,
-            "conversation_id": str(conv.id),
-        })
-    except Exception:
-        pass
-
-    # §5: send transactional email to visitor with reply + link back
+    # Debounced fallback email, sent off the event loop
     if conv.visitor_email:
-        try:
-            agent = db.query(models.Agent).filter(models.Agent.id == conv.agent_id).first()
-            send_human_reply_email(
-                to_email=conv.visitor_email,
-                reply_text=content,
-                conversation_id=str(conv.id),
-                agent_name=agent.name if agent else None,
-                from_name=human_agent.name or human_agent.email,
-            )
-            logger.info("human_reply_email_sent conversation_id=%s to=%s", conv.id, conv.visitor_email)
-        except Exception:
-            logger.exception("human_reply_email_failed conversation_id=%s", conv.id)
+        now = time.time()
+        last = _email_debounce.get(str(conv.id), 0)
+        should_send = (now - last) > 300
+        if should_send:
+            _email_debounce[str(conv.id)] = now
+            try:
+                agent = db.query(models.Agent).filter(models.Agent.id == conv.agent_id).first()
+                agent_name = agent.name if agent else None
+                # Blocking Brevo call, run in a worker thread
+                try:
+                    await asyncio.to_thread(
+                        send_human_reply_email,
+                        to_email=conv.visitor_email,
+                        reply_text=content,
+                        conversation_id=str(conv.id),
+                        agent_name=agent_name,
+                        from_name=human_agent.name or human_agent.email,
+                    )
+                    logger.info("human_reply_email_sent conversation_id=%s to=%s", conv.id, conv.visitor_email)
+                except Exception:
+                    logger.exception("human_reply_email_failed conversation_id=%s", conv.id)
+            except Exception:
+                logger.exception("human_reply_email_prepare_failed conversation_id=%s", conv.id)
+        else:
+            logger.info("human_reply_email_debounced conversation_id=%s age=%.0fs", conv.id, now - last)
 
     logger.info("human_message_sent conversation_id=%s human_agent_id=%s", conv.id, human_agent.id)
     return {
@@ -516,7 +527,6 @@ async def send_message(
     }
 
 
-# ── Resolve ──────────────────────────────────────────────────────────────────
 
 @router.post("/conversations/{conversation_id}/resolve")
 async def resolve_conversation(
@@ -565,42 +575,60 @@ async def resolve_conversation(
     return _conversation_out(conv)
 
 
-# ── WebSocket for human agents ───────────────────────────────────────────────
 
 @router.websocket("/ws")
 async def human_agent_ws(
     websocket: WebSocket,
-    db: Session = Depends(get_db),
 ):
     """
-    Live updates for all conversations assigned to this human agent.
+    Live updates for every conversation assigned to this human agent.
 
-    Auth: Bearer token via header OR `?token=<jwt>` query param.
-    Upon connect, registers presence. Broadcasts all conversation events
-    (status_change, message, resolved) for the agent's assigned conversations.
+    No DB session is held for the socket lifetime: auth happens in a scoped
+    SessionLocal during the handshake.
 
-    For simplicity, the client subscribes implicitly to every conversation
-    whose agent_id is in their assignment set — no explicit subscribe message
-    needed. :contentReference[oaicite:0]{index=0}
+    Auth: Authorization header, Sec-WebSocket-Protocol, or ?token (legacy, deprecated).
+    JWT (iss/aud) or a short-lived ws_ticket (aud=human_agent_ws) is accepted. The
+    socket is closed after 90s without a pong.
     """
-    # Resolve token from header or query
+    # Handshake auth happens in a scoped session
+    # Prefer Sec-WebSocket-Protocol token, then Authorization, then query param
     token = None
-    auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
-    if auth and auth.lower().startswith("bearer "):
-        token = auth[7:].strip()
+    # Sec-WebSocket-Protocol: client may send "Bearer, <token>" or just token
+    proto = websocket.headers.get("sec-websocket-protocol") or websocket.headers.get("Sec-WebSocket-Protocol")
+    if proto:
+        # Could be comma-separated; pick last token-like part
+        for part in [p.strip() for p in proto.split(",")][::-1]:
+            if len(part) > 20 and "." in part:
+                token = part
+                break
+            if part.lower().startswith("bearer "):
+                token = part[7:].strip()
+                break
+    if not token:
+        auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
+        if auth and auth.lower().startswith("bearer "):
+            token = auth[7:].strip()
     if not token:
         token = websocket.query_params.get("token")
     if not token:
         await websocket.close(code=4401)
         return
 
-    # Verify JWT
+    # Verify JWT — try human_agent audience first, then ws ticket audience
     from services.human_agent_auth import decode_human_agent_jwt
-    try:
-        payload = decode_human_agent_jwt(token)
-    except HTTPException:
-        await websocket.close(code=4401)
-        return
+    payload = None
+    for aud in ("human_agent_ws", "human_agent"):
+        try:
+            payload = decode_human_agent_jwt(token, audience=aud)
+            break
+        except HTTPException:
+            continue
+    if payload is None:
+        try:
+            payload = decode_human_agent_jwt(token)  # legacy fallback
+        except HTTPException:
+            await websocket.close(code=4401)
+            return
     if payload.get("role") != "human_agent":
         await websocket.close(code=4403)
         return
@@ -609,26 +637,59 @@ async def human_agent_ws(
     except Exception:
         await websocket.close(code=4401)
         return
-    ha = db.query(models.HumanAgent).filter(models.HumanAgent.id == ha_uuid).first()
-    if not ha or ha.status != "active":
+    # Scoped DB lookup — do not hold session
+    ha = None
+    assigned_agent_ids: list[uuid.UUID] = []
+    try:
+        with SessionLocal() as db:
+            ha_row = db.query(models.HumanAgent).filter(models.HumanAgent.id == ha_uuid).first()
+            if not ha_row or ha_row.status != "active":
+                await websocket.close(code=4401)
+                return
+            # need ha info after session close
+            ha = ha_row
+            ha_id = str(ha_row.id)
+            ha_email = ha_row.email
+            ha_name = ha_row.name
+            rows = db.query(models.AgentAssignment).filter(models.AgentAssignment.human_agent_id == ha_row.id).all()
+            assigned_agent_ids = [r.agent_id for r in rows]
+            # For presence warm cache
+            cache_ids = {str(aid) for aid in assigned_agent_ids}
+            # we can't await inside with, so schedule after
+    except Exception:
+        logger.exception("human_ws_handshake_failed")
+        await websocket.close(code=1011)
+        return
+    if ha is None:
         await websocket.close(code=4401)
         return
 
-    await websocket.accept()
-    await human_agent_connected(str(ha.id))
-    logger.info("human_agent_ws_connected id=%s email=%s", ha.id, ha.email)
+    # Handshake done — accept and register presence
+    try:
+        # Warm the agent→humans cache
+        for aid in assigned_agent_ids:
+            try:
+                # fire-and-forget cache warm (best effort)
+                import asyncio as _a
+                # need running loop
+                try:
+                    loop0 = asyncio.get_running_loop()
+                    loop0.create_task(handoff_service.warm_agent_human_cache(str(aid), {ha_id}))
+                except RuntimeError:
+                    pass
+            except Exception:
+                pass
+    except Exception:
+        pass
 
-    # Determine which conversations to listen to: all conversation_ids for assigned agents
-    assigned_agent_ids = [r.agent_id for r in db.query(models.AgentAssignment).filter(models.AgentAssignment.human_agent_id == ha.id).all()]
+    await websocket.accept()
+    # Echo Sec-WebSocket-Protocol back to the client
+    await human_agent_connected(ha_id)
+    logger.info("human_agent_ws_connected id=%s email=%s", ha_id, ha_email)
 
     # Human registry: this single queue receives all events for this human's assigned agents
-    # (new queued conversations, status changes, messages). This is what gives the dashboard
-    # its live Queued/Active/Resolved tabs without needing per-conversation subscribe.
-    human_q = await handoff_service.register_human_ws(str(ha.id))
+    human_q = await handoff_service.register_human_ws(ha_id)
 
-    # Also subscribe to per-conversation channels for existing open conversations
-    # (so messages sent directly to conversation_id reach this socket as well,
-    # and to support the optional client-side `subscribe` message for detail view)
     from services.handoff_service import _ws_registry, _registry_lock
 
     subscribed_conv_ids: set[str] = set()
@@ -641,23 +702,27 @@ async def human_agent_ws(
         subscribed_conv_ids.add(conv_id)
 
     if assigned_agent_ids:
-        existing = db.query(models.Conversation.id).filter(
-            models.Conversation.agent_id.in_(assigned_agent_ids),
-            models.Conversation.status != "resolved",
-        ).all()
-        for (cid,) in existing:
-            await _subscribe_to_conversation(str(cid))
+        # Query with a fresh scoped session
+        try:
+            with SessionLocal() as db2:
+                existing = db2.query(models.Conversation.id).filter(
+                    models.Conversation.agent_id.in_(assigned_agent_ids),
+                    models.Conversation.status != "resolved",
+                ).all()
+                for (cid,) in existing:
+                    await _subscribe_to_conversation(str(cid))
+        except Exception:
+            logger.exception("human_ws_subscribe_init_failed")
 
     # Send initial snapshot so dashboard can populate without REST round-trip
     try:
         await websocket.send_json({
             "type": "connected",
-            "human_agent_id": str(ha.id),
+            "human_agent_id": ha_id,
             "assigned_agent_ids": [str(x) for x in assigned_agent_ids],
         })
     except Exception:
-        # Client already disconnected (e.g. React StrictMode double-mount) — clean up and exit
-        await handoff_service.unregister_human_ws(str(ha.id), human_q)
+        await handoff_service.unregister_human_ws(ha_id, human_q)
         async with _registry_lock:
             for cid in list(subscribed_conv_ids):
                 bucket = _ws_registry.get(cid)
@@ -665,16 +730,17 @@ async def human_agent_ws(
                     bucket.discard(human_q)
                     if not bucket:
                         _ws_registry.pop(cid, None)
-        await human_agent_disconnected(str(ha.id))
+        await human_agent_disconnected(ha_id)
         try:
             await websocket.close()
         except Exception:
             pass
         return
 
-    # Also send current presence / counts if needed
-    # Heartbeat
+    # Heartbeat + pong deadline
     ping_interval = 25
+    pong_deadline_seconds = 90
+    last_pong = asyncio.get_event_loop().time()
 
     async def _pump():
         while True:
@@ -690,29 +756,39 @@ async def human_agent_ws(
         while True:
             try:
                 data = await asyncio.wait_for(websocket.receive_json(), timeout=ping_interval)
-                # Handle client messages: ping/pong, subscribe, etc.
-                msg_type = data.get("type")
+                msg_type = data.get("type") if isinstance(data, dict) else None
                 if msg_type == "ping":
                     await websocket.send_json({"type": "pong"})
+                    last_pong = asyncio.get_event_loop().time()
+                    await human_agent_heartbeat(ha_id)
+                elif msg_type == "pong":
+                    last_pong = asyncio.get_event_loop().time()
+                    await human_agent_heartbeat(ha_id)
                 elif msg_type == "subscribe" and data.get("conversation_id"):
                     cid = str(data["conversation_id"])
-                    # Validate assignment before subscribing
                     try:
                         cid_u = uuid.UUID(cid)
-                        conv = db.query(models.Conversation).filter(models.Conversation.id == cid_u).first()
-                        if conv and conv.agent_id in assigned_agent_ids:
-                            await _subscribe_to_conversation(cid)
-                            # Send current state
-                            await websocket.send_json({
-                                "type": "status_change",
-                                "status": conv.status,
-                                "conversation_id": cid,
-                            })
+                        with SessionLocal() as db3:
+                            conv = db3.query(models.Conversation).filter(models.Conversation.id == cid_u).first()
+                            if conv and conv.agent_id in assigned_agent_ids:
+                                await _subscribe_to_conversation(cid)
+                                await websocket.send_json({
+                                    "type": "status_change",
+                                    "status": conv.status,
+                                    "conversation_id": cid,
+                                })
                     except Exception:
                         pass
-                elif msg_type == "pong":
-                    pass
+                    last_pong = asyncio.get_event_loop().time()
+                    await human_agent_heartbeat(ha_id)
+                else:
+                    last_pong = asyncio.get_event_loop().time()
+                    await human_agent_heartbeat(ha_id)
             except asyncio.TimeoutError:
+                # Check pong deadline before sending ping
+                if asyncio.get_event_loop().time() - last_pong > pong_deadline_seconds:
+                    logger.info("human_agent_ws_pong_timeout id=%s", ha_id)
+                    break
                 try:
                     await websocket.send_json({"type": "ping"})
                 except Exception:
@@ -725,7 +801,6 @@ async def human_agent_ws(
         pump_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await pump_task
-        # Unsubscribe from all per-conversation buckets
         async with _registry_lock:
             for cid in list(subscribed_conv_ids):
                 bucket = _ws_registry.get(cid)
@@ -733,10 +808,9 @@ async def human_agent_ws(
                     bucket.discard(human_q)
                     if not bucket:
                         _ws_registry.pop(cid, None)
-        # Unregister from global human registry
-        await handoff_service.unregister_human_ws(str(ha.id), human_q)
-        await human_agent_disconnected(str(ha.id))
-        logger.info("human_agent_ws_disconnected id=%s", ha.id)
+        await handoff_service.unregister_human_ws(ha_id, human_q)
+        await human_agent_disconnected(ha_id)
+        logger.info("human_agent_ws_disconnected id=%s", ha_id)
 
     try:
         await websocket.close()

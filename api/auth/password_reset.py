@@ -23,11 +23,7 @@ async def forgot_password(
     response: Response,
     body: schemas.ForgotPasswordRequest,
 ):
-    """
-    Deprecated password-reset endpoint — now an alias for OTP magic-link.
-    Kept for backward compatibility: triggers the same Supabase OTP email as
-    POST /auth/otp/request so older clients still get a sign-in email.
-    """
+    """Deprecated alias for /auth/otp/request, kept so older clients still receive a sign-in email."""
     normalized_email = body.email.lower().strip()
     redirect_to = f"{FRONTEND_URL}/auth/callback" if FRONTEND_URL else None
     payload: dict = {"email": normalized_email}
@@ -40,7 +36,7 @@ async def forgot_password(
     except Exception as exc:
         if _is_rate_limit_error(exc):
             raise HTTPException(status_code=429, detail="Too many email requests. Please wait and try again.") from exc
-        # Swallow generic errors to avoid email enumeration, same as original behavior
+        # Swallow errors to avoid email enumeration
         pass
     return {"message": "Check your email for a magic link to sign in. It expires in a few minutes."}
 

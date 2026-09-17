@@ -1,14 +1,6 @@
-"""
-Groq direct client — fast, clean, scalable replacement for LiteLLM.
+"""Groq client factories: sync `Groq` and per-event-loop `AsyncGroq` singletons.
 
-- Sync client: `Groq`  -> used by `generate_answer` / `stream_answer`
-- Async client: `AsyncGroq` -> used by `astream_answer` (high concurrency chat)
-- Reuses singletons, honours GROQ_API_KEY via `utils.env.get_secret`
-- Strips the legacy `groq/` prefix so DB values like `groq/llama-3.1-8b-instant`
-  map to Groq's native id `llama-3.1-8b-instant` / `openai/gpt-oss-20b`.
-- Best-practice defaults:  timeout=30s, max_retries=2, keepalive connection pool.
-
-Refs: https://console.groq.com/docs/text-chat  / quickstart
+Model ids are normalised (legacy `groq/` prefix stripped) before use.
 """
 
 from __future__ import annotations
@@ -23,9 +15,6 @@ from utils.env import get_secret
 
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------
-# Config
-# ------------------------------------------------------------
 _GROQ_TIMEOUT_SECONDS = float(os.getenv("GROQ_TIMEOUT_SECONDS", "30"))
 _GROQ_MAX_RETRIES = int(os.getenv("GROQ_MAX_RETRIES", "2"))
 
@@ -37,19 +26,15 @@ _sync_client_key: Optional[str] = None
 _async_clients: dict[tuple[int, int], tuple[object, str]] = {}
 
 
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
 def get_groq_api_key() -> Optional[str]:
-    """Fetch GROQ_API_KEY via centralized secret helper (supports .env + env)."""
+    """Resolve GROQ_API_KEY from the process env or .env."""
     return get_secret("GROQ_API_KEY", prefixes=("gsk_",))
 
 
 def normalize_groq_model(model: str) -> str:
     """
-    Strip legacy `groq/` prefix.
-    DB stores `groq/llama-3.1-8b-instant`, Groq API expects `llama-3.1-8b-instant`
-    or `openai/gpt-oss-20b`. Keeps id untouched otherwise.
+    Strip the legacy `groq/` prefix so DB values like `groq/llama-3.1-8b-instant`
+    map to Groq's native model ids.
     """
     if not model:
         return model
@@ -66,9 +51,6 @@ def _require_api_key() -> str:
     return key
 
 
-# ------------------------------------------------------------
-# Sync client (blocking / streaming iterator)
-# ------------------------------------------------------------
 def get_groq_client():
     """
     Thread-safe singleton Groq sync client.
@@ -94,7 +76,6 @@ def get_groq_client():
             ) from exc
 
         # Groq SDK handles its own httpx.Client pooling internally.
-        # timeout as float seconds, max_retries as recommended by docs.
         client = Groq(
             api_key=api_key,
             timeout=_GROQ_TIMEOUT_SECONDS,
@@ -106,14 +87,10 @@ def get_groq_client():
         return client
 
 
-# ------------------------------------------------------------
-# Async client (for astream_answer)
-# ------------------------------------------------------------
 def get_async_groq_client():
     """
-    Per-event-loop AsyncGroq client — scalable for high concurrency.
-    Mirrors services/http_client pattern (thread + loop id) to avoid
-    cross-loop usage of the underlying httpx.AsyncClient.
+    Per-event-loop AsyncGroq client, keyed by thread + loop id so the underlying
+    httpx.AsyncClient is never shared across event loops.
     """
     api_key = _require_api_key()
 
@@ -159,16 +136,11 @@ def get_async_groq_client():
         return client
 
 
-# ------------------------------------------------------------
-# Lifecycle — call on app shutdown (main.py)
-# ------------------------------------------------------------
 def close_groq_clients() -> None:
-    """Best-effort close of sync client; async client prefers async close."""
     global _sync_client, _sync_client_key
     with _lock:
         if _sync_client is not None:
             try:
-                # Groq sync client exposes .close() / internal _client
                 close_fn = getattr(_sync_client, "close", None)
                 if callable(close_fn):
                     close_fn()
@@ -180,8 +152,7 @@ def close_groq_clients() -> None:
 
 
 async def aclose_groq_clients(close_all: bool = True) -> None:
-    """Async close — await AsyncGroq's underlying httpx clients."""
-    # Snapshot outside lock to avoid holding lock across await
+    # Snapshot outside the lock so it is not held across the awaits below
     if close_all:
         with _lock:
             clients = list(_async_clients.items())

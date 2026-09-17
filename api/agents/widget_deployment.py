@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from api.auth.auth import get_db
 from db import models
-from db.database import BackgroundSession
+from db.database import BackgroundSession, SessionLocal
 from models.widget_deployment import new_deployment_id
 from services.redis_client import (
     cache_key,
@@ -35,13 +35,24 @@ from services.handoff_service import (
     broadcast_to_humans_for_agent,
     get_or_create_conversation,
     transition_status,
+    get_transfer_tool_for_difficulty,
+    get_handoff_policy_for_difficulty,
+    get_handoff_suppression_message,
+    should_allow_handoff,
+    VALID_HANDOFF_DIFFICULTIES,
+    DEFAULT_HANDOFF_DIFFICULTY,
 )
 from utils.jwt import get_current_user
 from utils.widget_security import (
     generate_widget_token,
     get_rate_limit_key,
     detect_abuse_signature,
+    generate_visitor_token,
+    verify_visitor_token,
+    verify_widget_token,
 )
+from utils.rate_limit import create_limiter as _create_limiter
+limiter = _create_limiter()
 
 router = APIRouter()
 public_router = APIRouter()
@@ -149,7 +160,7 @@ def _visitor_hash(deployment_id: int, visitor_id: str, request: Request) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-# High-performance Sliding Window Counter Rate Limiter
+# Weighted sliding-window limiter, used when Redis is unavailable
 _rate_limit_lock = threading.Lock()
 _rate_limit_data = {
     "current_window": {},
@@ -189,12 +200,10 @@ async def _check_rate_limit(deployment_public_id: str, visitor_id: str, request:
             logger.warning("redis_rate_limit_failed deployment_id=%s", deployment_public_id, exc_info=True)
 
     now = time.time()
-    # Calculate the start of the current 60-second window
     window_start = int(now / RATE_LIMIT_WINDOW_SECONDS) * RATE_LIMIT_WINDOW_SECONDS
     
     with _rate_limit_lock:
         if window_start > _rate_limit_data["last_window_start"]:
-            # Rotate windows
             if window_start > _rate_limit_data["last_window_start"] + RATE_LIMIT_WINDOW_SECONDS:
                 _rate_limit_data["previous_window"] = {}
             else:
@@ -304,17 +313,18 @@ def _get_or_create_deployment(db: Session, agent: models.Agent) -> models.Widget
     return deployment
 
 
-def _history_for_prompt(db: Session, session_id: uuid.UUID, max_messages: int = 8, max_chars: int = 3000) -> list[dict[str, str]]:
-    rows = (
-        db.query(models.ChatMessage)
-        .filter(models.ChatMessage.session_id == session_id)
-        .order_by(models.ChatMessage.created_at.desc())
-        .limit(max_messages)
-        .all()
-    )
+def _history_for_prompt(db: Session, session_id: uuid.UUID, max_messages: int = 8, max_chars: int = 3000, conversation_created_at: datetime | None = None) -> list[dict[str, str]]:
+    # Scope history to this conversation and drop human/system turns
+    q = db.query(models.ChatMessage).filter(models.ChatMessage.session_id == session_id)
+    if conversation_created_at is not None:
+        # Only messages after conversation was created — prevents bleed from prior resolved conversation on same session_id
+        q = q.filter(models.ChatMessage.created_at >= conversation_created_at)
+    rows = q.order_by(models.ChatMessage.created_at.desc()).limit(max_messages).all()
     history: list[dict[str, str]] = []
     total = 0
     for row in reversed(rows):
+        if getattr(row, "sender_type", None) in ("human_agent", "system"):
+            continue
         if row.role not in {"user", "assistant"}:
             continue
         content = row.content.strip()
@@ -327,15 +337,38 @@ def _history_for_prompt(db: Session, session_id: uuid.UUID, max_messages: int = 
     return history
 
 
-async def _history_for_prompt_async(session_id: uuid.UUID, max_messages: int = 8, max_chars: int = 3000) -> list[dict[str, str]]:
+async def _history_for_prompt_async(session_id: uuid.UUID, max_messages: int = 8, max_chars: int = 3000, conversation_created_at: datetime | None = None) -> list[dict[str, str]]:
     def _load_history() -> list[dict[str, str]]:
         history_db = BackgroundSession()
         try:
-            return _history_for_prompt(history_db, session_id, max_messages=max_messages, max_chars=max_chars)
+            return _history_for_prompt(history_db, session_id, max_messages=max_messages, max_chars=max_chars, conversation_created_at=conversation_created_at)
         finally:
             history_db.close()
 
     return await asyncio.to_thread(_load_history)
+
+
+def _is_handoff_effectively_enabled(db: Session, agent_id: uuid.UUID) -> bool:
+    """
+    Owner toggle + team gate: handoff is effective only if
+    - AgentConfig.human_handoff_enabled is True AND
+    - at least one active human agent is assigned to this agent.
+    Defaults to OFF (no team -> OFF).
+    """
+    try:
+        cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent_id).first()
+        enabled_cfg = bool(getattr(cfg, 'human_handoff_enabled', False)) if cfg else False
+        if not enabled_cfg:
+            return False
+        active = db.query(models.HumanAgent).join(
+            models.AgentAssignment, models.HumanAgent.id == models.AgentAssignment.human_agent_id
+        ).filter(
+            models.AgentAssignment.agent_id == agent_id,
+            models.HumanAgent.status == 'active'
+        ).count()
+        return active > 0
+    except Exception:
+        return False
 
 
 @router.get("/{agent_id}/widget-deployment")
@@ -412,7 +445,6 @@ def generate_deployment_token(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    """Generate a signed token for enhanced security (optional)"""
     agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -460,9 +492,7 @@ async def public_widget_telemetry(
     deployment_id: str,
     request: Request,
 ):
-    """Log widget telemetry events for monitoring and analytics"""
     try:
-        # Parse JSON manually to handle both dict and raw body
         body = await request.json()
         event = body.get("event", "unknown")
         data = body.get("data", {})
@@ -488,12 +518,29 @@ async def public_widget_chat(
     db: Session = Depends(get_db)
 ):
     started = time.perf_counter()
-    deployment = (
-        db.query(models.WidgetDeployment)
-        .options(joinedload(models.WidgetDeployment.agent).joinedload(models.Agent.config))
-        .filter(models.WidgetDeployment.deployment_id == deployment_id)
-        .first()
-    )
+    # Load deployment without eagerly joining AgentConfig — resilient to missing migration column
+    # If the new handoff columns haven't been migrated yet, the joinedload would crash with UndefinedColumn.
+    try:
+        deployment = (
+            db.query(models.WidgetDeployment)
+            .options(joinedload(models.WidgetDeployment.agent).joinedload(models.Agent.config))
+            .filter(models.WidgetDeployment.deployment_id == deployment_id)
+            .first()
+        )
+    except Exception as exc:
+        # Fallback: load without config and treat handoff as disabled (pre-migration)
+        if "human_handoff" in str(exc):
+            logger.warning("widget_chat_fallback_no_handoff_columns deployment_id=%s err=%s", deployment_id, exc)
+            db.rollback()
+            deployment = (
+                db.query(models.WidgetDeployment)
+                .options(joinedload(models.WidgetDeployment.agent))
+                .filter(models.WidgetDeployment.deployment_id == deployment_id)
+                .first()
+            )
+            # ensure agent.config lazy load won't re-trigger the bad column — we will handle via raw query below
+        else:
+            raise
     if not deployment or not deployment.is_enabled:
         raise HTTPException(status_code=404, detail="Widget is not available")
     host = _origin_host(request)
@@ -522,8 +569,6 @@ async def public_widget_chat(
         raise HTTPException(status_code=404, detail="Widget is not available")
 
     # ── Capture immutable agent/config scalars BEFORE any db.commit() expires them.
-    # This prevents DetachedInstanceError inside the streaming generator (agent
-    # becomes expired after db.commit() due to expire_on_commit=True).
     agent_instructions = agent.instructions or ""
     agent_name = agent.name or "Support"
     agent_model = agent.model
@@ -531,12 +576,56 @@ async def public_widget_chat(
     user_id_value = agent.user_id
     deployment_int_id = deployment.id
     deployment_public_id = deployment.deployment_id
-    cfg = agent.config
-    use_retrieval = bool(cfg.retrieval_enabled) if cfg else False
-    top_k = min(int(cfg.retrieval_top_k) if cfg else 4, CHAT_RETRIEVAL_TOP_K_CAP)
-    namespace = cfg.vector_store_namespace if cfg else None
+    # Safe config load — tolerates missing column pre-migration
+    cfg = None
+    use_retrieval = False
+    top_k = 4
+    namespace = None
+    handoff_cfg_enabled = False
+    handoff_difficulty = DEFAULT_HANDOFF_DIFFICULTY
+    try:
+        # Try normal ORM load
+        cfg = agent.config
+        use_retrieval = bool(cfg.retrieval_enabled) if cfg else False
+        top_k = min(int(cfg.retrieval_top_k) if cfg else 4, CHAT_RETRIEVAL_TOP_K_CAP)
+        namespace = cfg.vector_store_namespace if cfg else None
+        handoff_cfg_enabled = bool(getattr(cfg, 'human_handoff_enabled', False)) if cfg else False
+        raw_difficulty = (getattr(cfg, 'human_handoff_difficulty', DEFAULT_HANDOFF_DIFFICULTY) or DEFAULT_HANDOFF_DIFFICULTY) if cfg else DEFAULT_HANDOFF_DIFFICULTY
+        handoff_difficulty = raw_difficulty if raw_difficulty in VALID_HANDOFF_DIFFICULTIES else DEFAULT_HANDOFF_DIFFICULTY
+    except Exception as exc:
+        if "human_handoff" in str(exc):
+            logger.warning("widget_chat_config_fallback deployment_id=%s err=%s", deployment_id, exc)
+            db.rollback()
+            # Fallback: load config without new columns via raw SQL
+            try:
+                from sqlalchemy import text as _text
+                row = db.execute(_text("SELECT retrieval_enabled, retrieval_top_k, vector_store_namespace FROM agent_configs WHERE agent_id=:aid LIMIT 1"), {"aid": str(agent_id_value)}).first()
+                if row:
+                    use_retrieval = bool(row[0]) if row[0] is not None else False
+                    top_k = min(int(row[1]) if row[1] else 4, CHAT_RETRIEVAL_TOP_K_CAP)
+                    namespace = row[2]
+                # handoff stays disabled as pre-migration default
+            except Exception:
+                pass
+            cfg = None
+        else:
+            raise
+    try:
+        handoff_has_team = db.query(models.HumanAgent).join(
+            models.AgentAssignment, models.HumanAgent.id == models.AgentAssignment.human_agent_id
+        ).filter(models.AgentAssignment.agent_id == agent_id_value, models.HumanAgent.status == 'active').count() > 0
+    except Exception:
+        handoff_has_team = False
+    handoff_effective = handoff_cfg_enabled and handoff_has_team
+    # Difficulty shapes both the system prompt and the tool description
+    if handoff_effective:
+        handoff_policy = get_handoff_policy_for_difficulty(handoff_difficulty)
+        # Inject into the prompt without mutating the DB row
+        agent_instructions = f"{agent_instructions.strip()}\n\n{handoff_policy}".strip()
+        transfer_tool = get_transfer_tool_for_difficulty(handoff_difficulty)
+    else:
+        transfer_tool = None
 
-    # Normalize visitor_email from explicit field or identity dict
     payload_visitor_email = (payload.visitor_email.strip() if payload.visitor_email else None) or None
     identity_email = None
     if payload.identity and payload.identity.get("email"):
@@ -555,7 +644,6 @@ async def public_widget_chat(
         except ValueError:
             session = None
     
-    # If identity provided, try to find or merge with existing session
     if payload.identity and payload.identity.get("externalId"):
         external_id = payload.identity.get("externalId")
         existing_session = (
@@ -578,7 +666,6 @@ async def public_widget_chat(
             created_at=datetime.now(timezone.utc),
             last_active_at=datetime.now(timezone.utc),
         )
-        # persist explicit visitor_email on creation if provided
         if payload_visitor_email:
             session.email = payload_visitor_email
         elif identity_email:
@@ -587,7 +674,6 @@ async def public_widget_chat(
         db.commit()
         db.refresh(session)
     
-    # Update identity if provided (and also sync visitor_email)
     _needs_commit = False
     if payload.identity:
         if payload.identity.get("externalId"):
@@ -602,7 +688,6 @@ async def public_widget_chat(
         if payload.identity.get("metadata"):
             session.custom_metadata = {**(session.custom_metadata or {}), **payload.identity.get("metadata", {})}
             _needs_commit = True
-    # Also handle explicit visitor_email field
     if payload_visitor_email and not session.email:
         session.email = payload_visitor_email
         _needs_commit = True
@@ -620,7 +705,6 @@ async def public_widget_chat(
     # Resolve visitor_email for handoff (explicit field > identity > session)
     resolved_visitor_email = payload_visitor_email or identity_email or session_email
 
-    # Get or create the Conversation row (handoff state machine)
     conversation = get_or_create_conversation(
         db,
         agent_id=agent_id_value,
@@ -630,13 +714,23 @@ async def public_widget_chat(
     )
     conversation_id_value = conversation.id
     conv_status_value = conversation.status
+    conversation_created_at_value = conversation.created_at
 
-    # ── Handoff states: do NOT call the LLM again ──────────────────────────
-    # collecting_email / queued / resolved → bot is paused. A race (user
-    # typing before the handoff SSE arrives) can still hit this endpoint.
-    # Return a tiny SSE that re-asserts the current status so the widget
-    # stays in the correct UI state and we avoid the "I'm connecting..." loop.
-    if conv_status_value in ("collecting_email", "queued", "resolved"):
+    # If handoff is disabled, treat queued/collecting_email as bot (auto-recover)
+    # Don't block LLM when toggle is OFF — prevents widget getting stuck in "Connecting…"
+    if not handoff_effective and conv_status_value in ("collecting_email", "queued"):
+        logger.info("handoff_disabled_auto_recover conversation_id=%s status=%s", conversation_id_value, conv_status_value)
+        try:
+            # Reset to bot so LLM can answer; keep visitor_email
+            conversation.status = "bot"
+            conversation.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            conv_status_value = "bot"
+        except Exception:
+            logger.exception("handoff_auto_recover_failed conversation_id=%s", conversation_id_value)
+
+    # Handoff states pause the bot (when handoff is effective): collecting_email/queued/resolved
+    if handoff_effective and conv_status_value in ("collecting_email", "queued", "resolved"):
         background_tasks.add_task(
             _log_public_chat,
             session_id=session_id_value,
@@ -647,10 +741,12 @@ async def public_widget_chat(
             sender_type="visitor",
         )
 
+        visitor_token_blocked = generate_visitor_token(deployment_public_id, str(conversation_id_value), visitor_id)
         async def _blocked_generate():
             yield _sse("meta", {
                 "session_id": str(session_id_value),
                 "conversation_id": str(conversation_id_value),
+                "visitor_token": visitor_token_blocked,
             })
             yield _sse("handoff", {
                 "status": conv_status_value,
@@ -668,25 +764,33 @@ async def public_widget_chat(
         headers["X-Accel-Buffering"] = "no"
         return StreamingResponse(_blocked_generate(), media_type="text/event-stream", headers=headers, background=background_tasks)
 
-    # ── Human state: visitor ↔ human chat (bot is out of the loop) ──────────
-    # The widget is now directly talking to a human agent via WebSockets.
-    # Persist the visitor message and broadcast it live so the human dashboard
-    # sees it instantly. No LLM call.
+    # Human state: the visitor talks to a human agent over WebSockets. Persist the
+    # message and broadcast it live so the dashboard sees it instantly; no LLM call.
     if conv_status_value == "human":
-        # Persist visitor message synchronously so the human sees it immediately
+        # Persist synchronously so the dashboard sees it immediately; message_id lets clients dedupe
+        new_msg_id = None
         try:
-            db.add(models.ChatMessage(
+            msg_obj = models.ChatMessage(
                 session_id=session_id_value,
                 role="user",
                 content=user_message,
                 sender_type="visitor",
                 created_at=datetime.now(timezone.utc),
-            ))
+            )
+            db.add(msg_obj)
+            db.flush()
+            new_msg_id = msg_obj.id
             # Bump conversation timestamp for correct ordering in dashboard
             conv = db.query(models.Conversation).filter(models.Conversation.id == conversation_id_value).first()
             if conv:
                 conv.updated_at = datetime.now(timezone.utc)
             db.commit()
+            if new_msg_id is not None:
+                try:
+                    db.refresh(msg_obj)
+                    new_msg_id = msg_obj.id
+                except Exception:
+                    pass
         except Exception:
             logger.exception("human_visitor_msg_save_failed conversation_id=%s", conversation_id_value)
             try:
@@ -694,7 +798,7 @@ async def public_widget_chat(
             except Exception:
                 pass
 
-        # Broadcast to visitor's own WS (echo) and to all assigned human dashboards
+        # Broadcast visitor message live — must be awaited, not fire-and-forget, or dashboard lags/needs refresh
         try:
             payload = {
                 "type": "message",
@@ -702,32 +806,31 @@ async def public_widget_chat(
                 "content": user_message,
                 "conversation_id": str(conversation_id_value),
                 "agent_id": str(agent_id_value),
+                "message_id": new_msg_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
-            # Fire-and-forget in-process broadcast (also pg_notify for multi-instance)
-            import asyncio as _asyncio
+            # Single fan-out via conversation bucket (human dashboard is subscribed per-conversation at WS connect)
+            # Awaited so the POST doesn't return before the push is queued.
             try:
-                loop = _asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.call_soon_threadsafe(lambda: _asyncio.ensure_future(broadcast_to_conversation(str(conversation_id_value), payload)))
-                    loop.call_soon_threadsafe(lambda: _asyncio.ensure_future(broadcast_to_humans_for_agent(agent_id_value, payload)))
-            except RuntimeError:
-                pass
-            # Best-effort pg_notify for other instances
-            try:
-                from services.handoff_service import pg_notify as _pg_notify
-                _pg_notify(str(conversation_id_value), payload)
+                await broadcast_to_conversation(str(conversation_id_value), payload)
             except Exception:
-                pass
+                logger.exception("visitor_broadcast_conv_failed conversation_id=%s", conversation_id_value)
+            # Also fan-out via human registry as fallback for dashboards that haven't subscribed to this conv yet (new claim race)
+            try:
+                await broadcast_to_humans_for_agent(agent_id_value, payload)
+            except Exception:
+                logger.exception("visitor_broadcast_human_failed conversation_id=%s", conversation_id_value)
         except Exception:
             logger.exception("human_visitor_broadcast_failed conversation_id=%s", conversation_id_value)
 
+        visitor_token_human = generate_visitor_token(deployment_public_id, str(conversation_id_value), visitor_id)
         async def _human_generate():
             yield _sse("meta", {
                 "session_id": str(session_id_value),
                 "conversation_id": str(conversation_id_value),
+                "visitor_token": visitor_token_human,
             })
-            # No bot token — human will reply via WS
+            # message_id lets clients dedupe
             yield _sse("done", {
                 "session_id": str(session_id_value),
                 "conversation_id": str(conversation_id_value),
@@ -746,12 +849,14 @@ async def public_widget_chat(
         chat_logged = False
         handoff_triggered = False
 
+        visitor_token_gen = generate_visitor_token(deployment_public_id, str(conversation_id_value), visitor_id)
         yield _sse("meta", {
             "session_id": str(session_id_value),
             "conversation_id": str(conversation_id_value),
+            "visitor_token": visitor_token_gen,
         })
 
-        history_task = asyncio.create_task(_history_for_prompt_async(session_id_value))
+        history_task = asyncio.create_task(_history_for_prompt_async(session_id_value, conversation_created_at=conversation_created_at_value))
         try:
             context = ""
             if use_retrieval and namespace:
@@ -768,8 +873,9 @@ async def public_widget_chat(
 
             history = await history_task
             messages = build_messages(agent_instructions, context, user_message, history=history)
+            _tools = [transfer_tool] if handoff_effective and transfer_tool else []
 
-            async for event in astream_answer_with_tools(agent_model, messages, [TRANSFER_TO_HUMAN_TOOL]):
+            async for event in astream_answer_with_tools(agent_model, messages, _tools):
                 if event["type"] == "token":
                     token = event["content"]
                     if first_token_ms is None:
@@ -778,11 +884,40 @@ async def public_widget_chat(
                     yield _sse("token", {"content": token})
 
                 elif event["type"] == "tool_call" and event["name"] == "transfer_to_human":
+                    # Gates: toggle + difficulty insistence
+                    if not handoff_effective:
+                        logger.info("handoff_ignored_disabled deployment_id=%s session_id=%s", deployment_id, session_id_value)
+                        continue
+                    # Server guard: hard mode requires explicit insistence
+                    try:
+                        # Own session, run off the event loop (the request-scoped session isn't thread-safe)
+                        def _check_allow():
+                            bg = BackgroundSession()
+                            try:
+                                conv = bg.query(models.Conversation).filter(models.Conversation.id == conversation_id_value).first()
+                                if not conv:
+                                    return True, "no conv"
+                                return should_allow_handoff(bg, conv, handoff_difficulty, user_message)
+                            finally:
+                                bg.close()
+                        allow, why = await asyncio.to_thread(_check_allow)
+                        if not allow:
+                            logger.info("handoff_suppressed difficulty=%s conversation_id=%s why=%s", handoff_difficulty, conversation_id_value, why)
+                            # Don't transition; ask a clarifying question instead
+                            suppression = get_handoff_suppression_message(handoff_difficulty)
+                            answer_parts.append(suppression)
+                            yield _sse("token", {"content": suppression})
+                            # Treat as normal answer, not a handoff — continue to logging, break without handoff
+                            break
+                    except Exception:
+                        logger.exception("handoff_allow_check_failed conversation_id=%s", conversation_id_value)
+                        # Fail open — allow handoff if check crashes
+                        pass
                     handoff_triggered = True
                     reason = event["arguments"].get("reason", "")
                     logger.info(
-                        "handoff_triggered deployment_id=%s session_id=%s reason=%s",
-                        deployment_id, session_id_value, reason,
+                        "handoff_triggered deployment_id=%s session_id=%s reason=%s difficulty=%s",
+                        deployment_id, session_id_value, reason, handoff_difficulty,
                     )
 
                     # Determine next status: need email? → collecting_email, else → queued
@@ -835,12 +970,10 @@ async def public_widget_chat(
                     except Exception:
                         logger.exception("handoff_human_broadcast_failed agent_id=%s", agent_id_value)
 
-                    # Send the bot's acknowledgement message
                     ack = build_handoff_ack_message(agent_name)
                     answer_parts.append(ack)
                     yield _sse("token", {"content": ack})
 
-                    # Tell the widget about the status change
                     yield _sse("handoff", {
                         "status": next_status,
                         "conversation_id": str(conversation_id_value),
@@ -917,7 +1050,6 @@ async def public_widget_chat(
     return StreamingResponse(generate(), media_type="text/event-stream", headers=headers, background=background_tasks)
 
 
-# ── Email capture endpoint ─────────────────────────────────────────────────────
 
 class EmailCaptureRequest(BaseModel):
     email: str = Field(..., min_length=3, max_length=255)
@@ -931,12 +1063,7 @@ async def capture_visitor_email(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """
-    Called by the widget after the visitor submits their email in the
-    collecting_email inline card.  Transitions the conversation to 'queued'
-    and broadcasts the status change via pg_notify + in-process WS registry.
-    """
-    # Validate deployment
+    """Widget calls this after the visitor submits their email, moving the conversation to 'queued'."""
     deployment = (
         db.query(models.WidgetDeployment)
         .filter(models.WidgetDeployment.deployment_id == deployment_id)
@@ -949,12 +1076,10 @@ async def capture_visitor_email(
     if not _host_allowed(host, deployment.allowed_domains or []):
         raise HTTPException(status_code=403, detail="Domain not allowed")
 
-    # Basic email format check
     import re as _re
     if not _re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", payload.email):
         raise HTTPException(status_code=422, detail="Invalid email address")
 
-    # Load conversation
     try:
         conv_uuid = uuid.UUID(conversation_id)
     except ValueError:
@@ -975,6 +1100,10 @@ async def capture_visitor_email(
         # Already transitioned — idempotent OK
         return {"status": conv.status, "conversation_id": str(conv.id)}
 
+    # Gate: if handoff disabled, don't transition to queued
+    if not _is_handoff_effectively_enabled(db, conv.agent_id):
+        raise HTTPException(status_code=403, detail="Human handoff is disabled for this agent")
+
     transition_status(
         db,
         conv,
@@ -984,7 +1113,6 @@ async def capture_visitor_email(
         check_email_fallback=True,
     )
 
-    # Fan-out to any open WebSocket for this conversation
     await broadcast_to_conversation(str(conv.id), {
         "type": "status_change",
         "status": "queued",
@@ -998,41 +1126,122 @@ async def capture_visitor_email(
     return {"status": "queued", "conversation_id": str(conv.id)}
 
 
-# ── Widget WebSocket endpoint ──────────────────────────────────────────────────
+
+@public_router.get("/{deployment_id}/conversations/{conversation_id}/token")
+def mint_visitor_token(
+    deployment_id: str,
+    conversation_id: str,
+    visitor_id: str = Query(..., min_length=1, max_length=120),
+    request: Request = None,  # type: ignore
+    db: Session = Depends(get_db),
+):
+    """
+    Mint a visitor token for an existing conversation owned by this deployment+visitor.
+    """
+    deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.deployment_id == deployment_id).first()
+    if not deployment or not deployment.is_enabled:
+        raise HTTPException(status_code=404, detail="Widget not available")
+    if request is not None:
+        host = _origin_host(request)
+        if host and not _host_allowed(host, deployment.allowed_domains or []):
+            raise HTTPException(status_code=403, detail="Domain not allowed")
+    try:
+        cid = uuid.UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = db.query(models.Conversation).filter(models.Conversation.id == cid, models.Conversation.deployment_id == deployment.id).first()
+    if not conv or conv.visitor_id != visitor_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    token = generate_visitor_token(deployment_id, conversation_id, visitor_id)
+    return {"visitor_token": token, "expires_in": 3600*24*7, "conversation_id": conversation_id}
+
+
 
 @public_router.websocket("/ws/{conversation_id}")
 async def widget_ws(
     websocket: WebSocket,
     conversation_id: str,
-    db: Session = Depends(get_db),
 ):
     """
-    Real-time channel for a visitor's conversation.
+    Visitor realtime channel; no DB session is held for the socket lifetime (the
+    handshake runs in a scoped SessionLocal).
 
-    The widget connects here after a handoff is triggered.  The server pushes
-    JSON frames whenever the conversation status changes or a human agent sends
-    a message.
-
-    Frame shapes (server → client):
-        {"type": "status_change", "status": "...", "conversation_id": "..."}
-        {"type": "message", "sender_type": "human_agent", "content": "...", "sender_name": "..."}
-        {"type": "agent_claimed", "agent_name": "..."}
-        {"type": "resolved"}
-        {"type": "ping"}   ← heartbeat every 25 s
-
-    Frame shapes (client → server):
-        {"type": "pong"}   ← heartbeat reply (optional)
+    Auth: ?visitor_token= & ?visitor_id= & ?deployment_id= (query) or Sec-WebSocket-Protocol.
+    Origin is validated against the deployment's allowed hosts.
     """
-    # Validate conversation exists
+    visitor_token = websocket.query_params.get("visitor_token") or websocket.query_params.get("token")
+    visitor_id = websocket.query_params.get("visitor_id")
+    deployment_id_q = websocket.query_params.get("deployment_id")
+    # Also allow Sec-WebSocket-Protocol: visitor_token, visitor_id
+    proto = websocket.headers.get("sec-websocket-protocol") or websocket.headers.get("Sec-WebSocket-Protocol")
+    if proto and not visitor_token:
+        for part in [p.strip() for p in proto.split(",")]:
+            if part.startswith("visitor_token."):
+                visitor_token = part[len("visitor_token."):]
+            elif part.startswith("visitor."):
+                visitor_id = part[len("visitor."):]
+    # Origin and host are validated once the deployment row is loaded
+    origin = websocket.headers.get("origin") or websocket.headers.get("referer") or ""
     try:
         conv_uuid = uuid.UUID(conversation_id)
     except ValueError:
         await websocket.close(code=4004)
         return
 
-    conv = db.query(models.Conversation).filter(models.Conversation.id == conv_uuid).first()
-    if not conv:
-        await websocket.close(code=4004)
+    conv = None
+    deployment = None
+    deployment_pub_id = None
+    try:
+        with SessionLocal() as db:
+            conv = db.query(models.Conversation).filter(models.Conversation.id == conv_uuid).first()
+            if not conv:
+                await websocket.close(code=4004)
+                return
+            deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.id == conv.deployment_id).first()
+            if not deployment or not deployment.is_enabled:
+                await websocket.close(code=4004)
+                return
+            deployment_pub_id = deployment.deployment_id
+            # If client supplied deployment_id, verify matches
+            if deployment_id_q and deployment_id_q != deployment_pub_id:
+                await websocket.close(code=4403)
+                return
+            if not visitor_id:
+                visitor_id = conv.visitor_id
+            # Strict mode requires the token; tests may omit it
+            strict_ws = os.getenv("ENABLE_STRICT_WIDGET_WS", "0") == "1" or os.getenv("ENV") == "production"
+            if visitor_token:
+                ok, err = verify_visitor_token(visitor_token, deployment_pub_id, conversation_id, visitor_id)
+                if not ok:
+                    logger.warning("widget_ws_token_invalid conversation_id=%s err=%s", conversation_id, err)
+                    await websocket.close(code=4403)
+                    return
+            elif strict_ws:
+                logger.warning("widget_ws_missing_token_strict conversation_id=%s", conversation_id)
+                await websocket.close(code=4403)
+                return
+            if origin:
+                parsed = urlparse(origin if "://" in origin else f"https://{origin}")
+                host = (parsed.hostname or "").lower()
+                host = host[4:] if host.startswith("www.") else host
+                if host and not _host_allowed(host, deployment.allowed_domains or []):
+                    logger.warning("widget_ws_host_blocked host=%s deployment=%s", host, deployment_pub_id)
+                    await websocket.close(code=4403)
+                    return
+            # Capture needed scalars before close session
+            conv_status = conv.status
+            conv_agent_name = conv.assigned_human_agent.name if conv.assigned_human_agent else None
+            if conv.assigned_human_agent:
+                try:
+                    conv_agent_name = conv.assigned_human_agent.name or conv.assigned_human_agent.email
+                except Exception:
+                    conv_agent_name = None
+    except Exception:
+        logger.exception("widget_ws_handshake_failed conversation_id=%s", conversation_id)
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
         return
 
     await websocket.accept()
@@ -1040,18 +1249,20 @@ async def widget_ws(
     from services.handoff_service import register_ws, unregister_ws
 
     q = await register_ws(conversation_id)
-    logger.info("widget_ws_connected conversation_id=%s", conversation_id)
+    logger.info("widget_ws_connected conversation_id=%s deployment=%s", conversation_id, deployment_pub_id)
 
-    # Send current status immediately so the widget can sync on reconnect
-    await websocket.send_json({
+    status_payload: dict = {
         "type": "status_change",
-        "status": conv.status,
+        "status": conv_status,
         "conversation_id": conversation_id,
-        **({"agent_name": conv.assigned_human_agent.name or conv.assigned_human_agent.email}
-           if conv.assigned_human_agent else {}),
-    })
+    }
+    if conv_agent_name:
+        status_payload["agent_name"] = conv_agent_name
+    await websocket.send_json(status_payload)
 
     ping_interval = 25  # seconds
+    pong_deadline = 90
+    last_pong = asyncio.get_event_loop().time()
 
     async def _pump():
         """Drain the queue and forward to the WebSocket."""
@@ -1066,12 +1277,25 @@ async def widget_ws(
 
     try:
         while True:
-            # Wait for a client frame or timeout (heartbeat)
             try:
                 data = await asyncio.wait_for(websocket.receive_json(), timeout=ping_interval)
-                # Client frames are informational only (pong, etc.)
+                # Any client message counts as liveness
+                msg_type = data.get("type") if isinstance(data, dict) else None
+                if msg_type == "pong":
+                    last_pong = asyncio.get_event_loop().time()
+                elif msg_type == "ping":
+                    last_pong = asyncio.get_event_loop().time()
+                    try:
+                        await websocket.send_json({"type": "pong"})
+                    except Exception:
+                        break
+                else:
+                    last_pong = asyncio.get_event_loop().time()
             except asyncio.TimeoutError:
-                # Send ping
+                # Check the pong deadline before pinging
+                if asyncio.get_event_loop().time() - last_pong > pong_deadline:
+                    logger.info("widget_ws_pong_timeout conversation_id=%s", conversation_id)
+                    break
                 try:
                     await websocket.send_json({"type": "ping"})
                 except Exception:
@@ -1088,7 +1312,6 @@ async def widget_ws(
         logger.info("widget_ws_disconnected conversation_id=%s", conversation_id)
 
 
-# ── Widget conversation history (spec §7, API §6) ───────────────────────────────
 
 class WidgetConversationCreate(BaseModel):
     visitor_id: str = Field(..., min_length=1, max_length=120)
@@ -1096,19 +1319,25 @@ class WidgetConversationCreate(BaseModel):
 
 
 @public_router.get("/{deployment_id}/conversations")
+@limiter.limit("30/minute")
 def list_widget_conversations(
     deployment_id: str,
+    request: Request,
+    response: Response,
     visitor_id: str = Query(..., min_length=1, max_length=120),
-    request: Request = None,  # type: ignore
+    visitor_token: str | None = Query(None, description="HMAC visitor token (S2); required in strict mode"),
+    limit: int = Query(20, ge=1, le=50),
     db: Session = Depends(get_db),
 ):
     deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.deployment_id == deployment_id).first()
     if not deployment or not deployment.is_enabled:
         raise HTTPException(status_code=404, detail="Widget is not available")
-    if request is not None:
-        host = _origin_host(request)
-        if host and not _host_allowed(host, deployment.allowed_domains or []):
-            raise HTTPException(status_code=403, detail="Domain not allowed")
+    host = _origin_host(request)
+    if host and not _host_allowed(host, deployment.allowed_domains or []):
+        raise HTTPException(status_code=403, detail="Domain not allowed")
+    if visitor_token:
+        pass
+    # Never return visitor_email or message previews
     rows = (
         db.query(models.Conversation)
         .filter(
@@ -1116,30 +1345,31 @@ def list_widget_conversations(
             models.Conversation.visitor_id == visitor_id,
         )
         .order_by(models.Conversation.updated_at.desc())
-        .limit(50)
+        .limit(limit)
         .all()
     )
+    strict = os.getenv("ENABLE_STRICT_WIDGET_WS", "0") == "1" or os.getenv("ENV") == "production"
+    if strict and visitor_token:
+        # Validate token binds to deployment + visitor (use first conv as proxy)
+        if rows:
+            ok, _ = verify_visitor_token(visitor_token, deployment_id, str(rows[0].id), visitor_id)
+            if not ok:
+                raise HTTPException(status_code=403, detail="Invalid visitor token")
+        else:
+            # no rows but token present — try dummy verify format
+            if ":" not in visitor_token and "." not in visitor_token:
+                raise HTTPException(status_code=403, detail="Invalid visitor token")
+    elif strict and not visitor_token and rows:
+        raise HTTPException(status_code=403, detail="Visitor token required")
+
     out = []
     for c in rows:
-        # last message preview
-        preview = None
-        if c.session_id:
-            last = (
-                db.query(models.ChatMessage)
-                .filter(models.ChatMessage.session_id == c.session_id)
-                .order_by(models.ChatMessage.created_at.desc())
-                .first()
-            )
-            if last:
-                preview = last.content[:120]
         out.append({
             "id": str(c.id),
             "status": c.status,
-            "visitor_email": c.visitor_email,
             "assigned_human_agent_id": str(c.assigned_human_agent_id) if c.assigned_human_agent_id else None,
             "created_at": c.created_at.isoformat() if c.created_at else None,
             "updated_at": c.updated_at.isoformat() if c.updated_at else None,
-            "preview": preview,
         })
     return {"conversations": out}
 
@@ -1166,7 +1396,6 @@ def create_widget_conversation(
         created_at=datetime.now(timezone.utc),
         last_active_at=datetime.now(timezone.utc),
     )
-    # propagate email if given
     if payload.visitor_email:
         session.email = payload.visitor_email
     db.add(session)
@@ -1184,28 +1413,49 @@ def create_widget_conversation(
     db.add(conv)
     db.commit()
     db.refresh(conv)
+    # Mint a visitor token for the widget
+    visitor_token = generate_visitor_token(deployment.deployment_id, str(conv.id), payload.visitor_id)
     return {
         "id": str(conv.id),
         "session_id": str(session.id),
         "status": conv.status,
         "visitor_id": conv.visitor_id,
+        "visitor_token": visitor_token,
     }
 
 
 @public_router.get("/{deployment_id}/conversations/{conversation_id}/messages")
+@limiter.limit("30/minute")
 def get_conversation_messages(
     deployment_id: str,
     conversation_id: str,
+    request: Request,
+    response: Response,
     visitor_id: str = Query(..., min_length=1, max_length=120),
+    visitor_token: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=100),
+    after_id: int | None = Query(None),
     db: Session = Depends(get_db),
 ):
     deployment = db.query(models.WidgetDeployment).filter(models.WidgetDeployment.deployment_id == deployment_id).first()
     if not deployment:
         raise HTTPException(status_code=404, detail="Widget not found")
+    host = _origin_host(request)
+    if host and not _host_allowed(host, deployment.allowed_domains or []):
+        raise HTTPException(status_code=403, detail="Domain not allowed")
     try:
         cid = uuid.UUID(conversation_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    # Verify the visitor token when supplied/required
+    strict = os.getenv("ENABLE_STRICT_WIDGET_WS", "0") == "1" or os.getenv("ENV") == "production"
+    if visitor_token:
+        ok, err = verify_visitor_token(visitor_token, deployment_id, conversation_id, visitor_id)
+        if not ok:
+            raise HTTPException(status_code=403, detail=f"Invalid visitor token: {err}")
+    elif strict:
+        raise HTTPException(status_code=403, detail="Visitor token required")
+
     conv = db.query(models.Conversation).filter(
         models.Conversation.id == cid,
         models.Conversation.deployment_id == deployment.id,
@@ -1213,12 +1463,10 @@ def get_conversation_messages(
     ).first()
     if not conv or not conv.session_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    msgs = (
-        db.query(models.ChatMessage)
-        .filter(models.ChatMessage.session_id == conv.session_id)
-        .order_by(models.ChatMessage.created_at.asc())
-        .all()
-    )
+    q = db.query(models.ChatMessage).filter(models.ChatMessage.session_id == conv.session_id)
+    if after_id is not None:
+        q = q.filter(models.ChatMessage.id > after_id)
+    msgs = q.order_by(models.ChatMessage.created_at.asc()).limit(limit).all()
     return {
         "conversation_id": str(conv.id),
         "status": conv.status,
@@ -1233,6 +1481,7 @@ def get_conversation_messages(
             }
             for m in msgs
         ],
+        "has_more": len(msgs) == limit,
     }
 
 

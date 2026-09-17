@@ -19,8 +19,6 @@ def get_agent_analytics_overview(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
-    # Get comprehensive analytics overview: total conversations, messages, credits, and active time periods
-    # Verify agent ownership
     agent = db.query(models.Agent).filter(
         models.Agent.id == agent_id,
         models.Agent.user_id == user.id
@@ -57,7 +55,6 @@ def get_agent_analytics_overview(
             "hourly_distribution": {}
         }
     
-    # Daily breakdown using SQL GROUP BY
     daily_results = db.query(
         func.date(models.UsageLog.timestamp).label('date'),
         func.count(models.UsageLog.id).label('message_count'),
@@ -76,7 +73,6 @@ def get_agent_analytics_overview(
         for row in daily_results
     }
     
-    # Hourly distribution using SQL GROUP BY
     hourly_results = db.query(
         func.extract('hour', models.UsageLog.timestamp).label('hour'),
         func.count(models.UsageLog.id).label('count')
@@ -113,7 +109,6 @@ def get_agent_conversations(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
-    # Get recent conversations with pagination, returns message content, timestamps, and credits used
     # Verify agent ownership
     agent = db.query(models.Agent).filter(
         models.Agent.id == agent_id,

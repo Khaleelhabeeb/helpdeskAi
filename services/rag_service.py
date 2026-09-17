@@ -126,7 +126,7 @@ async def aindex_kb_text(
         batch = chunks[start:end]
         vectors = await aembed_texts(batch, task="retrieval.passage")
         ids = [str(uuid.uuid4()) for _ in batch]
-        # Upsert is blocking (DB), run in thread — pass global offset for correct chunk_index
+        # DB write is blocking; pass the batch offset so chunk_index stays global
         await anyio.to_thread.run_sync(
             lambda s=start: upsert_texts(namespace, kb_id, agent_id, batch, vectors, ids=ids, chunk_offset=s)
         )
@@ -226,13 +226,8 @@ def build_messages(
 
 
 def generate_answer(model: str, messages: list[dict[str, str]]) -> str:
-    """
-    Sync non-streaming completion via Groq direct API.
-    Replaces litellm `completion`. Strips legacy `groq/` prefix.
-    """
     client = get_groq_client()
     normalized = normalize_groq_model(model)
-    # Groq SDK expects max_completion_tokens (preferred) — aligns with docs
     response = client.chat.completions.create(
         model=normalized,
         messages=messages,  # type: ignore[arg-type]
@@ -244,10 +239,6 @@ def generate_answer(model: str, messages: list[dict[str, str]]) -> str:
 
 
 def stream_answer(model: str, messages: list[dict[str, str]]) -> Iterator[str]:
-    """
-    Sync streaming iterator via Groq direct API.
-    Replaces litellm `completion(..., stream=True)`.
-    """
     client = get_groq_client()
     normalized = normalize_groq_model(model)
     stream = client.chat.completions.create(
@@ -268,11 +259,7 @@ def stream_answer(model: str, messages: list[dict[str, str]]) -> Iterator[str]:
 
 
 async def astream_answer(model: str, messages: list[dict[str, str]]) -> AsyncIterator[str]:
-    """
-    Async streaming — hot path for chat endpoints (widget + authenticated).
-    Uses AsyncGroq + semaphore to bound LLM concurrency (default 8).
-    Replaces litellm `acompletion(..., stream=True)`.
-    """
+    """Async streaming for the chat endpoints, bounded by _llm_semaphore."""
     client = get_async_groq_client()
     normalized = normalize_groq_model(model)
     async with _llm_semaphore:
@@ -298,27 +285,20 @@ async def astream_answer_with_tools(
     tools: list[dict],
 ) -> AsyncIterator[dict]:
     """
-    Async streaming with tool-call support.
+    Async streaming with tool-call support. Yields:
+        {"type": "token",     "content": str}
+        {"type": "tool_call", "name": str, "arguments": dict}
 
-    Yields dicts:
-        {"type": "token",    "content": str}
-        {"type": "tool_call","name": str, "arguments": dict}
+    The caller acts on tool_call events (e.g. the handoff state machine).
 
-    The caller is responsible for acting on tool_call events (e.g. triggering
-    the handoff state machine) and deciding whether to continue streaming.
-
-    Tool calls are detected from the *non-streaming* first pass when the model
-    decides to call a tool (Groq returns finish_reason="tool_calls" with no
-    streamed content). We use a two-phase approach:
-      1. Non-streaming call with tools to detect tool invocations.
-      2. If no tool call → fall back to streaming for tokens.
-    This avoids the complexity of reassembling streamed tool-call deltas.
+    Groq returns finish_reason="tool_calls" with no streamed content, so we do a
+    non-streaming first pass to detect tool invocations, then fall back to streaming
+    tokens when there are none.
     """
     client = get_async_groq_client()
     normalized = normalize_groq_model(model)
 
     async with _llm_semaphore:
-        # Phase 1: non-streaming with tools to detect tool calls cheaply
         response = await client.chat.completions.create(
             model=normalized,
             messages=messages,  # type: ignore[arg-type]
@@ -333,7 +313,6 @@ async def astream_answer_with_tools(
     if not choice:
         return
 
-    # Tool call branch
     if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
         for tc in choice.message.tool_calls:
             fn = tc.function
@@ -345,10 +324,9 @@ async def astream_answer_with_tools(
             yield {"type": "tool_call", "name": fn.name, "arguments": args}
         return
 
-    # Normal text branch — stream the content we already have, then done
     content = choice.message.content or ""
     if content:
-        # Yield in small chunks to keep the streaming feel
+        # Re-chunk the already-complete answer so callers still see a token stream
         chunk_size = 8
         for i in range(0, len(content), chunk_size):
             yield {"type": "token", "content": content[i : i + chunk_size]}

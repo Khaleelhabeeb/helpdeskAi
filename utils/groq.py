@@ -1,8 +1,4 @@
 def send_message_to_groq(system_prompt: str, user_message: str) -> str:
-    """
-    Direct Groq API — replaces litellm.
-    Uses utils.groq's historical default `groq/openai/gpt-oss-20b`.
-    """
     from services.groq_client import get_groq_client, normalize_groq_model
 
     client = get_groq_client()

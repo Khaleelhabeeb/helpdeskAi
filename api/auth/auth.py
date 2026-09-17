@@ -75,23 +75,14 @@ def supabase_config():
     return {"url": url, "anon_key": anon_key}
 
 
-# ---------------------------------------------------------------------------
-# Magic-link (passwordless) — Supabase email auth
-# We intentionally use ONLY the magic link (ConfirmationURL), not the 6-digit
-# OTP code. The email template should contain {{ .ConfirmationURL }}.
-# All verification is handled by Supabase redirecting to FRONTEND_URL/auth/callback
-# with tokens in the hash; no manual code entry is needed.
-# See: https://supabase.com/docs/guides/auth/auth-magic-link
-# ---------------------------------------------------------------------------
+# Magic-link only: Supabase's ConfirmationURL is used (not the 6-digit OTP), so the email
+# template must contain {{ .ConfirmationURL }}; verification happens when Supabase
+# redirects to FRONTEND_URL/auth/callback.
 
 @router.post("/otp/request")
 @limiter.limit("5/minute")
 def request_otp(request: Request, response: Response, body: OtpRequest):
-    """
-    Send a magic link to the given email.
-    Creates the Supabase user automatically if it doesn't exist.
-    Always returns a generic success message to avoid email enumeration.
-    """
+    """Send a magic link, creating the Supabase user if it does not exist. Always returns success."""
     normalized_email = body.email.lower().strip()
     redirect_to = f"{FRONTEND_URL}/auth/callback" if FRONTEND_URL else None
 
@@ -109,24 +100,16 @@ def request_otp(request: Request, response: Response, body: OtpRequest):
                 status_code=429,
                 detail="Too many email requests. Please wait a minute and try again.",
             ) from exc
-        # Don't leak internal errors – return generic message for security
-        # but raise 400 for truly bad inputs (invalid email format already handled by pydantic)
+        # Raise 400 for bad input, but never leak internal errors
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return {"message": "Check your email for a magic link to sign in. It expires in a few minutes."}
 
 
-# Legacy OTP code verification — kept for backward compat but not used in
-# magic-link-only flow. The magic link is verified automatically via the
-# Supabase redirect + AuthCallback. This endpoint remains for API compat.
+# Legacy endpoint kept for API compatibility; the magic-link flow verifies via /auth/callback
 @router.post("/otp/verify")
 @limiter.limit("10/minute")
 def verify_otp(request: Request, response: Response, body: OtpVerifyRequest, db: Session = Depends(get_db)):
-    """
-    (Legacy) Verify the OTP code / magic-link token sent to the email.
-    In magic-link-only mode this is not used — the link verification happens
-    via the Supabase redirect to /auth/callback. Kept for backward compat.
-    """
     normalized_email = body.email.lower().strip()
     token = body.token.strip()
     if not token:
@@ -190,11 +173,7 @@ def verify_otp(request: Request, response: Response, body: OtpVerifyRequest, db:
     }
 
 
-# ---------------------------------------------------------------------------
-# Legacy password endpoints — deprecated in favor of OTP/magic-link
-# Kept as 410 Gone so existing clients get a clear migration message.
-# Google OAuth via Supabase remains fully supported (see /oauth/exchange).
-# ---------------------------------------------------------------------------
+# Legacy password endpoints reply 410 Gone; Google OAuth remains supported via /oauth/exchange
 
 @router.post("/signup")
 def signup_legacy(user: schemas.UserCreate):
@@ -287,7 +266,6 @@ def upgrade_user(
     db_user.user_type = "free"
     db_user.credits_remaining = 999999
 
-    # Update reset date
     db_user.last_reset_date = datetime.now(timezone.utc)
 
     db.commit()

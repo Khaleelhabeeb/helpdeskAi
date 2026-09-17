@@ -1,13 +1,4 @@
-"""
-Owner team analytics & conversation viewer (§8 team owner view).
-
-Owner can see:
-- Team overview: total conversations, by status, cases closed (resolved), active, per-human stats
-- Conversations list for all their AI agents (with filters)
-- Conversation detail (messages)
-
-All scoped to owner_user_id via assignment join — human agents are invisible to owner if not assigned? Owner sees all their agents' conversations.
-"""
+"""Owner team analytics and conversation viewer: overview, conversation list and detail."""
 from __future__ import annotations
 
 import uuid
@@ -49,7 +40,6 @@ def team_analytics(
             "recent": [],
         }
 
-    # Total by status
     by_status_q = db.query(models.Conversation.status, func.count(models.Conversation.id)).filter(
         models.Conversation.agent_id.in_(agent_ids)
     ).group_by(models.Conversation.status).all()
@@ -60,7 +50,6 @@ def team_analytics(
     human = by_status.get("human", 0)
     active = queued + human
 
-    # Per human agent
     human_agents = db.query(models.HumanAgent).filter(models.HumanAgent.owner_user_id == user.id).all()
     by_human = []
     for ha in human_agents:
@@ -68,7 +57,6 @@ def team_analytics(
         q = db.query(models.Conversation).filter(models.Conversation.assigned_human_agent_id == ha.id)
         total_ha = q.count()
         by_status_ha = {s: c for s, c in db.query(models.Conversation.status, func.count(models.Conversation.id)).filter(models.Conversation.assigned_human_agent_id == ha.id).group_by(models.Conversation.status).all()}
-        # Also count queued that are unassigned but visible to this human (via assignment) — for owner we show assigned only, but for team overview we show total team queued
         by_human.append({
             "id": str(ha.id),
             "email": ha.email,
@@ -81,7 +69,6 @@ def team_analytics(
             "collecting_email": by_status_ha.get("collecting_email", 0),
         })
 
-    # Per AI agent
     by_agent = []
     for aid in agent_ids:
         ag = db.query(models.Agent).filter(models.Agent.id == aid).first()
@@ -95,7 +82,6 @@ def team_analytics(
             "by_status": by_status_ag,
         })
 
-    # Recent 10
     recent = db.query(models.Conversation).filter(models.Conversation.agent_id.in_(agent_ids)).order_by(models.Conversation.updated_at.desc()).limit(10).options(joinedload(models.Conversation.assigned_human_agent)).all()
     recent_out = []
     for c in recent:
@@ -167,7 +153,6 @@ def list_team_conversations(
     rows = q.order_by(models.Conversation.updated_at.desc()).offset(offset).limit(limit).options(joinedload(models.Conversation.assigned_human_agent)).all()
     out = []
     for c in rows:
-        # Preview last message
         preview = None
         if c.session_id:
             last = db.query(models.ChatMessage).filter(models.ChatMessage.session_id == c.session_id).order_by(models.ChatMessage.created_at.desc()).first()

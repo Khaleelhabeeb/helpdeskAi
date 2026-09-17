@@ -11,7 +11,6 @@ FREE_STORAGE_LIMIT = int(os.getenv("FREE_STORAGE_LIMIT_MB", "2")) * 1024 * 1024
 PAID_STORAGE_LIMIT = int(os.getenv("PAID_STORAGE_LIMIT_MB", "50")) * 1024 * 1024
 PRO_STORAGE_LIMIT = int(os.getenv("PRO_STORAGE_LIMIT_MB", "100")) * 1024 * 1024
 
-# File count limits
 FREE_FILES_LIMIT = 5
 PAID_FILES_LIMIT = 50
 PRO_FILES_LIMIT = 999999  # Unlimited
@@ -28,7 +27,6 @@ def get_files_limit(user_type: str) -> int:
 
 
 def get_or_create_storage_usage(db: Session, user_id: int) -> models.UserStorageUsage:
-    # Get or create storage usage record for user
     usage = db.query(models.UserStorageUsage).filter(
         models.UserStorageUsage.user_id == user_id
     ).first()
@@ -51,7 +49,6 @@ def check_files_quota(db: Session, user: models.User) -> None:
 
 
 def increment_storage_usage(db: Session, user_id: int, file_size_bytes: int, chunk_count: int = 0) -> None:
-    # Increment user's storage usage counters
     usage = get_or_create_storage_usage(db, user_id)
     usage.total_files += 1
     usage.total_size_bytes += file_size_bytes
@@ -61,7 +58,6 @@ def increment_storage_usage(db: Session, user_id: int, file_size_bytes: int, chu
 
 
 def decrement_storage_usage(db: Session, user_id: int, file_size_bytes: int, chunk_count: int = 0) -> None:
-    # Decrement user's storage usage counters
     usage = get_or_create_storage_usage(db, user_id)
     usage.total_files = max(0, usage.total_files - 1)
     usage.total_size_bytes = max(0, usage.total_size_bytes - file_size_bytes)
@@ -71,7 +67,6 @@ def decrement_storage_usage(db: Session, user_id: int, file_size_bytes: int, chu
 
 
 def get_storage_stats(db: Session, user: models.User) -> dict:
-    # Get storage statistics for user
     usage = get_or_create_storage_usage(db, user.id)
     storage_limit = get_storage_limit(user.user_type)
     files_limit = get_files_limit(user.user_type)

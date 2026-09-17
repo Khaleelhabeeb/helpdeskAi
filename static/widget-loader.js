@@ -34,7 +34,6 @@
     }
   }
 
-  // State
   const state = {
     open: false,
     unread: 0,
@@ -170,7 +169,6 @@
     }
   }
 
-  // Load config
   async function loadConfig() {
     try {
       const response = await fetch(`${apiBase}/public/widget/${deploymentId}/config`, {
@@ -183,7 +181,6 @@
     } catch (error) {
       logError("CONFIG_LOAD_FAIL", error.message, { deploymentId });
       console.error("[HelpdeskAI] Config load failed:", error);
-      // Apply defaults
       applyConfig({
         display_name: "Support Agent",
         logo_url: "",
@@ -194,7 +191,6 @@
     }
   }
 
-  // Panel iframe management
   let panelIframe = null;
   let dragMoved = false;
 
@@ -220,7 +216,6 @@
     document.body.appendChild(iframe);
     panelIframe = iframe;
 
-    // Track load time
     const loadStart = performance.now();
     iframe.onload = () => {
       const loadTime = performance.now() - loadStart;
@@ -270,7 +265,6 @@
     sendToPanel({ type: "WIDGET_CLOSE" });
   }
 
-  // PostMessage protocol
   function sendToPanel(message) {
     if (!panelIframe) {
       state.pendingMessages.push(message);
@@ -296,7 +290,6 @@
       case "WIDGET_READY":
         state.panelReady = true;
         sendTelemetry("launcher_shown", { viewport_width: window.innerWidth });
-        // Send pending messages
         if (state.config) {
           sendToPanel({ type: "WIDGET_CONFIG", config: state.config });
         }
@@ -324,7 +317,6 @@
     }
   });
 
-  // Launcher interaction
   launcher.addEventListener("click", function (e) {
     if (dragMoved) {
       dragMoved = false;
@@ -391,7 +383,6 @@
     document.addEventListener("pointercancel", onUp);
   });
 
-  // Apply saved position
   function applySavedPosition() {
     const position = loadPosition();
     if (!position || window.innerWidth <= 520) return;
@@ -403,7 +394,6 @@
     launcher.style.bottom = "auto";
   }
 
-  // Resize handling
   let resizeTimeout;
   window.addEventListener("resize", function () {
     if (resizeTimeout) clearTimeout(resizeTimeout);
@@ -413,7 +403,6 @@
     }, 100);
   });
 
-  // Telemetry
   function sendTelemetry(event, data) {
     try {
       navigator.sendBeacon(
@@ -429,7 +418,6 @@
     }
   }
 
-  // Idle preload
   let preloaded = false;
   launcher.addEventListener("mouseenter", function () {
     if (!preloaded && "requestIdleCallback" in window) {
@@ -460,7 +448,6 @@
     },
   };
 
-  // Initialize
   applySavedPosition();
   loadConfig();
 })();

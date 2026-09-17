@@ -76,7 +76,6 @@ def _resolve_url(base_url: str, href: str) -> Optional[str]:
         parsed = urlparse(absolute)
         if parsed.scheme not in ("http", "https"):
             return None
-        # strip fragment, keep query
         return absolute
     except Exception:
         return None
@@ -93,7 +92,6 @@ def _extract_favicon(soup: BeautifulSoup, base_url: str) -> Optional[str]:
         href = link.get("href", "").strip()
         if not href:
             continue
-        # rel can be empty; also check for icon-like href even without rel? skip for now
         if any(tok in rel for tok in ("icon", "shortcut", "apple-touch", "mask-icon", "fluid-icon")):
             resolved = _resolve_url(base_url, href)
             if not resolved:
@@ -106,7 +104,6 @@ def _extract_favicon(soup: BeautifulSoup, base_url: str) -> Optional[str]:
                 # sizes may be "180x180" or "any"
                 try:
                     if sizes and "x" in str(sizes):
-                        # pick the biggest dimension
                         parts = re.findall(r"(\d+)x\d+", str(sizes))
                         if parts:
                             w = max(int(p) for p in parts)
@@ -131,7 +128,6 @@ def _extract_favicon(soup: BeautifulSoup, base_url: str) -> Optional[str]:
         candidates.sort(key=lambda x: x[0], reverse=True)
         return candidates[0][1]
 
-    # fallback to /favicon.ico
     try:
         parsed = urlparse(base_url)
         if parsed.scheme in ("http", "https") and parsed.netloc:
@@ -208,7 +204,6 @@ def _extract_description(soup: BeautifulSoup) -> Optional[str]:
 
 
 def _extract_logo_url(soup: BeautifulSoup, base_url: str, favicon_url: Optional[str], og_image_url: Optional[str]) -> Optional[str]:
-    # Look for explicit logo images
     for img in soup.find_all("img", src=True):
         try:
             alt = str(img.get("alt", "")).lower()
@@ -223,7 +218,6 @@ def _extract_logo_url(soup: BeautifulSoup, base_url: str, favicon_url: Optional[
             if any(kw in alt for kw in ("logo", "brand")) or any(kw in src for kw in ("logo", "brand")) or any(kw in cls for kw in ("logo", "brand")) or any(kw in id_attr for kw in ("logo", "brand")):
                 resolved = _resolve_url(base_url, str(img["src"]).strip())
                 if resolved:
-                    # filter out tiny tracking pixels?
                     width = img.get("width")
                     height = img.get("height")
                     try:
@@ -235,7 +229,6 @@ def _extract_logo_url(soup: BeautifulSoup, base_url: str, favicon_url: Optional[
         except Exception:
             continue
 
-    # Look for header logo via itemprop
     tag = soup.find(attrs={"itemprop": "logo"})
     if tag:
         src = tag.get("content") or tag.get("href") or tag.get("src")
@@ -244,7 +237,6 @@ def _extract_logo_url(soup: BeautifulSoup, base_url: str, favicon_url: Optional[
             if resolved:
                 return resolved
 
-    # Fallback chain: og:image -> favicon
     if og_image_url:
         return og_image_url
     return favicon_url
@@ -267,17 +259,13 @@ def _extract_internal_links(soup: BeautifulSoup, base_url: str, limit: int = 20)
                 continue
             if parsed.netloc.lower() != base_netloc:
                 continue
-            # Normalize - strip fragment
             clean = urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", parsed.params, parsed.query, ""))
             # Avoid self-reference
             if clean == base_url or clean.rstrip("/") == base_url.rstrip("/"):
                 continue
-            # Filter common non-content URLs
             path_low = parsed.path.lower()
-            # skip anchors with # already stripped, skip files that are likely not html
             if any(path_low.endswith(ext) for ext in (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".js", ".json", ".xml", ".ico")):
                 continue
-            # skip query-heavy or duplicate
             if clean in seen:
                 continue
             seen.add(clean)
@@ -317,7 +305,6 @@ def _parse_html(html: str, url: str) -> dict:
     title_tag = soup.find("title")
     title = title_tag.get_text(strip=True) if title_tag else url
 
-    # Also keep meta description as fallback title if needed
     description = branding.get("description")
 
     content: list[str] = []
@@ -392,7 +379,6 @@ async def _fetch_bytes(url: str, max_bytes: int = MAX_SCRAPE_BYTES) -> tuple[byt
                 chunks.append(chunk)
 
             body = b"".join(chunks)
-            # Use response.encoding fallback
             return body, final_url, content_type
     except HTTPException:
         raise
@@ -404,15 +390,11 @@ async def scrape_url_content(url: str) -> dict:
     url = _normalize_input_url(url)
     body_bytes, final_url, content_type = await _fetch_bytes(url, max_bytes=MAX_SCRAPE_BYTES)
 
-    # Validate content type
     if content_type and not any(kind in content_type for kind in ("text/html", "text/plain", "application/xhtml")):
         # Allow html without content-type too
         if "text" not in content_type and "html" not in content_type:
             raise HTTPException(status_code=400, detail="URL did not return readable text or HTML")
 
-    # Determine encoding
-    # httpx stream response.encoding is not available here directly; we need to guess
-    # We'll try utf-8
     try:
         body = body_bytes.decode("utf-8", errors="replace")
     except Exception:
@@ -487,7 +469,6 @@ async def discover_site_links(url: str, limit: int = 20) -> dict:
     """Discover internal links and branding for a given URL."""
     url = _normalize_input_url(url)
     branding = await scrape_url_branding(url)
-    # Limit links to requested amount
     links = branding.get("internal_links", [])[:limit]
     return {
         "url": branding.get("final_url", url),
@@ -557,7 +538,6 @@ async def crawl_site(start_url: str, max_pages: int = 5, max_depth: int = 1, sam
     if max_pages > 20:
         max_pages = 20
 
-    # Step 1: scrape start URL for branding + links
     start_data = await scrape_url_content(start_url)
     branding = {
         "favicon_url": start_data.get("favicon_url"),
@@ -574,7 +554,6 @@ async def crawl_site(start_url: str, max_pages: int = 5, max_depth: int = 1, sam
     if same_origin_only:
         internal_links = [lnk for lnk in internal_links if _is_same_origin(start_data.get("final_url", start_url), lnk)]
 
-    # Pick up to max_pages-1 additional pages
     to_crawl = internal_links[: max_pages - 1]
 
     pages: list[dict] = [
@@ -635,7 +614,6 @@ async def download_image_bytes(image_url: str, max_bytes: int = MAX_FAVICON_BYTE
         content_type = response.headers.get("content-type", "application/octet-stream").lower()
         # Allow images and ico
         if content_type and not any(kind in content_type for kind in ("image/", "application/octet-stream")) and "ico" not in content_type:
-            # still allow, but not strict
             pass
         chunks: list[bytes] = []
         total = 0

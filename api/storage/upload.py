@@ -20,12 +20,10 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
                 db: Session = Depends(get_db), user=Depends(get_current_user)):
     filename = file.filename or "upload"
 
-    # Check agent ownership
     agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
     if not agent:
         raise HTTPException(status_code=403, detail="Agent not found or not yours")
 
-    # Check quota limits
     check_files_quota(db, user)
 
     try:
@@ -34,7 +32,6 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     file_size_bytes = len(file_content)
     
-    # Check storage quota
     check_storage_quota(db, user, file_size_bytes)
 
     try:
@@ -60,7 +57,6 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
 
     kb_id = str(uuid_lib.uuid4())
     
-    # Determine source type and file extension
     if filename.lower().endswith(".pdf"):
         source_type = models.KBSourceType.upload_pdf
     elif filename.lower().endswith(".txt"):
@@ -86,7 +82,6 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
     db.commit()
     db.refresh(kb)
     
-    # Update storage usage
     increment_storage_usage(db, user.id, file_size_bytes + extracted_size_bytes, 0)
 
     job = models.KBIngestJob(kb_id=kb.id, state=models.JobState.queued)

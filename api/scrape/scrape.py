@@ -112,7 +112,6 @@ async def multi_scrape(request: Request, response: Response, body: MultiScrapeRe
     if len(body.urls) > 10:
         raise HTTPException(status_code=400, detail="Too many URLs (max 10)")
     results = await scrape_multiple_urls(body.urls, concurrency=body.concurrency)
-    # Map to enhanced format
     mapped = []
     for r in results:
         if r.get("success"):
