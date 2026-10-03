@@ -103,7 +103,7 @@ export default function Landing() {
             >
               <Rocket className="h-4 w-4 text-brand-primary" />
               <span className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
-                v2.0 Now Available
+                Trained on your docs · Human handoff built-in
               </span>
             </motion.div>
 
@@ -113,7 +113,7 @@ export default function Landing() {
               transition={{ delay: 0.05 }}
               className="text-4xl font-bold leading-[1.08] tracking-[-0.03em] text-brand-primary md:text-6xl lg:text-7xl"
             >
-              Autonomous Customer Care
+              Turn your docs into a support agent that resolves tickets
             </motion.h1>
 
             <motion.p
@@ -122,8 +122,9 @@ export default function Landing() {
               transition={{ delay: 0.12 }}
               className="mx-auto mt-6 max-w-2xl text-base leading-relaxed text-on-surface-variant md:text-xl"
             >
-              Integrate precise, reliable AI agents on your  website with  WhatsApp, Slack and email.
-              Resolve tickets faster with uncompromising technical accuracy.
+              Create an AI agent trained on your PDFs, docs, and website. Embed it on
+              your site with one script — get cited, accurate answers plus seamless
+              handoff to your human team when it matters. No hallucinations, no dead ends.
             </motion.p>
 
             <motion.div

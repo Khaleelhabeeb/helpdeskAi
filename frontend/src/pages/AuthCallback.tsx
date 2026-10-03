@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
-import { useAuth } from '../lib/auth';
+import { useAuth, fetchSessionRoles, type SessionRoles } from '../lib/auth';
+import { apiFetch } from '../lib/api';
+import { PENDING_INVITE_TOKEN_KEY, HUMAN_AGENT_SELECTION_KEY } from '../lib/humanAgentApi';
 
 const OAUTH_VERIFIER_KEY = 'helpdeskai.oauth_code_verifier';
 
@@ -37,6 +39,49 @@ export default function AuthCallback() {
       return;
     }
 
+    // Single login, role-aware landing: owners → dashboard, agents → agent
+    // dashboard, both → workspace picker. A pending invite token is accepted first.
+    async function finishWithRoles() {
+      let roles: SessionRoles | null = null;
+      const pending = localStorage.getItem(PENDING_INVITE_TOKEN_KEY);
+      if (pending) {
+        setMessage('Accepting your team invite...');
+        try {
+          const accepted = await apiFetch<{ human_agent: { id: string } }>('/human-agent/auth/accept-invite-with-session', {
+            method: 'POST',
+            body: JSON.stringify({ token: pending }),
+          });
+          localStorage.removeItem(PENDING_INVITE_TOKEN_KEY);
+          try { localStorage.setItem(HUMAN_AGENT_SELECTION_KEY, accepted.human_agent.id); } catch {}
+          navigate('/human-agent/dashboard', { replace: true });
+          return;
+        } catch (err) {
+          localStorage.removeItem(PENDING_INVITE_TOKEN_KEY);
+          setFailed(true);
+          setMessage(err instanceof Error ? err.message : 'Could not accept the invite.');
+          return;
+        }
+      }
+      try {
+        roles = await fetchSessionRoles();
+      } catch {
+        navigate('/dashboard', { replace: true });
+        return;
+      }
+      const activeMemberships = (roles?.memberships || []).filter((m) => m.status === 'active');
+      const ownsAgents = (roles?.owned_agents || []).length > 0;
+      if (activeMemberships.length > 0 && !ownsAgents) {
+        if (activeMemberships.length === 1) {
+          try { localStorage.setItem(HUMAN_AGENT_SELECTION_KEY, activeMemberships[0].human_agent_id); } catch {}
+        }
+        navigate('/human-agent/dashboard', { replace: true });
+      } else if (activeMemberships.length > 0 && ownsAgents) {
+        navigate('/welcome', { replace: true });
+      } else {
+        navigate('/dashboard', { replace: true });
+      }
+    }
+
     if (!params.accessToken) {
       if (params.code) {
         const verifier = sessionStorage.getItem(OAUTH_VERIFIER_KEY);
@@ -49,7 +94,7 @@ export default function AuthCallback() {
         exchangeOAuthCode(params.code, verifier, `${window.location.origin}/auth/callback`)
           .then(() => {
             sessionStorage.removeItem(OAUTH_VERIFIER_KEY);
-            navigate('/dashboard', { replace: true });
+            return finishWithRoles();
           })
           .catch((err) => {
             setFailed(true);
@@ -66,7 +111,7 @@ export default function AuthCallback() {
     }
 
     completeOAuthSignIn(params.accessToken, params.refreshToken)
-      .then(() => navigate('/dashboard', { replace: true }))
+      .then(() => finishWithRoles())
       .catch((err) => {
         setFailed(true);
         setMessage(err instanceof Error ? err.message : 'Could not finish sign-in.');

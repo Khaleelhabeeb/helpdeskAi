@@ -5,9 +5,9 @@ from uuid import UUID
 
 
 class AgentCreate(BaseModel):
-    name: str
-    instructions: Optional[str] = None
-    model: Optional[str] = None
+    name: str = Field(..., min_length=1, max_length=100)
+    instructions: Optional[str] = Field(None, max_length=8000)
+    model: Optional[str] = Field(None, max_length=120)
 
 
 class AgentOut(BaseModel):

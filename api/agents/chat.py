@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from db import models
 from db.database import BackgroundSession
 from services.chat_runtime import get_agent_runtime
 from services.rag_service import build_messages, aretrieve_context, astream_answer
+from services.redis_client import aredis_get_json, aredis_set_json, cache_key
 from utils.jwt import get_current_user
 from utils.rate_limit import create_limiter
 
@@ -54,6 +56,20 @@ async def chat_with_agent(
         raise HTTPException(status_code=400, detail="Agent has no instructions set yet")
 
     unique_id = chat.unique_id or str(uuid.uuid4())
+    # Idempotency: retry with same unique_id returns cached answer without re-calling LLM
+    _idem_key = cache_key("idem", "chat", str(user.id), str(runtime.id), unique_id)
+    cached = await aredis_get_json(_idem_key)
+    if isinstance(cached, dict) and cached.get("answer") is not None:
+        async def _cached_generate():
+            yield _sse("meta", {"unique_id": unique_id, "deduped": True})
+            text = str(cached.get("answer") or "")
+            for i in range(0, len(text), 1000):
+                yield _sse("token", {"content": text[i:i + 1000]})
+            yield _sse("done", {"unique_id": unique_id, "deduped": True})
+        return StreamingResponse(
+            _cached_generate(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     async def generate():
         answer_parts: list[str] = []
@@ -87,6 +103,10 @@ async def chat_with_agent(
                 yield _sse("token", {"content": token})
 
             answer = "".join(answer_parts)
+            try:
+                await aredis_set_json(_idem_key, {"answer": answer}, 86400)
+            except Exception:
+                pass
             background_tasks.add_task(
                 _log_usage,
                 user_id=user.id,
@@ -103,6 +123,9 @@ async def chat_with_agent(
                 (time.perf_counter() - started) * 1000,
             )
             yield _sse("done", {"unique_id": unique_id})
+        except asyncio.CancelledError:
+            logger.info("chat_stream_cancelled agent_id=%s unique_id=%s", agent_id, unique_id)
+            raise
         except Exception:
             logger.exception("chat_generation_failed agent_id=%s user_id=%s unique_id=%s", agent_id, user.id, unique_id)
             yield _sse("error", {"detail": "Sorry, I could not answer that right now."})

@@ -212,16 +212,19 @@ def update_assignments(
 def _requeue_conversations_for_human(db: Session, human_agent_id: uuid.UUID):
     """Requeue every open conversation assigned to a human agent being removed/disabled."""
     from services import handoff_service
+    from services.handoff_service import release_conversation
     convs = db.query(models.Conversation).filter(
         models.Conversation.assigned_human_agent_id == human_agent_id,
         models.Conversation.status == "human",
     ).all()
     for c in convs:
-        c.status = "queued"
-        c.assigned_human_agent_id = None
-        c.updated_at = datetime.now(timezone.utc)
-    if convs:
-        db.commit()
+        try:
+            release_conversation(db, c, reason="owner_remove")
+        except Exception:
+            c.status = "queued"
+            c.assigned_human_agent_id = None
+            c.updated_at = datetime.now(timezone.utc)
+            db.commit()
         for c in convs:
             try:
                 payload = {"type": "status_change", "status": "queued", "conversation_id": str(c.id)}

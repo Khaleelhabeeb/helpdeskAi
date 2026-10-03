@@ -15,10 +15,29 @@ from services.storage_quota import check_storage_quota, check_files_quota, incre
 
 router = APIRouter()
 
+_ALLOWED_EXTENSIONS = {".pdf", ".txt", ".docx"}
+_ALLOWED_CONTENT_TYPES = {
+    "application/pdf", "text/plain", "text/markdown",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/octet-stream",
+}
+
+
+def _sanitize_filename(name: str) -> str:
+    import os as _os
+    base = _os.path.basename(name or "upload")[:120].strip()
+    return base or "upload"
+
+
 @router.post("/upload")
 async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), legacy_prompt_update: bool = Form(False),
                 db: Session = Depends(get_db), user=Depends(get_current_user)):
-    filename = file.filename or "upload"
+    filename = _sanitize_filename(file.filename or "upload")
+    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in _ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=415, detail=f"Unsupported file type '{ext}'. Allowed: pdf, txt, docx")
+    if file.content_type and file.content_type not in _ALLOWED_CONTENT_TYPES:
+        raise HTTPException(status_code=415, detail="Unsupported content type")
 
     agent = db.query(models.Agent).filter(models.Agent.id == agent_id, models.Agent.user_id == user.id).first()
     if not agent:
@@ -30,8 +49,13 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
         file_content = await read_upload_limited(file)
     except PayloadTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
+    # Magic-byte validation (extension alone is spoofable)
+    if ext == ".pdf" and not file_content.startswith(b"%PDF"):
+        raise HTTPException(status_code=415, detail="File content is not a valid PDF")
+    if ext == ".docx" and not file_content.startswith(b"PK"):
+        raise HTTPException(status_code=415, detail="File content is not a valid DOCX")
     file_size_bytes = len(file_content)
-    
+
     check_storage_quota(db, user, file_size_bytes)
 
     try:
@@ -39,6 +63,8 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
         extracted_size_bytes = enforce_text_limit(extracted_text)
     except PayloadTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     try:
         stored = await store_kb_source(file_content, filename, file.content_type)

@@ -113,9 +113,26 @@ class Conversation(Base):
     # Last time a fallback "we'll follow up" email was sent
     notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
+    # Lifecycle hardening: idle/timeout clocks (nullable for backfill compat)
+    last_visitor_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_agent_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    queued_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    resolved_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("human_agents.id", ondelete="SET NULL"), nullable=True
+    )
+    # visitor_idle | agent_idle | queue_timeout | email_timeout | manual
+    close_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    requeue_count: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
+    queue_notified_count: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
+    transcript_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
     __table_args__ = (
         Index("ix_conversations_agent_status", "agent_id", "status"),
         Index("ix_conversations_visitor", "visitor_id"),
+        Index("ix_conversations_status_updated", "status", "updated_at"),
+        Index("ix_conversations_status_queued", "status", "queued_at"),
     )
 
     assigned_human_agent: Mapped[Optional["HumanAgent"]] = relationship(
@@ -124,3 +141,26 @@ class Conversation(Base):
         back_populates="conversations",
     )
     agent: Mapped["Agent"] = relationship("Agent")  # type: ignore[name-defined]
+
+
+class HumanPresence(Base):
+    """DB-backed presence so N replicas agree on who is online.
+
+    Written on WS connect/heartbeat/disconnect (debounced); sweeper and
+    fallback-email gates read this instead of in-memory counters.
+    """
+
+    __tablename__ = "human_presence"
+
+    human_agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("human_agents.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    last_heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime, default=func.now(), nullable=False
+    )
+    connection_count: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=func.now(), onupdate=func.now(), nullable=False
+    )

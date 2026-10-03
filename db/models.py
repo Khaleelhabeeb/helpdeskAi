@@ -18,6 +18,7 @@ from models import (
     HumanAgent,
     AgentAssignment,
     Conversation,
+    HumanPresence,
 )
 
 __all__ = [
@@ -39,4 +40,5 @@ __all__ = [
     "HumanAgent",
     "AgentAssignment",
     "Conversation",
+    "HumanPresence",
 ]

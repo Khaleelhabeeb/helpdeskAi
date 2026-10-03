@@ -629,14 +629,25 @@
       if (Object.keys(state.context).length > 0) payload.context  = state.context;
       if (state.visitorEmail)                    payload.visitor_email = state.visitorEmail;
 
-      const response = await fetch(`${apiBase}/public/widget/${deploymentId}/chat`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Widget-Version": WIDGET_VERSION,
-        },
-        body: JSON.stringify(payload),
-      });
+      const controller = new AbortController();
+      const chatTimeout = setTimeout(() => controller.abort(), 60000);
+      const slowNotice = setTimeout(() => {
+        if (botBubble && !answerParts.length) botBubble.textContent = "Still working on it — this is taking longer than usual…";
+      }, 8000);
+      let response;
+      try {
+        response = await fetch(`${apiBase}/public/widget/${deploymentId}/chat`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Widget-Version": WIDGET_VERSION,
+          },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(slowNotice);
+      }
 
       if (!response.ok || !response.body) throw new Error("Chat failed");
 
@@ -689,10 +700,14 @@
       }
     } catch (error) {
       console.error("[HelpdeskAI Panel] Chat failed:", error);
-      if (botBubble) botBubble.textContent = "Sorry, I could not answer that right now.";
+      const msg = error && error.name === "AbortError"
+        ? "That took too long — please try again."
+        : "Sorry, I could not answer that right now. Please check your connection and retry.";
+      if (botBubble) botBubble.textContent = msg;
       else if (typingRow && typingRow.parentNode) typingRow.remove();
       sendToParent({ type: "WIDGET_ERROR", code: "CHAT_FAIL", message: error.message, details: { deploymentId } });
     } finally {
+      try { clearTimeout(chatTimeout); } catch { /* noop */ }
       state.sending = false;
       // Don't re-enable send when we're in a handoff pause (email/queued/resolved)
       if (state.convStatus === "collecting_email" || state.convStatus === "queued" || state.convStatus === "resolved") {
@@ -733,7 +748,47 @@
   inputEl.addEventListener("input", autoResize);
 
   function sendToParent(message) {
-    try { window.parent.postMessage(message, "*"); } catch { /* silent */ }
+    // Prefer the embedding page origin; fall back to wildcard for file:// previews
+    let target = "*";
+    try {
+      if (location.ancestorOrigins && location.ancestorOrigins.length) target = location.ancestorOrigins[0];
+      else if (document.referrer) target = new URL(document.referrer).origin;
+    } catch { target = "*"; }
+    try { window.parent.postMessage(message, target); } catch { /* silent */ }
+  }
+
+  // Visitor heartbeat keeps server idle-close accurate; queue polling covers WS drops
+  setInterval(async () => {
+    try {
+      if (!state.conversationId) return;
+      if (document.visibilityState === "hidden") return;
+      await fetch(`${apiBase}/public/widget/${deploymentId}/conversations/${state.conversationId}/heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          visitor_id: initialVisitorId,
+          visitor_token: state.visitorToken || undefined,
+        }),
+      });
+      if (state.convStatus === "queued") {
+        const r = await fetch(
+          `${apiBase}/public/widget/${deploymentId}/conversations/${state.conversationId}/queue-position?visitor_id=${encodeURIComponent(initialVisitorId)}`
+        );
+        if (r.ok) {
+          const pos = await r.json();
+          if (pos && pos.position) showQueuePosition(pos.position, pos.eta_seconds);
+        }
+      }
+    } catch { /* best-effort */ }
+  }, 60000);
+
+  function showQueuePosition(position, etaSeconds) {
+    try {
+      const banner = document.querySelector(".queue-banner .queue-text");
+      if (!banner || !position) return;
+      const mins = Math.max(1, Math.round((etaSeconds || position * 120) / 60));
+      banner.textContent = `You're #${position} in the queue — estimated wait ~${mins} min. We'll email you if you leave.`;
+    } catch { /* noop */ }
   }
   function sendTelemetry(event, data) {
     sendToParent({ type: "WIDGET_TELEMETRY", event, data });

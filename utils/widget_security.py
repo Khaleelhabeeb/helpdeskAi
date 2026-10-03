@@ -12,8 +12,13 @@ logger = logging.getLogger(__name__)
 
 
 def _widget_secret() -> str:
-    # Re-read env each time so tests can flip it
-    return (os.getenv("WIDGET_SECRET") or os.getenv("JWT_SECRET") or "change-this-in-production").strip() or "change-this-in-production"
+    # Re-read env each time so tests can flip it. Fail closed in production.
+    secret = (os.getenv("WIDGET_SECRET") or os.getenv("JWT_SECRET") or "").strip()
+    if not secret or secret == "change-this-in-production":
+        if os.getenv("ENV") == "production":
+            raise RuntimeError("WIDGET_SECRET must be set in production")
+        return "change-this-in-production"
+    return secret
 
 
 WIDGET_SECRET = _widget_secret()
@@ -154,12 +159,26 @@ def detect_abuse_signature(
         "onerror=",
         "onclick=",
         "<iframe",
+        "<object",
+        "<embed",
+        "vbscript:",
+        "data:text/html",
     ]
     message_lower = message.lower()
     for pattern in suspicious_patterns:
         if pattern in message_lower:
             return True, f"Suspicious pattern: {pattern}"
-    
+
+    # Flood / link-spam heuristics (cheap, no ML dependency)
+    if len(message) > 50:
+        import re as _re
+        urls = _re.findall(r"https?://\S+", message_lower)
+        if len(urls) >= 4:
+            return True, "Too many links"
+        # Long repetition (e.g. "aaaaa..." or pasted blobs)
+        if _re.search(r"(.)\1{50,}", message_lower):
+            return True, "Repetitive content"
+
     if not user_agent or len(user_agent) < 10:
         return True, "Missing or invalid user agent"
 

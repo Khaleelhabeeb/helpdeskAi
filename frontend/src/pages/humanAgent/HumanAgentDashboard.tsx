@@ -62,7 +62,10 @@ export default function HumanAgentDashboard() {
   const selectedIdRef = useRef<string | null>(selectedId);
   useEffect(() => { selectedIdRef.current = selectedId; try { (document as any).__humanSelectedId = selectedId; } catch {} }, [selectedId]);
 
-  const token = typeof window !== 'undefined' ? localStorage.getItem(HUMAN_AGENT_TOKEN_KEY) : null;
+  // Unified login: legacy agent token or the single Supabase session both work.
+  const token = typeof window !== 'undefined'
+    ? (localStorage.getItem(HUMAN_AGENT_TOKEN_KEY) || localStorage.getItem('helpdeskai.access_token'))
+    : null;
 
   useEffect(() => {
     if (!token) { nav('/human-agent/login', { replace: true }); return; }
@@ -75,7 +78,11 @@ export default function HumanAgentDashboard() {
         if (fetched.length && !activeAgentId) setActiveAgentId(fetched[0].id);
         if (fetched.length === 0) setError('');
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load agents');
+        const msg = e instanceof Error ? e.message : 'Failed to load agents';
+        if (!cancelled) {
+          if (/several agent workspaces/i.test(msg)) { nav('/welcome', { replace: true }); return; }
+          setError(msg);
+        }
       }
     }
     init();
@@ -142,11 +149,13 @@ export default function HumanAgentDashboard() {
           try { sock.send(JSON.stringify({ type: 'ping' })); } catch {}
         }, 25000);
       };
-      sock.onclose = () => {
+      sock.onclose = (ev) => {
         setWsConnected(false);
         wsRef.current = null;
         if (pingTimer) { window.clearInterval(pingTimer); pingTimer = null; }
         if (cancelled) return;
+        // 4409 = signed in across several agent workspaces: pick one first.
+        if (ev && ev.code === 4409) { nav('/welcome', { replace: true }); return; }
         // Reconnect with exponential backoff
         const delay = Math.min(30000, 1000 * Math.pow(1.8, reconnectAttempts));
         reconnectAttempts += 1;
@@ -324,6 +333,9 @@ export default function HumanAgentDashboard() {
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => loadConversations()} className="h-8 w-8 grid place-items-center rounded-lg border border-zinc-200 bg-zinc-50 hover:bg-white text-zinc-600"><RefreshCw className="w-4 h-4" /></button>
+          {typeof window !== 'undefined' && localStorage.getItem('helpdeskai.access_token') && (
+            <button onClick={() => nav('/welcome')} className="h-8 px-3 rounded-lg border border-zinc-200 bg-white text-xs font-bold hover:bg-zinc-50">Workspaces</button>
+          )}
           <button onClick={signOut} className="h-8 px-3 rounded-lg border border-zinc-200 bg-white text-xs font-bold hover:bg-zinc-50 flex items-center gap-1.5"><LogOut className="w-3.5 h-3.5" /> Sign out</button>
         </div>
       </header>

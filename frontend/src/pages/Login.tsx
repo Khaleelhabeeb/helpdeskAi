@@ -218,6 +218,9 @@ export default function Login() {
           <p className="text-[11px] leading-relaxed text-on-surface-variant/60 text-center">
             Magic links expire after a few minutes and can only be used once. If you don&apos;t see the email, check spam.
           </p>
+          <p className="mt-2 text-[11px] leading-relaxed text-on-surface-variant/60 text-center">
+            Support agent with a team invite? Sign in here with your invited email — you&apos;ll land in your agent workspace automatically.
+          </p>
         </div>
       </motion.div>
     </div>

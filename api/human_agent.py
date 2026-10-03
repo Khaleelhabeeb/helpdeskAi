@@ -42,6 +42,32 @@ logger = logging.getLogger(__name__)
 limiter = create_limiter()
 # One fallback email per conversation per 5 minutes (in-memory; use Redis for multi-worker)
 _email_debounce: dict[str, float] = {}
+# Per-email login backoff: email -> (fail_count, locked_until_ts).
+# Best-effort single-process throttle (not shared across workers).
+_login_attempts: dict[str, tuple[int, float]] = {}
+LOGIN_MAX_FAILS = 5
+LOGIN_LOCK_S = 900
+_LOGIN_BUCKET_MAX_KEYS = 5000
+
+
+def _login_locked(email: str) -> bool:
+    fails, until = _login_attempts.get(email, (0, 0))
+    return time.time() < until
+
+
+def _login_record(email: str, ok: bool) -> None:
+    fails, until = _login_attempts.get(email, (0, 0))
+    if ok:
+        _login_attempts.pop(email, None)
+        return
+    fails += 1
+    if fails >= LOGIN_MAX_FAILS:
+        _login_attempts[email] = (fails, time.time() + LOGIN_LOCK_S)
+        logger.warning("human_login_locked email_hash=%s fails=%s", hash(email) % 10**8, fails)
+    else:
+        _login_attempts[email] = (fails, until)
+    while len(_login_attempts) > _LOGIN_BUCKET_MAX_KEYS:
+        _login_attempts.pop(next(iter(_login_attempts)))
 
 router = APIRouter()
 auth_router = APIRouter()
@@ -64,6 +90,8 @@ class SendMessageRequest(BaseModel):
 
 
 def _conversation_out(conv: models.Conversation, include_messages: bool = False, db: Session | None = None, message_limit: int = 50, message_after_id: int | None = None) -> dict:
+    def _iso(v):
+        return v.isoformat() if v else None
     base = {
         "id": str(conv.id),
         "agent_id": str(conv.agent_id),
@@ -73,9 +101,17 @@ def _conversation_out(conv: models.Conversation, include_messages: bool = False,
         "visitor_email": conv.visitor_email,
         "status": conv.status,
         "assigned_human_agent_id": str(conv.assigned_human_agent_id) if conv.assigned_human_agent_id else None,
-        "created_at": conv.created_at.isoformat() if conv.created_at else None,
-        "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
-        "notified_at": conv.notified_at.isoformat() if conv.notified_at else None,
+        "created_at": _iso(conv.created_at),
+        "updated_at": _iso(conv.updated_at),
+        "notified_at": _iso(getattr(conv, "notified_at", None)),
+        "last_visitor_at": _iso(getattr(conv, "last_visitor_at", None)),
+        "last_agent_at": _iso(getattr(conv, "last_agent_at", None)),
+        "queued_at": _iso(getattr(conv, "queued_at", None)),
+        "claimed_at": _iso(getattr(conv, "claimed_at", None)),
+        "resolved_at": _iso(getattr(conv, "resolved_at", None)),
+        "close_reason": getattr(conv, "close_reason", None),
+        "requeue_count": int(getattr(conv, "requeue_count", 0) or 0),
+        "queue_notified_count": int(getattr(conv, "queue_notified_count", 0) or 0),
     }
     if conv.assigned_human_agent:
         base["assigned_human_agent_name"] = conv.assigned_human_agent.name or conv.assigned_human_agent.email
@@ -204,14 +240,82 @@ def invite_status(request: Request, response: Response, token: str = Query(..., 
 
 
 
+class AcceptInviteWithSessionRequest(BaseModel):
+    token: str = Field(..., min_length=10, max_length=256)
+
+
+@auth_router.post("/accept-invite-with-session")
+@limiter.limit("10/minute")
+def accept_invite_with_session(
+    payload: AcceptInviteWithSessionRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Unified invite acceptance: no agent password needed.
+
+    The caller signs in with the single login (magic link) and presents the
+    invite token. Acceptance requires the verified session email to match the
+    invite email — email ownership *is* the proof. Idempotent when already active.
+    """
+    from services.supabase_auth import verify_supabase_token_string
+
+    auth = request.headers.get("authorization") or ""
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Sign in first, then accept the invite")
+    user = verify_supabase_token_string(auth[7:].strip(), db)
+
+    ha = find_human_by_invite_token(db, payload.token.strip())
+    if not ha:
+        # Already accepted via this flow (token cleared)? Match by email.
+        ha = (
+            db.query(models.HumanAgent)
+            .filter(models.HumanAgent.email == user.email.lower())
+            .filter(models.HumanAgent.status == "active")
+            .first()
+        )
+        if not ha:
+            raise HTTPException(status_code=404, detail="Invalid or expired invite token")
+    else:
+        if ha.email.lower() != user.email.lower():
+            raise HTTPException(
+                status_code=403,
+                detail=f"This invite is for {ha.email}. Sign in with that email to accept it.",
+            )
+        if ha.invite_token_expires and ha.invite_token_expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+            raise HTTPException(status_code=410, detail="Invite link has expired. Ask the account owner to resend it.")
+        if ha.status == "disabled":
+            raise HTTPException(status_code=403, detail="This invite has been disabled")
+        ha.status = "active"
+        ha.invite_token = None
+        ha.invite_token_expires = None
+        db.commit()
+        db.refresh(ha)
+        logger.info("human_agent_activated_unified id=%s email=%s", ha.id, ha.email)
+
+    assignments = [str(a.agent_id) for a in ha.assignments] if ha.assignments is not None else []
+    return {
+        "human_agent": {
+            "id": str(ha.id),
+            "email": ha.email,
+            "name": ha.name,
+            "owner_user_id": ha.owner_user_id,
+            "status": ha.status,
+        },
+        "assignments": assignments,
+    }
+
+
 @auth_router.post("/login")
-@limiter.limit("5/minute")
+@limiter.limit("10/minute")
 def human_agent_login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     email = payload.email.lower().strip()
+    if _login_locked(email):
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Try again later.")
     candidates = db.query(models.HumanAgent).filter(models.HumanAgent.email == email).all()
     if not candidates:
         # Always burn a bcrypt compare so a missing user is not detectable by timing
         verify_password_with_dummy(payload.password, None)
+        _login_record(email, False)
         raise HTTPException(status_code=401, detail="Invalid email or password")
     # The same email may exist under several owners; require disambiguation
     distinct_owners = {c.owner_user_id for c in candidates if c.status == "active"}
@@ -219,8 +323,9 @@ def human_agent_login(payload: LoginRequest, request: Request, response: Respons
         matches = [c for c in candidates if c.status == "active" and c.password_hash and verify_password(payload.password, c.password_hash)]
         if len(matches) == 1:
             matched = matches[0]
+            _login_record(email, True)
             jwt_token = create_human_agent_jwt(matched)
-            logger.warning("cross_tenant_login_single_match email=%s owners=%s chosen=%s", email, distinct_owners, matched.owner_user_id)
+            logger.info("human_agent_login id=%s owner=%s", matched.id, matched.owner_user_id)
             return {
                 "access_token": jwt_token,
                 "token_type": "bearer",
@@ -228,10 +333,12 @@ def human_agent_login(payload: LoginRequest, request: Request, response: Respons
             }
         elif len(matches) > 1:
             # Multiple tenants have same email+password — ambiguous
-            logger.warning("cross_tenant_login_ambiguous email=%s owners=%s", email, distinct_owners)
+            logger.warning("cross_tenant_login_ambiguous owners=%s", distinct_owners)
+            _login_record(email, False)
             raise HTTPException(status_code=409, detail="This email exists in multiple workspaces with same password. Please contact owner for a distinct login link.")
         else:
             # no match
+            _login_record(email, False)
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
     active = [c for c in candidates if c.status == "active" and c.password_hash]
@@ -249,10 +356,12 @@ def human_agent_login(payload: LoginRequest, request: Request, response: Respons
         else:
             pass
     if not matched:
+        _login_record(email, False)
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
+    _login_record(email, True)
     jwt_token = create_human_agent_jwt(matched)
-    logger.info("human_agent_login id=%s email=%s owner=%s", matched.id, matched.email, matched.owner_user_id)
+    logger.info("human_agent_login id=%s owner=%s", matched.id, matched.owner_user_id)
     return {
         "access_token": jwt_token,
         "token_type": "bearer",
@@ -472,7 +581,11 @@ async def send_message(
         created_at=datetime.now(timezone.utc),
     )
     db.add(msg)
-    conv.updated_at = datetime.now(timezone.utc)
+    try:
+        from services.handoff_service import touch_agent_activity
+        touch_agent_activity(conv)
+    except Exception:
+        conv.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(msg)
 
@@ -552,11 +665,7 @@ async def resolve_conversation(
         raise HTTPException(status_code=403, detail="Only the assigned agent can resolve this conversation")
 
     from services.handoff_service import transition_status
-    transition_status(db, conv, "resolved", notify=True)
-    await handoff_service.broadcast_to_conversation(str(conv.id), {
-        "type": "resolved",
-        "conversation_id": str(conv.id),
-    })
+    # Persist system message BEFORE broadcast so WS consumers never see status before transcript
     if conv.session_id:
         try:
             db.add(models.ChatMessage(
@@ -566,11 +675,37 @@ async def resolve_conversation(
                 sender_type="system",
                 created_at=datetime.now(timezone.utc),
             ))
-            db.commit()
+            db.flush()
         except Exception:
             logger.exception("resolve_system_message_failed conversation_id=%s", conv.id)
+    transition_status(db, conv, "resolved", notify=True, close_reason="manual", resolved_by=human_agent.id)
 
     logger.info("conversation_resolved id=%s by=%s", conv.id, human_agent.id)
+    db.refresh(conv)
+    return _conversation_out(conv)
+
+
+@router.post("/conversations/{conversation_id}/release")
+async def release_conversation(
+    conversation_id: str,
+    human_agent: models.HumanAgent = Depends(get_current_human_agent),
+    db: Session = Depends(get_db),
+):
+    """Release a claimed conversation back to the queue (abandon/transfer)."""
+    try:
+        cid = uuid.UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = db.query(models.Conversation).filter(models.Conversation.id == cid).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    _require_assignment(db, human_agent, conv)
+    if conv.status != "human":
+        raise HTTPException(status_code=409, detail=f"Only 'human' conversations can be released (current: {conv.status})")
+    if conv.assigned_human_agent_id != human_agent.id:
+        raise HTTPException(status_code=403, detail="Only the assigned agent can release this conversation")
+    from services.handoff_service import release_conversation as _release
+    _release(db, conv, reason="manual")
     db.refresh(conv)
     return _conversation_out(conv)
 
@@ -614,36 +749,26 @@ async def human_agent_ws(
         await websocket.close(code=4401)
         return
 
-    # Verify JWT — try human_agent audience first, then ws ticket audience
-    from services.human_agent_auth import decode_human_agent_jwt
-    payload = None
-    for aud in ("human_agent_ws", "human_agent"):
-        try:
-            payload = decode_human_agent_jwt(token, audience=aud)
-            break
-        except HTTPException:
-            continue
-    if payload is None:
-        try:
-            payload = decode_human_agent_jwt(token)  # legacy fallback
-        except HTTPException:
-            await websocket.close(code=4401)
-            return
-    if payload.get("role") != "human_agent":
-        await websocket.close(code=4403)
-        return
-    try:
-        ha_uuid = uuid.UUID(str(payload.get("human_agent_id") or payload.get("sub")))
-    except Exception:
-        await websocket.close(code=4401)
-        return
+    # Unified handshake: legacy human-agent JWT / ws_ticket, or the same Supabase
+    # session owners use (membership resolved by verified email). For Supabase
+    # sessions with several memberships, ?human_agent_id= selects the workspace.
+    requested_id = websocket.query_params.get("human_agent_id")
+    from services.human_agent_auth import resolve_ws_human_agent
     # Scoped DB lookup — do not hold session
     ha = None
     assigned_agent_ids: list[uuid.UUID] = []
     try:
         with SessionLocal() as db:
-            ha_row = db.query(models.HumanAgent).filter(models.HumanAgent.id == ha_uuid).first()
-            if not ha_row or ha_row.status != "active":
+            try:
+                ha_row = resolve_ws_human_agent(db, token, requested_id)
+            except HTTPException as exc:
+                if exc.status_code == 409:
+                    # Supabase session spans several agent workspaces: client must
+                    # pick one (?human_agent_id=) via /welcome instead of retrying.
+                    await websocket.close(code=4409)
+                    return
+                raise
+            if not ha_row:
                 await websocket.close(code=4401)
                 return
             # need ha info after session close

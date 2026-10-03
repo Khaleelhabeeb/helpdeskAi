@@ -179,11 +179,9 @@ def upsert_local_user(db: Session, supabase_user_id: str, email: str) -> User:
     return user
 
 
-def verify_supabase_token(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_db),
-) -> User:
-    token = credentials.credentials
+def verify_supabase_token_string(token: str, db: Session) -> User:
+    """Verify a raw Supabase access token (no FastAPI dependency). Shared by
+    owner auth and unified human-agent auth so both roles use one identity."""
     cached_user = _get_cached_user(db, token)
     if cached_user:
         return cached_user
@@ -199,3 +197,66 @@ def verify_supabase_token(
     except Exception as exc:
         logger.warning("Supabase token verification failed: %s", exc)
         raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.") from exc
+
+
+def verify_supabase_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db),
+) -> User:
+    return verify_supabase_token_string(credentials.credentials, db)
+
+
+def get_identity_overview(db: Session, user: User) -> dict:
+    """Unified identity: owner workspace + human-agent memberships for one login.
+
+    A single verified email carries every role, so agents never need a second
+    account. Memberships include `invited` rows so the UI can prompt invite
+    acceptance.
+    """
+    from db import models as _models
+
+    email = (user.email or "").lower()
+    owned = (
+        db.query(_models.Agent)
+        .filter(_models.Agent.user_id == user.id)
+        .order_by(_models.Agent.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    memberships: list[dict] = []
+    if email:
+        rows = (
+            db.query(_models.HumanAgent)
+            .filter(_models.HumanAgent.email == email)
+            .filter(_models.HumanAgent.status.in_(["invited", "active"]))
+            .all()
+        )
+        owner_ids = {r.owner_user_id for r in rows}
+        owners = (
+            {u.id: u.email for u in db.query(_models.User).filter(_models.User.id.in_(owner_ids)).all()}
+            if owner_ids
+            else {}
+        )
+        for ha in rows:
+            agent_ids = [
+                str(a.agent_id)
+                for a in db.query(_models.AgentAssignment)
+                .filter(_models.AgentAssignment.human_agent_id == ha.id)
+                .all()
+            ]
+            memberships.append(
+                {
+                    "human_agent_id": str(ha.id),
+                    "owner_user_id": ha.owner_user_id,
+                    "owner_email": owners.get(ha.owner_user_id),
+                    "email": ha.email,
+                    "name": ha.name,
+                    "status": ha.status,
+                    "agent_ids": agent_ids,
+                }
+            )
+    return {
+        "user": {"id": user.id, "email": user.email, "user_type": user.user_type},
+        "owned_agents": [{"id": str(a.id), "name": a.name} for a in owned],
+        "memberships": memberships,
+    }

@@ -60,11 +60,28 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_INITIAL_MESSAGES = ["Hi! What can I help you with?"]
 DEFAULT_ALLOWED_DOMAINS = ["localhost", "127.0.0.1"]
-RATE_LIMIT_WINDOW_SECONDS = 60
-RATE_LIMIT_MAX_REQUESTS = 30
-WIDGET_CONFIG_CACHE_TTL_SECONDS = 300
+RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "30"))
+WIDGET_CONFIG_CACHE_TTL_SECONDS = int(os.getenv("WIDGET_CONFIG_CACHE_TTL_SECONDS", "300"))
 FALLBACK_RATE_LIMIT_MAX_KEYS = 1000
 CHAT_RETRIEVAL_TOP_K_CAP = int(os.getenv("CHAT_RETRIEVAL_TOP_K_CAP", "3"))
+TELEMETRY_RATE_WINDOW_S = 60
+TELEMETRY_MAX_PER_WINDOW = int(os.getenv("TELEMETRY_MAX_PER_WINDOW", "60"))
+
+
+def _is_prod() -> bool:
+    return os.getenv("ENV") == "production"
+
+
+def _require_origin_allowed(request: Request, allowed: list[str] | None) -> None:
+    """Fail-closed origin check: empty host blocked in prod, allowed in dev/tests."""
+    host = _origin_host(request)
+    if not host:
+        if _is_prod():
+            raise HTTPException(status_code=403, detail="Domain not allowed")
+        return
+    if not _host_allowed(host, allowed or []):
+        raise HTTPException(status_code=403, detail="Domain not allowed")
 
 class WidgetDeploymentUpdate(BaseModel):
     display_name: Optional[str] = Field(None, min_length=1, max_length=120)
@@ -81,8 +98,18 @@ class PublicChatRequest(BaseModel):
     session_id: Optional[str] = None
     visitor_id: Optional[str] = Field(None, max_length=120)
     visitor_email: Optional[str] = Field(None, max_length=255, description="Visitor email (optional, for handoff)")
-    identity: Optional[dict] = None
-    context: Optional[dict] = None
+    identity: Optional[dict] = Field(None, max_length=2000)
+    context: Optional[dict] = Field(None, max_length=2000)
+
+
+def _validate_logo_url(value: str | None) -> str | None:
+    v = (value or "").strip()
+    if not v:
+        return None
+    parsed = urlparse(v)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(status_code=422, detail="logo_url must be an http(s) URL")
+    return v[:1000]
 
 
 class TelemetryEvent(BaseModel):
@@ -400,7 +427,7 @@ def update_widget_deployment(
     if payload.display_name is not None:
         deployment.display_name = payload.display_name.strip()
     if payload.logo_url is not None:
-        deployment.logo_url = payload.logo_url.strip() or None
+        deployment.logo_url = _validate_logo_url(payload.logo_url)
     if payload.initial_messages is not None:
         deployment.initial_messages = _clean_messages(payload.initial_messages)
     if payload.theme is not None:
@@ -487,22 +514,38 @@ def get_public_widget_config(deployment_id: str, request: Request, db: Session =
     )
 
 
+_telemetry_buckets: dict[str, list[float]] = {}
+_telemetry_lock = threading.Lock()
+_TELEMETRY_BUCKET_MAX_KEYS = 2000  # best-effort single-process throttle
+
+
 @public_router.post("/{deployment_id}/telemetry")
 async def public_widget_telemetry(
     deployment_id: str,
     request: Request,
 ):
     try:
+        # Light per-IP throttle so telemetry can't be used for log-spam
+        ip = request.client.host if request.client else "unknown"
+        now = time.time()
+        tkey = f"{deployment_id}:{ip}"
+        with _telemetry_lock:
+            bucket = _telemetry_buckets.get(tkey, [])
+            bucket = [t for t in bucket if now - t < TELEMETRY_RATE_WINDOW_S]
+            if len(bucket) >= TELEMETRY_MAX_PER_WINDOW:
+                return {"status": "ok"}
+            bucket.append(now)
+            _telemetry_buckets[tkey] = bucket
+            while len(_telemetry_buckets) > _TELEMETRY_BUCKET_MAX_KEYS:
+                _telemetry_buckets.pop(next(iter(_telemetry_buckets)))
         body = await request.json()
-        event = body.get("event", "unknown")
+        event = str(body.get("event", "unknown"))[:100]
         data = body.get("data", {})
-        
-        logger.info(
-            "widget_telemetry deployment_id=%s event=%s data=%s",
-            deployment_id,
-            event,
-            data,
-        )
+        if not isinstance(data, dict):
+            data = {"value": str(data)[:500]}
+        # Truncate + never log raw PII blobs
+        safe = json.dumps(data, default=str)[:1000]
+        logger.info("widget_telemetry deployment_id=%s event=%s data=%s", deployment_id, event, safe)
         return {"status": "ok"}
     except Exception as e:
         logger.warning("widget_telemetry_failed deployment_id=%s error=%s", deployment_id, str(e))
@@ -721,10 +764,7 @@ async def public_widget_chat(
     if not handoff_effective and conv_status_value in ("collecting_email", "queued"):
         logger.info("handoff_disabled_auto_recover conversation_id=%s status=%s", conversation_id_value, conv_status_value)
         try:
-            # Reset to bot so LLM can answer; keep visitor_email
-            conversation.status = "bot"
-            conversation.updated_at = datetime.now(timezone.utc)
-            db.commit()
+            transition_status(db, conversation, "bot", notify=True, force=True, close_reason="handoff_disabled")
             conv_status_value = "bot"
         except Exception:
             logger.exception("handoff_auto_recover_failed conversation_id=%s", conversation_id_value)
@@ -783,7 +823,11 @@ async def public_widget_chat(
             # Bump conversation timestamp for correct ordering in dashboard
             conv = db.query(models.Conversation).filter(models.Conversation.id == conversation_id_value).first()
             if conv:
-                conv.updated_at = datetime.now(timezone.utc)
+                try:
+                    from services.handoff_service import touch_visitor_activity
+                    touch_visitor_activity(conv)
+                except Exception:
+                    conv.updated_at = datetime.now(timezone.utc)
             db.commit()
             if new_msg_id is not None:
                 try:
@@ -1053,6 +1097,8 @@ async def public_widget_chat(
 
 class EmailCaptureRequest(BaseModel):
     email: str = Field(..., min_length=3, max_length=255)
+    visitor_id: Optional[str] = Field(None, min_length=1, max_length=120)
+    visitor_token: Optional[str] = Field(None, max_length=2000)
 
 
 @public_router.post("/{deployment_id}/conversations/{conversation_id}/email")
@@ -1072,9 +1118,7 @@ async def capture_visitor_email(
     if not deployment or not deployment.is_enabled:
         raise HTTPException(status_code=404, detail="Widget is not available")
 
-    host = _origin_host(request)
-    if not _host_allowed(host, deployment.allowed_domains or []):
-        raise HTTPException(status_code=403, detail="Domain not allowed")
+    _require_origin_allowed(request, deployment.allowed_domains or [])
 
     import re as _re
     if not _re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", payload.email):
@@ -1096,6 +1140,20 @@ async def capture_visitor_email(
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
+    # Visitor binding: prevent UUID-guess cross-visitor overwrite
+    if payload.visitor_id and payload.visitor_id != conv.visitor_id:
+        raise HTTPException(status_code=403, detail="Visitor mismatch")
+    strict = _is_prod() or os.getenv("ENABLE_STRICT_WIDGET_WS", "0") == "1"
+    if payload.visitor_token:
+        ok, err = verify_visitor_token(
+            payload.visitor_token, deployment_id, conversation_id,
+            payload.visitor_id or conv.visitor_id,
+        )
+        if not ok:
+            raise HTTPException(status_code=403, detail=f"Invalid visitor token: {err}")
+    elif strict and not payload.visitor_id:
+        raise HTTPException(status_code=403, detail="Visitor binding required")
+
     if conv.status not in ("bot", "collecting_email"):
         # Already transitioned — idempotent OK
         return {"status": conv.status, "conversation_id": str(conv.id)}
@@ -1113,17 +1171,93 @@ async def capture_visitor_email(
         check_email_fallback=True,
     )
 
-    await broadcast_to_conversation(str(conv.id), {
-        "type": "status_change",
-        "status": "queued",
-        "conversation_id": str(conv.id),
-    })
-
+    # transition_status already fanned out; no second broadcast (avoids out-of-order dup)
     logger.info(
         "visitor_email_captured deployment_id=%s conversation_id=%s",
         deployment_id, conv.id,
     )
     return {"status": "queued", "conversation_id": str(conv.id)}
+
+
+class HeartbeatRequest(BaseModel):
+    visitor_id: str = Field(..., min_length=1, max_length=120)
+    visitor_token: Optional[str] = Field(None, max_length=2000)
+
+
+@public_router.post("/{deployment_id}/conversations/{conversation_id}/heartbeat")
+def visitor_heartbeat(
+    deployment_id: str,
+    conversation_id: str,
+    payload: HeartbeatRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Widget calls every ~60s while open; keeps idle-close clock accurate."""
+    deployment = db.query(models.WidgetDeployment).filter(
+        models.WidgetDeployment.deployment_id == deployment_id).first()
+    if not deployment or not deployment.is_enabled:
+        raise HTTPException(status_code=404, detail="Widget is not available")
+    try:
+        cid = uuid.UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = db.query(models.Conversation).filter(
+        models.Conversation.id == cid,
+        models.Conversation.deployment_id == deployment.id,
+        models.Conversation.visitor_id == payload.visitor_id,
+    ).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if payload.visitor_token:
+        ok, err = verify_visitor_token(payload.visitor_token, deployment_id, conversation_id, payload.visitor_id)
+        if not ok:
+            raise HTTPException(status_code=403, detail=f"Invalid visitor token: {err}")
+    elif _is_prod():
+        raise HTTPException(status_code=403, detail="Visitor token required")
+    # Liveness only: idle-close measures visitor *messages* (last_visitor_at), so a
+    # silent open tab must NOT keep the conversation alive.
+    conv.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"status": conv.status, "conversation_id": str(conv.id)}
+
+
+@public_router.get("/{deployment_id}/conversations/{conversation_id}/queue-position")
+def queue_position(
+    deployment_id: str,
+    conversation_id: str,
+    visitor_id: str = Query(..., min_length=1, max_length=120),
+    visitor_token: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Polling fallback when WS drops: position + ETA for queued conversations."""
+    deployment = db.query(models.WidgetDeployment).filter(
+        models.WidgetDeployment.deployment_id == deployment_id).first()
+    if not deployment or not deployment.is_enabled:
+        raise HTTPException(status_code=404, detail="Widget is not available")
+    try:
+        cid = uuid.UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = db.query(models.Conversation).filter(
+        models.Conversation.id == cid, models.Conversation.deployment_id == deployment.id).first()
+    if not conv or conv.visitor_id != visitor_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if visitor_token:
+        ok, err = verify_visitor_token(visitor_token, deployment_id, conversation_id, visitor_id)
+        if not ok:
+            raise HTTPException(status_code=403, detail=f"Invalid visitor token: {err}")
+    elif _is_prod():
+        raise HTTPException(status_code=403, detail="Visitor token required")
+    if conv.status != "queued":
+        return {"status": conv.status, "position": 0, "eta_seconds": 0}
+    queued_at = getattr(conv, "queued_at", None) or conv.created_at
+    ahead = db.query(models.Conversation).filter(
+        models.Conversation.agent_id == conv.agent_id,
+        models.Conversation.status == "queued",
+        models.Conversation.queued_at < queued_at,
+    ).count() if queued_at else 0
+    position = ahead + 1
+    return {"status": "queued", "position": position, "eta_seconds": min(position * 120, 1800)}
 
 
 
@@ -1485,15 +1619,73 @@ def get_conversation_messages(
     }
 
 
+@public_router.delete("/{deployment_id}/conversations/{conversation_id}/data")
+def delete_visitor_data(
+    deployment_id: str,
+    conversation_id: str,
+    visitor_id: str = Query(..., min_length=1, max_length=120),
+    visitor_token: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """GDPR erase: delete a visitor's conversation + messages (scoped to visitor)."""
+    deployment = db.query(models.WidgetDeployment).filter(
+        models.WidgetDeployment.deployment_id == deployment_id).first()
+    if not deployment or not deployment.is_enabled:
+        raise HTTPException(status_code=404, detail="Widget is not available")
+    if visitor_token:
+        ok, err = verify_visitor_token(visitor_token, deployment_id, conversation_id, visitor_id)
+        if not ok:
+            raise HTTPException(status_code=403, detail=f"Invalid visitor token: {err}")
+    elif _is_prod():
+        raise HTTPException(status_code=403, detail="Visitor token required")
+    try:
+        cid = uuid.UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = db.query(models.Conversation).filter(
+        models.Conversation.id == cid,
+        models.Conversation.deployment_id == deployment.id,
+        models.Conversation.visitor_id == visitor_id,
+    ).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    try:
+        if conv.session_id:
+            db.query(models.ChatMessage).filter(
+                models.ChatMessage.session_id == conv.session_id).delete(synchronize_session=False)
+        db.delete(conv)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Could not delete conversation")
+    logger.info("visitor_data_deleted deployment_id=%s conversation_id=%s", deployment_id, conversation_id)
+    return {"deleted": True, "conversation_id": conversation_id}
+
+
 def _log_public_chat(session_id, user_id, agent_id, user_message, answer, sender_type="bot"):
+    # Dedupe retries: same session+message hash within 10 min logs once
+    try:
+        import hashlib as _hl
+        dedupe = _hl.sha256(f"{session_id}:{(user_message or '')[:500]}:{(answer or '')[:500]}".encode()).hexdigest()[:32]
+        from services.redis_client import cache_key as _ck, redis_get_json as _rg, redis_set_json as _rs
+        _dk = _ck("dedupe", "public_chat", dedupe)
+        if _rg(_dk):
+            return
+        try:
+            _rs(_dk, {"t": time.time()}, 600)
+        except Exception:
+            pass
+    except Exception:
+        pass
     db = BackgroundSession()
     try:
+        now = datetime.now(timezone.utc)
         db.add(models.ChatMessage(
             session_id=session_id,
             role="user",
             content=user_message,
             sender_type="visitor",
-            created_at=datetime.now(timezone.utc),
+            created_at=now,
         ))
         if answer:
             db.add(models.ChatMessage(
@@ -1501,7 +1693,7 @@ def _log_public_chat(session_id, user_id, agent_id, user_message, answer, sender
                 role="assistant",
                 content=answer,
                 sender_type=sender_type,
-                created_at=datetime.now(timezone.utc),
+                created_at=now,
             ))
             db.add(models.UsageLog(
                 user_id=user_id,
@@ -1509,11 +1701,22 @@ def _log_public_chat(session_id, user_id, agent_id, user_message, answer, sender
                 message_content=user_message,
                 response_content=answer,
                 credits_used=1,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=now,
             ))
         session = db.query(models.ChatSession).filter(models.ChatSession.id == session_id).first()
         if session:
-            session.last_active_at = datetime.now(timezone.utc)
+            session.last_active_at = now
+        # Keep handoff idle clocks accurate for bot turns
+        try:
+            conv = db.query(models.Conversation).filter(
+                models.Conversation.session_id == session_id,
+                models.Conversation.status != "resolved",
+            ).order_by(models.Conversation.updated_at.desc()).first()
+            if conv:
+                conv.last_visitor_at = now
+                conv.updated_at = now
+        except Exception:
+            pass
         db.commit()
     except Exception:
         db.rollback()

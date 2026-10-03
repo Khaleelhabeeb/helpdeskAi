@@ -169,20 +169,56 @@ def get_or_create_conversation(
     if conv:
         return conv
 
+    now = _now()
     conv = models.Conversation(
         agent_id=agent_id,
         deployment_id=deployment_id,
         session_id=session_id,
         visitor_id=visitor_id,
         status="bot",
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
+        created_at=now,
+        updated_at=now,
+        last_visitor_at=now,
+        last_agent_at=now,
     )
     db.add(conv)
     db.commit()
     db.refresh(conv)
     logger.info("conversation_created id=%s agent_id=%s", conv.id, agent_id)
     return conv
+
+
+VALID_TRANSITIONS: dict[str, set[str]] = {
+    "bot": {"collecting_email", "queued"},
+    "collecting_email": {"queued"},
+    "queued": {"human", "resolved"},
+    "human": {"queued", "resolved"},
+}
+
+# Sweeper timeouts (seconds, env-overridable). Per-agent overrides can be added later.
+import os as _os
+
+VISITOR_IDLE_CLOSE_S = int(_os.getenv("HANDOFF_VISITOR_IDLE_CLOSE_S", "900"))
+AGENT_IDLE_REQUEUE_S = int(_os.getenv("HANDOFF_AGENT_IDLE_REQUEUE_S", "300"))
+QUEUED_MAX_WAIT_S = int(_os.getenv("HANDOFF_QUEUED_MAX_WAIT_S", "1800"))
+QUEUED_WARN_S = int(_os.getenv("HANDOFF_QUEUED_WARN_S", "300"))
+COLLECTING_EMAIL_EXPIRE_S = int(_os.getenv("HANDOFF_COLLECTING_EMAIL_EXPIRE_S", "86400"))
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def touch_visitor_activity(conv: models.Conversation) -> None:
+    now = _now()
+    conv.last_visitor_at = now
+    conv.updated_at = now
+
+
+def touch_agent_activity(conv: models.Conversation) -> None:
+    now = _now()
+    conv.last_agent_at = now
+    conv.updated_at = now
 
 
 def transition_status(
@@ -194,33 +230,57 @@ def transition_status(
     human_agent: Optional[models.HumanAgent] = None,
     notify: bool = True,
     check_email_fallback: bool = False,
+    force: bool = False,
+    close_reason: Optional[str] = None,
+    resolved_by: Optional[uuid.UUID] = None,
 ) -> None:
     """
     Advance the conversation state machine and notify subscribers.
 
-    Valid transitions: bot → collecting_email|queued, collecting_email → queued,
-    queued → human|resolved, human → resolved.
+    Valid: bot → collecting_email|queued, collecting_email → queued,
+    queued → human|resolved, human → queued (requeue)|resolved.
+    Raises ValueError on invalid transition unless force=True (sweeper/recover).
     """
-    valid = {
-        "bot": {"collecting_email", "queued"},
-        "collecting_email": {"queued"},
-        "queued": {"human", "resolved"},
-        "human": {"resolved"},
-    }
     old_status = conv.status
-    # same-status calls are idempotent no-ops
-    if old_status != new_status and new_status not in valid.get(old_status, set()):
+    if old_status == new_status:
+        return
+    if new_status not in VALID_TRANSITIONS.get(old_status, set()) and not force:
         logger.warning("invalid_transition id=%s %s→%s", conv.id, old_status, new_status)
-        # Lenient by design: log only, never raise
-        pass
+        raise ValueError(f"Cannot transition conversation from '{old_status}' to '{new_status}'")
+    if new_status not in VALID_TRANSITIONS.get(old_status, set()) and force:
+        logger.warning("forced_transition id=%s %s→%s reason=%s", conv.id, old_status, new_status, close_reason)
+    now = _now()
     conv.status = new_status
-    conv.updated_at = datetime.now(timezone.utc)
+    conv.updated_at = now
 
     if visitor_email and not conv.visitor_email:
         conv.visitor_email = visitor_email
+    if new_status in ("collecting_email", "queued"):
+        touch_visitor_activity(conv)
+    if new_status == "queued":
+        # Fresh queue entry every time: requeues (human→queued) restart the wait clock
+        conv.queued_at = now if old_status == "human" else (conv.queued_at or now)
+    if new_status == "human":
+        conv.claimed_at = now
+        touch_agent_activity(conv)
+    if new_status == "resolved":
+        conv.resolved_at = now
+        if close_reason:
+            conv.close_reason = close_reason
+        if resolved_by is not None:
+            conv.resolved_by = resolved_by
+        elif human_agent is not None:
+            conv.resolved_by = human_agent.id
 
     if human_agent and new_status == "human":
         conv.assigned_human_agent_id = human_agent.id
+    if new_status == "queued" and old_status == "human":
+        # Requeue: release assignee so another agent can claim
+        conv.assigned_human_agent_id = None
+        try:
+            conv.requeue_count = int(getattr(conv, "requeue_count", 0) or 0) + 1
+        except Exception:
+            pass
 
     db.commit()
 
@@ -282,6 +342,7 @@ def atomic_claim_conversation(
 ) -> models.Conversation:
     """Atomically claim a queued conversation; raises 409 if already claimed."""
     from fastapi import HTTPException
+    now = _now()
     # Conditional UPDATE rather than read-then-write, so two claims cannot both win
     updated = (
         db.query(models.Conversation)
@@ -293,7 +354,9 @@ def atomic_claim_conversation(
             {
                 "status": "human",
                 "assigned_human_agent_id": human_agent.id,
-                "updated_at": datetime.now(timezone.utc),
+                "updated_at": now,
+                "claimed_at": now,
+                "last_agent_at": now,
             },
             synchronize_session=False,
         )
@@ -315,6 +378,12 @@ def atomic_claim_conversation(
     return conv  # type: ignore
 
 
+def release_conversation(db: Session, conv: models.Conversation, *, reason: str = "manual") -> None:
+    """Release a `human` conversation back to `queued` (unclaim/transfer/abandon)."""
+    transition_status(db, conv, "queued", notify=True, force=True, close_reason=None)
+    logger.info("conversation_released id=%s reason=%s requeue=%s", conv.id, reason, getattr(conv, "requeue_count", 0))
+
+
 def _maybe_check_email_fallback_sync(db: Session, conv: models.Conversation) -> None:
     """Fallback-email gate; called after a transition to queued."""
     from datetime import timedelta
@@ -323,14 +392,15 @@ def _maybe_check_email_fallback_sync(db: Session, conv: models.Conversation) -> 
         return
     if conv.notified_at is not None:
         try:
-            age = datetime.now(timezone.utc) - (conv.notified_at.replace(tzinfo=timezone.utc) if conv.notified_at.tzinfo is None else conv.notified_at)
-            if age < timedelta(minutes=30):
-                logger.info("fallback_gated_recent conversation_id=%s age_min=%.1f", conv.id, age.total_seconds()/60)
+            notified = conv.notified_at
+            if notified.tzinfo is None:
+                notified = notified.replace(tzinfo=timezone.utc)
+            if _now() - notified < timedelta(minutes=30):
                 return
         except Exception:
             pass
 
-    # Skip when a human assigned to this agent is currently online
+    # Skip when a human assigned to this agent is currently online (DB presence first)
     try:
         from services.presence import is_any_human_online_for_agent_sync
         if is_any_human_online_for_agent_sync(db, conv.agent_id):
@@ -338,7 +408,6 @@ def _maybe_check_email_fallback_sync(db: Session, conv: models.Conversation) -> 
             return
     except Exception:
         logger.exception("presence_check_failed conversation_id=%s", conv.id)
-        # If presence check fails, err on side of sending email
 
     try:
         from services.email_provider import send_queued_fallback_email
@@ -346,7 +415,11 @@ def _maybe_check_email_fallback_sync(db: Session, conv: models.Conversation) -> 
         agent_name = agent.name if agent else None
         ok = send_queued_fallback_email(to_email=conv.visitor_email, conversation_id=str(conv.id), agent_name=agent_name)
         if ok:
-            conv.notified_at = datetime.now(timezone.utc)
+            conv.notified_at = _now()
+            try:
+                conv.queue_notified_count = int(getattr(conv, "queue_notified_count", 0) or 0) + 1
+            except Exception:
+                pass
             db.commit()
             logger.info("fallback_email_sent conversation_id=%s to=%s", conv.id, conv.visitor_email)
     except Exception:

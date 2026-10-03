@@ -128,21 +128,20 @@ def create_ws_ticket(human_agent: models.HumanAgent, ttl_seconds: int = 60) -> s
 def decode_human_agent_jwt(token: str, *, audience: str | None = None) -> dict:
     secret = _get_jwt_secret()
     aud = audience or JWT_AUDIENCE
-    # Accept both legacy tokens (no iss/aud) and current ones: try strict first, then lenient
     try:
         return jwt.decode(token, secret, algorithms=[JWT_ALGORITHM], issuer=JWT_ISSUER, audience=aud)
-    except jwt.InvalidTokenError:
-        # Fallback for legacy tokens missing iss/aud: decode without verification of iss/aud
-        try:
-            return jwt.decode(token, secret, algorithms=[JWT_ALGORITHM], options={"verify_aud": False, "verify_iss": False})
-        except jwt.ExpiredSignatureError as exc:
-            raise HTTPException(status_code=401, detail="Human agent session expired. Please sign in again.") from exc
-        except jwt.InvalidTokenError as exc:
-            raise HTTPException(status_code=401, detail="Invalid human agent token.") from exc
     except jwt.ExpiredSignatureError as exc:
         raise HTTPException(status_code=401, detail="Human agent session expired. Please sign in again.") from exc
-    except jwt.InvalidTokenError as exc:
-        raise HTTPException(status_code=401, detail="Invalid human agent token.") from exc
+    except jwt.InvalidTokenError:
+        # Legacy tokens (no iss/aud) only when explicitly allowed for migration
+        if os.getenv("ALLOW_LEGACY_HUMAN_JWT", "0") == "1":
+            try:
+                return jwt.decode(token, secret, algorithms=[JWT_ALGORITHM], options={"verify_aud": False, "verify_iss": False})
+            except jwt.ExpiredSignatureError as exc:
+                raise HTTPException(status_code=401, detail="Human agent session expired. Please sign in again.") from exc
+            except jwt.InvalidTokenError as exc:
+                raise HTTPException(status_code=401, detail="Invalid human agent token.") from exc
+        raise HTTPException(status_code=401, detail="Invalid human agent token.")
 
 
 def verify_password_with_dummy(plain: str, hashed: str | None) -> bool:
@@ -157,33 +156,130 @@ def verify_password_with_dummy(plain: str, hashed: str | None) -> bool:
 
 
 
+def resolve_human_agent_for_email(
+    db: Session, email: str, selected_id: str | None = None
+) -> models.HumanAgent:
+    """Resolve the caller's agent membership from a verified (Supabase) email.
+
+    One login carries every role: the email proves ownership of each membership.
+    Zero rows → 404 (no agent membership); several → the caller must pick one via
+    `selected_id` (X-Human-Agent-ID), else 409.
+    """
+    rows = (
+        db.query(models.HumanAgent)
+        .filter(models.HumanAgent.email == email.lower().strip())
+        .filter(models.HumanAgent.status == "active")
+        .all()
+    )
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="This sign-in has no human-agent workspace. Ask the account owner for an invite.",
+        )
+    if selected_id:
+        try:
+            sel = uuid.UUID(str(selected_id))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid workspace selection")
+        for ha in rows:
+            if ha.id == sel:
+                return ha
+        raise HTTPException(status_code=403, detail="Selected workspace is not one of your memberships")
+    if len(rows) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "This sign-in belongs to several agent workspaces. Select one.",
+                "memberships": [
+                    {"human_agent_id": str(ha.id), "owner_user_id": ha.owner_user_id, "name": ha.name}
+                    for ha in rows
+                ],
+            },
+        )
+    return rows[0]
+
+
 def get_current_human_agent(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: Session = Depends(get_db),
 ) -> models.HumanAgent:
-    if not credentials or not credentials.credentials:
+    # Legacy path first: dedicated human-agent JWT (grandfathered until migration).
+    if credentials and credentials.credentials:
+        try:
+            payload = decode_human_agent_jwt(credentials.credentials)
+        except HTTPException:
+            payload = None
+        if payload is not None and payload.get("role") == "human_agent":
+            human_agent_id = payload.get("human_agent_id") or payload.get("sub")
+            if not human_agent_id:
+                raise HTTPException(status_code=401, detail="Invalid token payload")
+            try:
+                ha_uuid = uuid.UUID(str(human_agent_id))
+            except ValueError:
+                raise HTTPException(status_code=401, detail="Invalid human agent id in token")
+            ha = db.query(models.HumanAgent).filter(models.HumanAgent.id == ha_uuid).first()
+            if not ha:
+                raise HTTPException(status_code=401, detail="Human agent not found")
+            if ha.status != "active":
+                raise HTTPException(status_code=403, detail=f"Human agent is {ha.status}")
+            # also ensure owner_user_id matches token (tamper check)
+            owner_in_token = payload.get("owner_user_id")
+            if owner_in_token is not None and int(ha.owner_user_id) != int(owner_in_token):
+                raise HTTPException(status_code=401, detail="Token owner mismatch")
+            return ha
+        # A non-legacy Bearer token may be a Supabase session — fall through.
+    # Unified path: the same Supabase login owners use. Email proves membership.
+    auth = request.headers.get("authorization") if request is not None else None
+    token: str | None = None
+    if credentials and credentials.credentials:
+        token = credentials.credentials
+    elif auth and auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+    if not token:
         raise HTTPException(status_code=401, detail="Missing human agent authentication")
-    payload = decode_human_agent_jwt(credentials.credentials)
-    if payload.get("role") != "human_agent":
-        raise HTTPException(status_code=403, detail="Not a human agent token")
-    human_agent_id = payload.get("human_agent_id") or payload.get("sub")
-    if not human_agent_id:
-        raise HTTPException(status_code=401, detail="Invalid token payload")
     try:
-        ha_uuid = uuid.UUID(str(human_agent_id))
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Invalid human agent id in token")
+        from services.supabase_auth import verify_supabase_token_string
+        user = verify_supabase_token_string(token, db)
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Missing human agent authentication")
+    selected = request.headers.get("x-human-agent-id") if request is not None else None
+    return resolve_human_agent_for_email(db, user.email, selected)
 
-    ha = db.query(models.HumanAgent).filter(models.HumanAgent.id == ha_uuid).first()
-    if not ha:
-        raise HTTPException(status_code=401, detail="Human agent not found")
-    if ha.status != "active":
-        raise HTTPException(status_code=403, detail=f"Human agent is {ha.status}")
-    # also ensure owner_user_id matches token (tamper check)
-    owner_in_token = payload.get("owner_user_id")
-    if owner_in_token is not None and int(ha.owner_user_id) != int(owner_in_token):
-        raise HTTPException(status_code=401, detail="Token owner mismatch")
-    return ha
+
+def resolve_ws_human_agent(
+    db: Session, token: str, requested_id: str | None = None
+) -> models.HumanAgent | None:
+    """WebSocket handshake auth: legacy JWT / ws_ticket first, Supabase session second."""
+    for aud in ("human_agent_ws", "human_agent"):
+        try:
+            payload = decode_human_agent_jwt(token, audience=aud)
+            break
+        except HTTPException:
+            payload = None
+    if payload is None:
+        try:
+            payload = decode_human_agent_jwt(token)  # legacy fallback
+        except HTTPException:
+            payload = None
+    if payload is not None and payload.get("role") == "human_agent":
+        try:
+            ha_uuid = uuid.UUID(str(payload.get("human_agent_id") or payload.get("sub")))
+        except Exception:
+            return None
+        ha = db.query(models.HumanAgent).filter(models.HumanAgent.id == ha_uuid).first()
+        return ha if ha and ha.status == "active" else None
+    # Unified path: Supabase access token, membership resolved by verified email.
+    # A 409 (several workspaces, no selection) propagates so the socket can use
+    # a distinct close code instead of looking like an auth failure.
+    try:
+        from services.supabase_auth import verify_supabase_token_string
+        user = verify_supabase_token_string(token, db)
+        return resolve_human_agent_for_email(db, user.email, requested_id)
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            raise
+        return None
 
 
 def get_current_human_agent_optional(

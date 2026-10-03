@@ -277,9 +277,16 @@
     }
   }
 
+  function _sameOrigin(a, b) {
+    try {
+      const ua = new URL(a), ub = new URL(b);
+      return ua.protocol === ub.protocol && ua.host === ub.host;
+    } catch { return a === b; }
+  }
+
   window.addEventListener("message", function (event) {
-    // Origin validation
-    if (event.origin !== apiBase && !apiBase.includes(event.origin)) {
+    // Strict origin validation: exact origin match only (no substring)
+    if (!_sameOrigin(event.origin, apiBase)) {
       return;
     }
 

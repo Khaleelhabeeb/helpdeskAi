@@ -16,12 +16,15 @@ def _clean(value: Optional[str]) -> Optional[str]:
 @lru_cache(maxsize=128)
 def get_secret(name: str, *, prefixes: tuple[str, ...] = ()) -> Optional[str]:
     env_value = _clean(os.getenv(name))
-    if env_value and (not prefixes or env_value.startswith(prefixes)):
+    # Strict prefix check: never fall through with a wrong-prefix value
+    if env_value:
+        if prefixes and not env_value.startswith(prefixes):
+            return None
         return env_value
 
     env_path = Path(".env")
     if not env_path.exists():
-        return env_value
+        return None
 
     for line in env_path.read_text().splitlines():
         stripped = line.strip()
@@ -29,7 +32,9 @@ def get_secret(name: str, *, prefixes: tuple[str, ...] = ()) -> Optional[str]:
             continue
         raw_value = stripped.split("=", 1)[1].split(" #", 1)[0]
         value = _clean(raw_value)
-        if value and (not prefixes or value.startswith(prefixes)):
+        if value:
+            if prefixes and not value.startswith(prefixes):
+                return None
             return value
 
-    return env_value
+    return None

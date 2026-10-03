@@ -79,11 +79,40 @@ def supabase_config():
 # template must contain {{ .ConfirmationURL }}; verification happens when Supabase
 # redirects to FRONTEND_URL/auth/callback.
 
+_otp_email_buckets: dict[str, list[float]] = {}
+import time as _time
+import threading as _threading
+_otp_lock = _threading.Lock()
+# Anti email-bombing caps (per email per hour). Restart resets buckets.
+_OTP_REQUEST_PER_HOUR = 10
+_OTP_VERIFY_PER_HOUR = 10
+
+
+# Best-effort single-process throttle (Redis would be needed for multi-worker).
+_OTP_BUCKET_MAX_KEYS = 5000
+
+
+def _otp_email_allowed(email: str, *, max_per_hour: int = 5) -> bool:
+    now = _time.time()
+    with _otp_lock:
+        bucket = [t for t in _otp_email_buckets.get(email, []) if now - t < 3600]
+        if len(bucket) >= max_per_hour:
+            _otp_email_buckets[email] = bucket
+            return False
+        bucket.append(now)
+        _otp_email_buckets[email] = bucket
+        while len(_otp_email_buckets) > _OTP_BUCKET_MAX_KEYS:
+            _otp_email_buckets.pop(next(iter(_otp_email_buckets)))
+        return True
+
+
 @router.post("/otp/request")
 @limiter.limit("5/minute")
 def request_otp(request: Request, response: Response, body: OtpRequest):
     """Send a magic link, creating the Supabase user if it does not exist. Always returns success."""
     normalized_email = body.email.lower().strip()
+    if not _otp_email_allowed(normalized_email, max_per_hour=_OTP_REQUEST_PER_HOUR):
+        raise HTTPException(status_code=429, detail="Too many email requests. Please wait and try again.")
     redirect_to = f"{FRONTEND_URL}/auth/callback" if FRONTEND_URL else None
 
     payload: dict = {"email": normalized_email}
@@ -100,48 +129,39 @@ def request_otp(request: Request, response: Response, body: OtpRequest):
                 status_code=429,
                 detail="Too many email requests. Please wait a minute and try again.",
             ) from exc
-        # Raise 400 for bad input, but never leak internal errors
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # Never leak provider internals / enumeration oracle
+        raise HTTPException(status_code=400, detail="Could not send magic link. Please check the email and try again.") from exc
 
     return {"message": "Check your email for a magic link to sign in. It expires in a few minutes."}
 
 
 # Legacy endpoint kept for API compatibility; the magic-link flow verifies via /auth/callback
 @router.post("/otp/verify")
-@limiter.limit("10/minute")
+@limiter.limit("5/minute")
 def verify_otp(request: Request, response: Response, body: OtpVerifyRequest, db: Session = Depends(get_db)):
     normalized_email = body.email.lower().strip()
     token = body.token.strip()
     if not token:
         raise HTTPException(status_code=400, detail="Token is required")
+    # Per-email throttle stops distributed brute force of the 6-digit code
+    if not _otp_email_allowed(f"verify:{normalized_email}", max_per_hour=_OTP_VERIFY_PER_HOUR):
+        raise HTTPException(status_code=429, detail="Too many verification attempts. Please wait and try again.")
 
     allowed_types = {"email", "magiclink", "signup", "invite", "recovery", "email_change"}
     requested_type = (body.type or "email").strip().lower()
     if requested_type not in allowed_types:
         requested_type = "email"
 
-    # Build candidate type list – try requested first, then the other common one
-    candidates = [requested_type]
-    if requested_type == "email" and "magiclink" not in candidates:
-        candidates.append("magiclink")
-    elif requested_type == "magiclink" and "email" not in candidates:
-        candidates.append("email")
-
     last_exc: Exception | None = None
     resp = None
-    for otp_type in candidates:
-        try:
-            resp = get_supabase_client().auth.verify_otp(
-                {"email": normalized_email, "token": token, "type": otp_type}
-            )
-            last_exc = None
-            break
-        except Exception as exc:
-            last_exc = exc
-            # if it's a rate-limit error, surface immediately
-            if _is_rate_limit_error(exc):
-                raise HTTPException(status_code=429, detail="Too many verification attempts. Please wait and try again.") from exc
-            continue
+    try:
+        resp = get_supabase_client().auth.verify_otp(
+            {"email": normalized_email, "token": token, "type": requested_type}
+        )
+    except Exception as exc:
+        last_exc = exc
+        if _is_rate_limit_error(exc):
+            raise HTTPException(status_code=429, detail="Too many verification attempts. Please wait and try again.") from exc
 
     if last_exc is not None or resp is None:
         raise HTTPException(status_code=401, detail="Invalid or expired code. Please request a new link.") from last_exc
@@ -202,6 +222,17 @@ def google_callback(request: Request, response: Response, code: str, db: Session
 @router.get("/verify")
 def verify_auth(user = Depends(verify_supabase_token)):
     return {"status": "valid", "user_id": user.id, "email": user.email}
+
+
+@router.get("/session")
+def get_session(user=Depends(verify_supabase_token), db: Session = Depends(get_db)):
+    """Unified identity for the single login: owner workspace + agent memberships.
+
+    The frontend routes by role from this payload — one login serves owners and
+    human agents, so invited agents are never stranded in an empty owner account.
+    """
+    from services.supabase_auth import get_identity_overview
+    return get_identity_overview(db, user)
 
 
 @router.post("/refresh")
