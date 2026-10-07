@@ -1,19 +1,21 @@
 import {
   ArrowRight,
+  BarChart3,
   Bot,
   Database,
-  ExternalLink,
-  FileText,
-  Link as LinkIcon,
+  Inbox,
   Loader2,
   MessageSquare,
-  ShieldCheck,
+  Plus,
+  Rocket,
+  UserPlus,
+  Users,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { AppLayout } from '../components/Layout';
 import { cn } from '../lib/utils';
-import { Agent, apiFetch, CreditsInfo, formatRelative, KnowledgeBase } from '../lib/api';
+import { Agent, apiFetch, formatRelative } from '../lib/api';
 
 type Activity = {
   timestamp: string;
@@ -24,20 +26,13 @@ type Activity = {
 
 type DashboardData = {
   agents: Agent[];
-  credits: CreditsInfo | null;
-  interactions: {
-    total_questions: number;
-    total_responses: number;
-    most_active_agent: string | null;
-    agent_interaction_counts: Record<string, number>;
-  } | null;
-  activity: {
-    recent_activity: Activity[];
-    peak_usage_hour: number | null;
-    hourly_activity: Record<string, number>;
-  } | null;
+  credits: { agent_usage: Array<{ agent_id: string; agent_name: string; credits_used: number }> } | null;
+  interactions: { total_questions: number; most_active_agent: string | null; agent_interaction_counts: Record<string, number> } | null;
+  activity: { recent_activity: Activity[] } | null;
   knowledgeCount: number;
 };
+
+type TeamAnalytics = { total: number; queued: number; human: number; resolved: number };
 
 function AgentAvatar({ agent }: { agent: Agent }) {
   const initials =
@@ -47,338 +42,239 @@ function AgentAvatar({ agent }: { agent: Agent }) {
       .slice(0, 2)
       .map((part) => part[0]?.toUpperCase())
       .join('') || 'AI';
-
   return (
-    <div className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-full bg-brand-primary text-sm font-semibold text-brand-on-primary">
-      {agent.avatar_url ? (
-        <img src={agent.avatar_url} alt="" className="h-full w-full object-cover" />
-      ) : (
-        initials
-      )}
+    <div className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-xl bg-zinc-900 text-sm font-semibold text-white">
+      {agent.avatar_url ? <img src={agent.avatar_url} alt="" className="h-full w-full object-cover" /> : initials}
     </div>
   );
 }
 
-function sourceLabel(sourceType: KnowledgeBase['source_type']) {
-  const labels: Record<KnowledgeBase['source_type'], string> = {
-    upload_pdf: 'PDF',
-    upload_txt: 'Text file',
-    url: 'Website',
-    text: 'Text',
-    other: 'File',
-  };
-  return labels[sourceType] ?? 'Source';
-}
-
 export default function Dashboard() {
   const navigate = useNavigate();
-  const [data, setData] = useState<DashboardData>({
-    agents: [],
-    credits: null,
-    interactions: null,
-    activity: null,
-    knowledgeCount: 0,
-  });
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
-  const [knowledge, setKnowledge] = useState<KnowledgeBase[]>([]);
+  const [data, setData] = useState<DashboardData | null>(null);
+  const [team, setTeam] = useState<TeamAnalytics | null>(null);
   const [isLoading, setLoading] = useState(true);
-  const [isKnowledgeLoading, setKnowledgeLoading] = useState(false);
   const [error, setError] = useState('');
-  const [knowledgeError, setKnowledgeError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
-
-    async function loadDashboard() {
+    async function load() {
       setLoading(true);
       setError('');
       try {
         const summary = await apiFetch<DashboardData>('/dashboard/summary');
-        if (!cancelled) setData(summary);
+        if (cancelled) return;
+        setData(summary);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load dashboard');
       } finally {
         if (!cancelled) setLoading(false);
       }
     }
-
-    loadDashboard();
+    load();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  const selectedAgent = useMemo(
-    () => data.agents.find((agent) => agent.id === selectedAgentId) ?? null,
-    [data.agents, selectedAgentId]
-  );
-
-  const selectedActivity = useMemo(() => {
-    if (!selectedAgent) return [];
-    return (data.activity?.recent_activity ?? []).filter(
-      (activity) => activity.agent_name === selectedAgent.name
-    );
-  }, [data.activity?.recent_activity, selectedAgent]);
-
   useEffect(() => {
-    if (!selectedAgent) {
-      setKnowledge([]);
-      setKnowledgeError('');
-      return;
-    }
-
     let cancelled = false;
+    apiFetch<TeamAnalytics>('/owner/team/analytics', { cacheMs: 0, dedupe: false })
+      .then((t) => { if (!cancelled) setTeam(t); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
-    async function loadKnowledge() {
-      setKnowledgeLoading(true);
-      setKnowledgeError('');
-      try {
-        const sources = await apiFetch<KnowledgeBase[]>(`/kb/${selectedAgent.id}`);
-        if (!cancelled) setKnowledge(sources);
-      } catch (err) {
-        if (!cancelled) {
-          setKnowledge([]);
-          setKnowledgeError(err instanceof Error ? err.message : 'Could not load knowledge base');
-        }
-      } finally {
-        if (!cancelled) setKnowledgeLoading(false);
-      }
-    }
+  const stats = useMemo(() => {
+    const agents = data?.agents ?? [];
+    const totalMessages = data?.interactions?.total_questions ?? 0;
+    return [
+      { icon: Bot, label: 'Agents', value: agents.length.toLocaleString(), to: '/agents' },
+      { icon: Database, label: 'Knowledge sources', value: (data?.knowledgeCount ?? 0).toLocaleString(), to: '/knowledge' },
+      { icon: MessageSquare, label: 'Conversations', value: (team?.total ?? totalMessages).toLocaleString(), to: '/inbox' },
+      { icon: Users, label: 'Queued for humans', value: (team?.queued ?? 0).toLocaleString(), to: '/inbox' },
+    ];
+  }, [data, team]);
 
-    loadKnowledge();
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedAgent?.id]);
-
-  const selectedMessages = selectedAgent
-    ? data.interactions?.agent_interaction_counts[selectedAgent.name] ?? selectedActivity.length
-    : 0;
+  const quickActions = [
+    { icon: Plus, label: 'Create agent', desc: 'Train an agent on your content', to: '/agents', primary: true },
+    { icon: Database, label: 'Add knowledge', desc: 'PDFs, text, or websites', to: '/knowledge', primary: false },
+    { icon: UserPlus, label: 'Invite teammate', desc: 'Add a human agent', to: '/team', primary: false },
+    { icon: Rocket, label: 'Deploy widget', desc: 'Embed chat on your site', to: '/agents', primary: false },
+  ];
 
   return (
     <AppLayout>
       <div className="space-y-8">
-        <header>
-          <h1 className="text-3xl font-bold tracking-tight text-brand-primary">Dashboard</h1>
-          <p className="mt-1 text-sm text-on-surface-variant">
-            Select an agent to view its knowledge base and recent conversations.
-          </p>
+        <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight text-brand-primary">Overview</h1>
+            <p className="mt-1 text-sm text-on-surface-variant">
+              Everything in your workspace, in one place.
+            </p>
+          </div>
+          <Link
+            to="/agents"
+            className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-brand-primary px-5 text-sm font-semibold text-brand-on-primary transition-opacity hover:opacity-90"
+          >
+            <Plus className="h-4 w-4" /> Create agent
+          </Link>
         </header>
 
         {error && (
-          <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-            {error}
-          </div>
+          <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>
         )}
 
         {isLoading ? (
           <div className="flex min-h-[260px] items-center justify-center text-sm text-on-surface-variant">
-            <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-            Loading dashboard...
+            <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Loading overview...
           </div>
         ) : (
           <>
-            <section className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div className="rounded-xl border border-surface-container-highest bg-surface-container-lowest p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <p className="text-sm text-on-surface-variant">Active agents</p>
-                    <p className="mt-1 text-3xl font-bold text-brand-primary">
-                      {data.agents.length.toLocaleString()}
-                    </p>
+            {/* Stat cards */}
+            <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+              {stats.map((s) => (
+                <Link
+                  key={s.label}
+                  to={s.to}
+                  className="group rounded-xl border border-surface-container-highest bg-white p-5 transition-all hover:border-zinc-300 hover:shadow-sm"
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="grid h-9 w-9 place-items-center rounded-lg bg-zinc-100 text-zinc-600 transition-colors group-hover:bg-brand-primary group-hover:text-white">
+                      <s.icon className="h-5 w-5" strokeWidth={2} />
+                    </div>
+                    <ArrowRight className="h-4 w-4 text-zinc-300 transition-all group-hover:translate-x-0.5 group-hover:text-zinc-500" />
                   </div>
-                  <Bot className="h-5 w-5 text-on-surface-variant/50" strokeWidth={1.75} />
-                </div>
-              </div>
+                  <p className="mt-4 text-3xl font-bold text-brand-primary">{s.value}</p>
+                  <p className="mt-1 text-sm text-on-surface-variant">{s.label}</p>
+                </Link>
+              ))}
+            </section>
 
-              <div className="rounded-xl border border-surface-container-highest bg-surface-container-lowest p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <p className="text-sm text-on-surface-variant">Access</p>
-                    <p className="mt-1 text-3xl font-bold text-brand-primary">Full access</p>
-                  </div>
-                  <ShieldCheck className="h-5 w-5 text-on-surface-variant/50" strokeWidth={1.75} />
-                </div>
+            {/* Quick actions */}
+            <section>
+              <h2 className="mb-3 text-lg font-semibold text-brand-primary">Quick actions</h2>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                {quickActions.map((a) => (
+                  <Link
+                    key={a.label}
+                    to={a.to}
+                    className={cn(
+                      'group flex items-center gap-3 rounded-xl border p-4 transition-all hover:shadow-sm',
+                      a.primary
+                        ? 'border-brand-primary bg-brand-primary text-brand-on-primary hover:opacity-95'
+                        : 'border-surface-container-highest bg-white hover:border-zinc-300'
+                    )}
+                  >
+                    <span className={cn('grid h-10 w-10 shrink-0 place-items-center rounded-lg', a.primary ? 'bg-white/15 text-white' : 'bg-zinc-100 text-zinc-600 group-hover:bg-brand-primary group-hover:text-white transition-colors')}>
+                      <a.icon className="h-5 w-5" strokeWidth={2} />
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-sm font-semibold">{a.label}</span>
+                      <span className={cn('block text-xs', a.primary ? 'text-white/70' : 'text-on-surface-variant')}>{a.desc}</span>
+                    </span>
+                  </Link>
+                ))}
               </div>
             </section>
 
-            <section className="space-y-4">
-              <h2 className="text-lg font-semibold text-brand-primary">Agents</h2>
+            {/* Agents */}
+            <section>
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="text-lg font-semibold text-brand-primary">Your agents</h2>
+                <Link to="/agents" className="inline-flex items-center gap-1 text-sm font-semibold text-zinc-900 hover:text-zinc-600">
+                  Manage <ArrowRight className="h-4 w-4" />
+                </Link>
+              </div>
 
-              {data.agents.length === 0 ? (
-                <div className="rounded-xl border border-surface-container-highest bg-surface-container-lowest p-8 text-center">
-                  <Bot className="mx-auto mb-3 h-9 w-9 text-on-surface-variant/60" strokeWidth={1.5} />
+              {!data || data.agents.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-surface-container-highest bg-white p-10 text-center">
+                  <Bot className="mx-auto mb-3 h-10 w-10 text-zinc-300" strokeWidth={1.5} />
                   <p className="font-semibold text-brand-primary">No agents yet</p>
                   <p className="mt-1 text-sm text-on-surface-variant">
-                    Create your first agent to start handling support.
+                    Create your first agent to start handling customer conversations.
                   </p>
                   <button
                     onClick={() => navigate('/agents')}
-                    className="mt-5 inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-brand-primary px-4 text-sm font-medium text-brand-on-primary hover:opacity-90"
+                    className="mt-5 inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-brand-primary px-4 text-sm font-semibold text-brand-on-primary hover:opacity-90"
                   >
-                    Create agent
-                    <ArrowRight className="h-4 w-4" />
+                    Create agent <ArrowRight className="h-4 w-4" />
                   </button>
                 </div>
               ) : (
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                   {data.agents.map((agent) => {
-                    const isSelected = selectedAgentId === agent.id;
+                    const messages = data.interactions?.agent_interaction_counts[agent.name] ?? 0;
                     return (
-                      <button
+                      <div
                         key={agent.id}
-                        onClick={() => setSelectedAgentId(agent.id)}
-                        className={cn(
-                          'rounded-xl border bg-surface-container-lowest p-4 text-left transition-colors',
-                          isSelected
-                            ? 'border-brand-primary'
-                            : 'border-surface-container-highest hover:border-brand-primary/30'
-                        )}
+                        className="flex flex-col rounded-xl border border-surface-container-highest bg-white p-5 transition-all hover:border-zinc-300 hover:shadow-sm"
                       >
-                        <div className="flex items-start gap-3">
+                        <div className="flex items-center gap-3">
                           <AgentAvatar agent={agent} />
                           <div className="min-w-0 flex-1">
                             <p className="truncate font-semibold text-brand-primary">{agent.name}</p>
-                            <p className="mt-1 text-xs text-on-surface-variant">
-                              Created {formatRelative(agent.created_at)}
-                            </p>
+                            <p className="text-xs text-on-surface-variant">Created {formatRelative(agent.created_at)}</p>
                           </div>
-                          <ArrowRight
-                            className={cn(
-                              'h-4 w-4 shrink-0 text-on-surface-variant/50',
-                              isSelected && 'text-brand-primary'
-                            )}
-                          />
                         </div>
-                      </button>
+                        <div className="mt-4 flex items-center gap-2 text-xs text-on-surface-variant">
+                          <MessageSquare className="h-3.5 w-3.5" /> {messages.toLocaleString()} messages
+                        </div>
+                        <div className="mt-4 grid grid-cols-3 gap-2 border-t border-surface-container-highest pt-4">
+                          <button
+                            onClick={() => navigate(`/agents?agent=${encodeURIComponent(agent.id)}`)}
+                            className="inline-flex items-center justify-center gap-1 rounded-lg border border-surface-container-highest px-2 py-2 text-xs font-semibold text-brand-primary transition-colors hover:bg-zinc-50"
+                          >
+                            Playground
+                          </button>
+                          <Link
+                            to={`/knowledge?agent=${encodeURIComponent(agent.id)}`}
+                            className="inline-flex items-center justify-center gap-1 rounded-lg border border-surface-container-highest px-2 py-2 text-xs font-semibold text-brand-primary transition-colors hover:bg-zinc-50"
+                          >
+                            Sources
+                          </Link>
+                          <Link
+                            to={`/agents/${agent.id}/deploy`}
+                            className="inline-flex items-center justify-center gap-1 rounded-lg border border-surface-container-highest px-2 py-2 text-xs font-semibold text-brand-primary transition-colors hover:bg-zinc-50"
+                          >
+                            Deploy
+                          </Link>
+                        </div>
+                      </div>
                     );
                   })}
                 </div>
               )}
             </section>
 
-            {!selectedAgent ? (
-              data.agents.length > 0 && (
-                <div className="rounded-xl border border-dashed border-surface-container-highest px-8 py-10 text-center text-sm text-on-surface-variant">
-                  Click an agent card to view details.
-                </div>
-              )
-            ) : (
-              <section className="space-y-5 rounded-xl border border-surface-container-highest bg-surface-container-lowest p-5 md:p-6">
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="flex min-w-0 items-center gap-3">
-                    <AgentAvatar agent={selectedAgent} />
-                    <div className="min-w-0">
-                      <h2 className="truncate text-xl font-semibold text-brand-primary">
-                        {selectedAgent.name}
-                      </h2>
-                      <p className="text-sm text-on-surface-variant">Agent details</p>
-                    </div>
+            {/* Recent activity */}
+            <section>
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="text-lg font-semibold text-brand-primary">Recent activity</h2>
+                <Link to="/analytics" className="inline-flex items-center gap-1 text-sm font-semibold text-zinc-900 hover:text-zinc-600">
+                  <BarChart3 className="h-4 w-4" /> Analytics
+                </Link>
+              </div>
+              <div className="overflow-hidden rounded-xl border border-surface-container-highest bg-white">
+                {(data.activity?.recent_activity ?? []).length === 0 ? (
+                  <div className="px-6 py-10 text-center text-sm text-on-surface-variant">
+                    <Inbox className="mx-auto mb-2 h-6 w-6 text-zinc-300" /> No activity yet.
                   </div>
-                  <button
-                    onClick={() => navigate(`/agents?agent=${encodeURIComponent(selectedAgent.id)}`)}
-                    className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-brand-primary px-4 text-sm font-medium text-brand-on-primary hover:opacity-90"
-                  >
-                    Open agent workspace
-                    <ExternalLink className="h-4 w-4" />
-                  </button>
-                </div>
-
-                {knowledgeError && (
-                  <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                    {knowledgeError}
+                ) : (
+                  <div className="divide-y divide-surface-container-highest">
+                    {data.activity!.recent_activity.slice(0, 6).map((a, i) => (
+                      <div key={`${a.timestamp}-${i}`} className="flex items-start justify-between gap-4 px-5 py-3.5">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-brand-primary">{a.question || 'Customer message'}</p>
+                          <p className="text-xs text-on-surface-variant">{a.agent_name} · {a.response ? 'Answered' : 'Pending'}</p>
+                        </div>
+                        <span className="shrink-0 text-xs text-on-surface-variant">{formatRelative(a.timestamp)}</span>
+                      </div>
+                    ))}
                   </div>
                 )}
-
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div className="rounded-xl border border-surface-container-highest p-4">
-                    <div className="flex items-center justify-between">
-                      <p className="text-sm text-on-surface-variant">Knowledge base</p>
-                      {isKnowledgeLoading ? (
-                        <Loader2 className="h-4 w-4 animate-spin text-on-surface-variant" />
-                      ) : (
-                        <Database className="h-4 w-4 text-on-surface-variant/50" strokeWidth={1.75} />
-                      )}
-                    </div>
-                    <p className="mt-2 text-3xl font-bold text-brand-primary">
-                      {knowledge.length.toLocaleString()}
-                    </p>
-                  </div>
-
-                  <div className="rounded-xl border border-surface-container-highest p-4">
-                    <div className="flex items-center justify-between">
-                      <p className="text-sm text-on-surface-variant">Messages</p>
-                      <MessageSquare className="h-4 w-4 text-on-surface-variant/50" strokeWidth={1.75} />
-                    </div>
-                    <p className="mt-2 text-3xl font-bold text-brand-primary">
-                      {selectedMessages.toLocaleString()}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                  <section className="overflow-hidden rounded-xl border border-surface-container-highest">
-                    <div className="border-b border-surface-container-highest px-4 py-3">
-                      <h3 className="text-sm font-semibold text-brand-primary">Knowledge base</h3>
-                    </div>
-                    <div className="max-h-[320px] divide-y divide-surface-container-highest overflow-y-auto">
-                      {!isKnowledgeLoading && knowledge.length === 0 && (
-                        <div className="px-4 py-8 text-sm text-on-surface-variant">
-                          No knowledge base sources yet.
-                        </div>
-                      )}
-                      {knowledge.map((source) => (
-                        <div key={source.id} className="flex items-center gap-3 px-4 py-3">
-                          <span className="text-on-surface-variant">
-                            {source.source_type === 'url' ? (
-                              <LinkIcon className="h-4 w-4" strokeWidth={1.75} />
-                            ) : (
-                              <FileText className="h-4 w-4" strokeWidth={1.75} />
-                            )}
-                          </span>
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm font-medium text-brand-primary">
-                              {source.title || source.source_uri || 'Untitled source'}
-                            </p>
-                            <p className="mt-0.5 text-xs text-on-surface-variant">
-                              {sourceLabel(source.source_type)} · {source.status}
-                            </p>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-
-                  <section className="overflow-hidden rounded-xl border border-surface-container-highest">
-                    <div className="border-b border-surface-container-highest px-4 py-3">
-                      <h3 className="text-sm font-semibold text-brand-primary">Recent conversations</h3>
-                    </div>
-                    <div className="max-h-[320px] divide-y divide-surface-container-highest overflow-y-auto">
-                      {selectedActivity.length === 0 && (
-                        <div className="px-4 py-8 text-sm text-on-surface-variant">
-                          No recent conversations for this agent.
-                        </div>
-                      )}
-                      {selectedActivity.map((activity, index) => (
-                        <div key={`${activity.timestamp}-${index}`} className="px-4 py-3">
-                          <div className="flex items-start justify-between gap-3">
-                            <p className="line-clamp-2 text-sm font-medium text-brand-primary">
-                              {activity.question || 'Customer message'}
-                            </p>
-                            <span className="shrink-0 text-xs text-on-surface-variant">
-                              {formatRelative(activity.timestamp)}
-                            </span>
-                          </div>
-                          <p className="mt-1.5 text-xs text-on-surface-variant">
-                            {activity.response ? 'Answered' : 'Pending'}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-                </div>
-              </section>
-            )}
+              </div>
+            </section>
           </>
         )}
       </div>

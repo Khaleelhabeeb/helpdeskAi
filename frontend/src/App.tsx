@@ -3,6 +3,9 @@ import Landing from './pages/Landing';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Agents from './pages/Agents';
+import Knowledge from './pages/Knowledge';
+import Inbox from './pages/Inbox';
+import Analytics from './pages/Analytics';
 import Billing from './pages/Billing';
 import Settings from './pages/Settings';
 import DeployLayout from './pages/deploy/DeployLayout';
@@ -46,6 +49,9 @@ export default function App() {
       <Route path="/welcome" element={<Welcome />} />
       <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
       <Route path="/agents" element={<ProtectedRoute><Agents /></ProtectedRoute>} />
+      <Route path="/knowledge" element={<ProtectedRoute><Knowledge /></ProtectedRoute>} />
+      <Route path="/inbox" element={<ProtectedRoute><Inbox /></ProtectedRoute>} />
+      <Route path="/analytics" element={<ProtectedRoute><Analytics /></ProtectedRoute>} />
       <Route path="/agents/:agentId/deploy" element={<ProtectedRoute><DeployLayout /></ProtectedRoute>}>
         <Route index element={<DeployHub />} />
         <Route path="widget" element={<WidgetDeployPage />} />

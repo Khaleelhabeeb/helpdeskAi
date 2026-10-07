@@ -41,7 +41,7 @@ export function AppLayout({
   const sidebarWidth = collapsed ? SIDEBAR_COLLAPSED : SIDEBAR_EXPANDED;
 
   return (
-    <div className="flex min-h-screen bg-surface">
+    <div className="flex min-h-screen bg-canvas">
       <DesktopSidebar collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />
 
       <AnimatePresence>
