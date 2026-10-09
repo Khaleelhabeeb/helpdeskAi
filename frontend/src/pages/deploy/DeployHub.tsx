@@ -15,6 +15,7 @@ export default function DeployHub() {
     displayName,
     previewGreeting,
     toggleWidgetEnabled,
+    saveHelpPage,
   } = useDeploy();
 
   return (
@@ -44,8 +45,8 @@ export default function DeployHub() {
           description="ChatGPT-style help page, deployed standalone or under a path on your site (/help)."
           previewGradient="bg-gradient-to-br from-amber-100 via-orange-50 to-yellow-100"
           preview={<HelpPageMiniPreview name={displayName} />}
-          enabled={false}
-          toggleDisabled
+          enabled={deployment.help_page_enabled}
+          onToggle={(enabled) => saveHelpPage({ help_page_enabled: enabled })}
           manageTo={`${base}/help-page`}
           manageLabel="Manage"
         />

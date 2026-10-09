@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -56,6 +57,7 @@ limiter = _create_limiter()
 
 router = APIRouter()
 public_router = APIRouter()
+help_router = APIRouter()
 logger = logging.getLogger(__name__)
 
 DEFAULT_INITIAL_MESSAGES = ["Hi! What can I help you with?"]
@@ -91,6 +93,42 @@ class WidgetDeploymentUpdate(BaseModel):
     primary_color: Optional[str] = Field(None, pattern="^#[0-9A-Fa-f]{6}$")
     allowed_domains: Optional[list[str]] = None
     is_enabled: Optional[bool] = None
+    help_page_enabled: Optional[bool] = None
+    help_page_slug: Optional[str] = Field(None, max_length=48)
+    help_page_title: Optional[str] = Field(None, max_length=120)
+    help_page_description: Optional[str] = Field(None, max_length=300)
+    help_page_suggestions: Optional[list[str]] = None
+
+
+HELP_SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{1,46}[a-z0-9])$")
+RESERVED_HELP_SLUGS = {"admin", "api", "app", "help", "login", "static", "public", "www", "support", "dashboard", "settings"}
+
+
+def _clean_help_slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9-]+", "-", (value or "").strip().lower()).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    if not HELP_SLUG_RE.match(slug):
+        raise HTTPException(status_code=422, detail="Slug must be 3–48 characters: lowercase letters, numbers, and dashes")
+    if slug in RESERVED_HELP_SLUGS:
+        raise HTTPException(status_code=422, detail="That slug is reserved — pick another")
+    return slug
+
+
+def _clean_suggestions(values: Optional[list[str]]) -> list[str]:
+    cleaned = [(v or "").strip()[:120] for v in values or []]
+    return [v for v in cleaned if v][:4]
+
+
+def _default_help_slug(db: Session, name: str) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")[:36] or "help"
+    if len(base) < 3 or base in RESERVED_HELP_SLUGS:
+        base = f"{base}-help".strip("-")
+    for _ in range(5):
+        candidate = f"{base}-{uuid.uuid4().hex[:6]}"
+        exists = db.query(models.WidgetDeployment.id).filter(models.WidgetDeployment.help_page_slug == candidate).first()
+        if not exists:
+            return candidate
+    return f"help-{uuid.uuid4().hex[:12]}"
 
 
 class PublicChatRequest(BaseModel):
@@ -281,6 +319,11 @@ def _deployment_out(deployment: models.WidgetDeployment, request: Request) -> di
         "allowed_domains": deployment.allowed_domains or [],
         "is_enabled": deployment.is_enabled,
         "embed_script": embed_script,
+        "help_page_enabled": bool(deployment.help_page_enabled),
+        "help_page_slug": deployment.help_page_slug or "",
+        "help_page_title": deployment.help_page_title or "",
+        "help_page_description": deployment.help_page_description or "",
+        "help_page_suggestions": deployment.help_page_suggestions or [],
     }
 
 
@@ -311,6 +354,7 @@ def _public_widget_config_payload(db: Session, deployment_id: str) -> Optional[d
         "theme": deployment.theme,
         "primary_color": deployment.primary_color,
         "allowed_domains": deployment.allowed_domains or [],
+        "suggestions": deployment.help_page_suggestions or [],
         "etag": f'W/"{int(updated_at.timestamp())}"',
     }
     redis_set_json(cache_id, payload, WIDGET_CONFIG_CACHE_TTL_SECONDS)
@@ -438,6 +482,26 @@ def update_widget_deployment(
         deployment.allowed_domains = _clean_domains(payload.allowed_domains)
     if payload.is_enabled is not None:
         deployment.is_enabled = payload.is_enabled
+    if payload.help_page_slug is not None:
+        slug = _clean_help_slug(payload.help_page_slug)
+        taken = (
+            db.query(models.WidgetDeployment.id)
+            .filter(models.WidgetDeployment.help_page_slug == slug, models.WidgetDeployment.id != deployment.id)
+            .first()
+        )
+        if taken:
+            raise HTTPException(status_code=409, detail="That help page URL is already taken")
+        deployment.help_page_slug = slug
+    if payload.help_page_title is not None:
+        deployment.help_page_title = payload.help_page_title.strip() or None
+    if payload.help_page_description is not None:
+        deployment.help_page_description = payload.help_page_description.strip() or None
+    if payload.help_page_suggestions is not None:
+        deployment.help_page_suggestions = _clean_suggestions(payload.help_page_suggestions)
+    if payload.help_page_enabled is not None:
+        deployment.help_page_enabled = payload.help_page_enabled
+    if deployment.help_page_enabled and not deployment.help_page_slug:
+        deployment.help_page_slug = _default_help_slug(db, deployment.display_name)
     deployment.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(deployment)
@@ -480,6 +544,31 @@ def generate_deployment_token(
     return {"token": token, "expires_in": 300}
 
 
+@help_router.get("/{slug}")
+def get_public_help_page(slug: str, db: Session = Depends(get_db)):
+    """Public branding for a hosted help page. The chat itself runs through the widget endpoints."""
+    deployment = (
+        db.query(models.WidgetDeployment)
+        .filter(models.WidgetDeployment.help_page_slug == (slug or "").strip().lower())
+        .first()
+    )
+    if not deployment or not deployment.is_enabled or not deployment.help_page_enabled:
+        raise HTTPException(status_code=404, detail="Help page not found")
+    return JSONResponse(
+        headers={"Cache-Control": "public, max-age=60"},
+        content={
+            "deployment_id": deployment.deployment_id,
+            "display_name": deployment.display_name,
+            "logo_url": deployment.logo_url or "",
+            "theme": deployment.theme,
+            "primary_color": deployment.primary_color,
+            "title": deployment.help_page_title or f"How can {deployment.display_name} help?",
+            "description": deployment.help_page_description or "",
+            "suggestions": deployment.help_page_suggestions or [],
+        },
+    )
+
+
 @public_router.get("/{deployment_id}/config")
 def get_public_widget_config(deployment_id: str, request: Request, db: Session = Depends(get_db)):
     config = _public_widget_config_payload(db, deployment_id)
@@ -510,6 +599,7 @@ def get_public_widget_config(deployment_id: str, request: Request, db: Session =
             "initial_messages": config["initial_messages"],
             "theme": config["theme"],
             "primary_color": config["primary_color"],
+            "suggestions": config.get("suggestions") or [],
         },
     )
 

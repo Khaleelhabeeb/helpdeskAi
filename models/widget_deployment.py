@@ -26,6 +26,12 @@ class WidgetDeployment(Base):
     primary_color: Mapped[str] = mapped_column(String(7), default="#ffffff", nullable=False)
     allowed_domains: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Hosted help page (/help/<slug>) — reuses this deployment's chat + branding
+    help_page_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    help_page_slug: Mapped[Optional[str]] = mapped_column(String(48), unique=True, nullable=True, index=True)
+    help_page_title: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    help_page_description: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    help_page_suggestions: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 

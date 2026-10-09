@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Help Page Test - HelpdeskAI</title>
+    <style>
+        html, body { margin: 0; height: 100%; }
+    </style>
+</head>
+<body>
+    <!--
+      Simulates a customer's /help page.
+      1. Turn the help page on in Deploy → Help page and copy your Page ID.
+      2. Open this file with ?slug=<your-page-id>, or replace DEFAULT_SLUG below.
+      Exactly what customers paste is the <iframe> line — the script only fills in the slug.
+    -->
+    <iframe src="http://localhost:3000/help/frelo-ai-08c5c0" style="width:100%;height:100vh;border:0" allow="clipboard-write"></iframe>
+
+    <script>
+        var DEFAULT_SLUG = "your-page-id";
+        var APP_URL = "http://localhost:3000";
+        var slug = new URLSearchParams(location.search).get("slug") || DEFAULT_SLUG;
+        document.getElementById("help").src = APP_URL + "/help/" + encodeURIComponent(slug);
+    </script>
+</body>
+</html>

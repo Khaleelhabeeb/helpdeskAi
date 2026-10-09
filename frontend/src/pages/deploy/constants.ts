@@ -42,7 +42,7 @@ export const DEPLOY_CHANNELS: DeployChannel[] = [
     label: 'Help page',
     description: 'Standalone /help experience',
     icon: FileText,
-    status: 'preview',
+    status: 'live',
   },
   {
     id: 'email',

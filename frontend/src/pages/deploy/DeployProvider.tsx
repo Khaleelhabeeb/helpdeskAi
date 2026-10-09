@@ -41,12 +41,20 @@ type DeployContextValue = {
   removeInitialMessage: (index: number) => void;
   addInitialMessage: () => void;
   saveDeployment: () => Promise<void>;
+  saveHelpPage: (patch: HelpPagePatch) => Promise<boolean>;
   toggleWidgetEnabled: (enabled: boolean) => Promise<void>;
   regenerateDeploymentId: () => Promise<void>;
   uploadLogo: (file: File) => Promise<void>;
   setAgent: React.Dispatch<React.SetStateAction<Agent | null>>;
   isUploadingLogo: boolean;
 };
+
+export type HelpPagePatch = Partial<
+  Pick<
+    WidgetDeployment,
+    'help_page_enabled' | 'help_page_slug' | 'help_page_title' | 'help_page_description' | 'help_page_suggestions'
+  >
+>;
 
 const DeployContext = createContext<DeployContextValue | null>(null);
 
@@ -197,6 +205,36 @@ export function DeployProvider({ children }: { children: ReactNode }) {
     }
   }, [agent, deployment, domains]);
 
+  // Help page saves only its own fields so unsaved widget edits stay untouched
+  const saveHelpPage = useCallback(
+    async (patch: HelpPagePatch) => {
+      if (!agent) return false;
+      setError('');
+      setNotice('');
+      try {
+        const updated = await apiFetch<WidgetDeployment>(`/agents/${agent.id}/widget-deployment`, {
+          method: 'PATCH',
+          body: JSON.stringify(patch),
+        });
+        const helpFields: HelpPagePatch = {
+          help_page_enabled: updated.help_page_enabled,
+          help_page_slug: updated.help_page_slug,
+          help_page_title: updated.help_page_title,
+          help_page_description: updated.help_page_description,
+          help_page_suggestions: updated.help_page_suggestions,
+        };
+        setDeployment((current) => ({ ...current, ...helpFields }));
+        setSavedDeployment((current) => (current ? { ...current, ...helpFields } : updated));
+        setNotice('Help page saved.');
+        return true;
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not save help page');
+        return false;
+      }
+    },
+    [agent]
+  );
+
   const toggleWidgetEnabled = useCallback(
     async (enabled: boolean) => {
       if (!agent) return;
@@ -293,6 +331,7 @@ export function DeployProvider({ children }: { children: ReactNode }) {
       removeInitialMessage,
       addInitialMessage,
       saveDeployment,
+      saveHelpPage,
       toggleWidgetEnabled,
       regenerateDeploymentId,
       uploadLogo,
@@ -324,6 +363,7 @@ export function DeployProvider({ children }: { children: ReactNode }) {
       removeInitialMessage,
       addInitialMessage,
       saveDeployment,
+      saveHelpPage,
       toggleWidgetEnabled,
       regenerateDeploymentId,
       uploadLogo,

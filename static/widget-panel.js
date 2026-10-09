@@ -3,11 +3,14 @@
  * Runs inside iframe sandbox — supports bot / collecting_email / queued / human / resolved states
  */
 (function () {
-  const WIDGET_VERSION = "2.1.2";
+  const WIDGET_VERSION = "3.0.0";
   const params = new URLSearchParams(window.location.search);
   const deploymentId = params.get("deployment_id");
   const apiBase = params.get("api_base");
   const initialVisitorId = params.get("visitor_id");
+  // Hosted help page: full-bleed, no close button, optional starter question
+  const pageMode = params.get("mode") === "page";
+  const initialQuestion = (params.get("q") || "").slice(0, 4000);
 
   if (!deploymentId || !apiBase) {
     console.error("[HelpdeskAI Panel] Missing required parameters");
@@ -53,6 +56,23 @@
   const clearBtn    = document.querySelector(".clear-btn");
   const closeBtn    = document.querySelector(".close-btn");
   const resolvedBar = document.getElementById("resolvedBar");
+  const suggestionsEl = document.getElementById("suggestions");
+
+  // Chips only make sense before the visitor has said anything
+  function renderSuggestions() {
+    suggestionsEl.innerHTML = "";
+    const list = Array.isArray(state.config.suggestions) ? state.config.suggestions : [];
+    const hasUserMessage = loadHistory().some((m) => m.role === "user");
+    if (hasUserMessage || state.convStatus !== "bot") return;
+    list.slice(0, 4).forEach((text) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "chip";
+      chip.textContent = text;
+      chip.addEventListener("click", () => sendMessage(text));
+      suggestionsEl.appendChild(chip);
+    });
+  }
 
   function escapeHtml(v) {
     return String(v || "")
@@ -112,6 +132,7 @@
     formEl.classList.remove("disabled");
     inputEl.disabled = false;
     seedInitialMessages();
+    renderSuggestions();
     sendToParent({ type: "WIDGET_UNREAD", count: 0 });
   }
 
@@ -185,8 +206,9 @@
     } else if (role === "user") {
       bubble.className = "message user";
       bubble.textContent = content;
-      bubble.style.background = state.config.primary_color || "#ffffff";
-      bubble.style.color = isLightColor(state.config.primary_color || "#ffffff") ? "#111111" : "#ffffff";
+      const accent = state.accent || state.config.primary_color || "#0a0a0a";
+      bubble.style.background = accent;
+      bubble.style.color = isLightColor(accent) ? "#111111" : "#ffffff";
     } else if (role === "human_agent") {
       bubble.className = "message human-agent-msg";
       bubble.innerHTML = renderMarkdownLite(content);
@@ -241,6 +263,7 @@
     } else {
       seedInitialMessages();
     }
+    renderSuggestions();
     // Restore handoff UI if needed
     const savedStatus = localStorage.getItem(statusKey);
     if (savedStatus && savedStatus !== "bot") {
@@ -595,6 +618,7 @@
   async function sendMessage(value) {
     const text = value.trim();
     if (!text || state.sending) return;
+    suggestionsEl.innerHTML = "";
     // Block sending while waiting for email or queued. Human is *not* blocked —
     // visitor ↔ human chat flows via the same endpoint and is broadcast live.
     // Resolved is terminal.
@@ -734,11 +758,22 @@
     } else {
       avatarEl.textContent = (cfg.display_name || "AI").slice(0, 2).toUpperCase();
     }
-    // Accent gradient uses primary color
-    document.getElementById("header").style.setProperty(
-      "--accent-gradient",
-      `linear-gradient(90deg, ${primary}cc, ${primary}66, transparent)`
-    );
+    // Header carries the brand color; near-white brands fall back to ink / paper
+    const lightBrand = isLightColor(primary);
+    const headerBg = lightBrand ? (cfg.theme === "light" ? "#0a0a0a" : "#18181b") : primary;
+    const headerFg = isLightColor(headerBg) ? "#111111" : "#ffffff";
+    document.body.style.setProperty("--header-bg", headerBg);
+    document.body.style.setProperty("--header-fg", headerFg);
+    document.body.classList.toggle("header-light", headerFg === "#111111");
+    // Send button matches the header so light brands don't vanish on white
+    state.accent = lightBrand ? headerBg : primary;
+    sendEl.style.background = state.accent;
+    sendEl.style.color = isLightColor(state.accent) ? "#111111" : "#ffffff";
+    messagesEl.querySelectorAll(".message.user").forEach((el) => {
+      el.style.background = state.accent;
+      el.style.color = isLightColor(state.accent) ? "#111111" : "#ffffff";
+    });
+    renderSuggestions();
   }
 
   function autoResize() {
@@ -834,6 +869,16 @@
     }
   });
 
+  if (pageMode) {
+    document.body.classList.add("page-mode");
+    closeBtn.style.display = "none";
+  }
+
   restoreMessages();
   sendToParent({ type: "WIDGET_READY", version: WIDGET_VERSION });
+
+  if (pageMode && initialQuestion.trim()) {
+    // Wait a tick so the parent's WIDGET_CONFIG lands before the first message renders
+    setTimeout(() => sendMessage(initialQuestion), 300);
+  }
 })();

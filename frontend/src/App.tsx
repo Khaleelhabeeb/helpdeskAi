@@ -17,6 +17,7 @@ import Guides from './pages/Guides';
 import { ProtectedRoute } from './lib/auth';
 import AuthCallback from './pages/AuthCallback';
 import Welcome from './pages/Welcome';
+import HelpCenter from './pages/HelpCenter';
 import Team from './pages/Team';
 import HumanAgentLogin from './pages/humanAgent/HumanAgentLogin';
 import HumanAgentAcceptInvite from './pages/humanAgent/HumanAgentAcceptInvite';
@@ -47,6 +48,7 @@ export default function App() {
       <Route path="/login" element={<Login />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
       <Route path="/welcome" element={<Welcome />} />
+      <Route path="/help/:slug" element={<HelpCenter />} />
       <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
       <Route path="/agents" element={<ProtectedRoute><Agents /></ProtectedRoute>} />
       <Route path="/knowledge" element={<ProtectedRoute><Knowledge /></ProtectedRoute>} />
