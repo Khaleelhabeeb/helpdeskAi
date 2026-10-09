@@ -16,7 +16,8 @@ from api.auth.auth import get_db
 from db import models
 from db.database import BackgroundSession
 from services.chat_runtime import get_agent_runtime
-from services.rag_service import build_messages, aretrieve_context, astream_answer
+from services.rag_service import build_messages, aretrieve_context, astream_answer, astream_answer_with_tools
+from services.actions import ACTIONS_SYSTEM_HINT, load_runtime_actions, make_executor, tool_schema
 from services.redis_client import aredis_get_json, aredis_set_json, cache_key
 from utils.jwt import get_current_user
 from utils.rate_limit import create_limiter
@@ -71,6 +72,12 @@ async def chat_with_agent(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    try:
+        runtime_actions = load_runtime_actions(db, runtime.id)
+    except Exception:
+        logger.exception("playground_actions_load_failed agent_id=%s", runtime.id)
+        runtime_actions = []
+
     async def generate():
         answer_parts: list[str] = []
         stream_started = time.perf_counter()
@@ -94,13 +101,29 @@ async def chat_with_agent(
             finally:
                 retrieval_ms = (time.perf_counter() - retrieval_started) * 1000
 
-        messages = build_messages(runtime.instructions, context, chat.message)
+        instructions = runtime.instructions
+        if runtime_actions:
+            instructions = f"{instructions.strip()}\n\n{ACTIONS_SYSTEM_HINT}"
+        messages = build_messages(instructions, context, chat.message)
         try:
-            async for token in astream_answer(runtime.model, messages):
-                if first_token_ms is None:
-                    first_token_ms = (time.perf_counter() - stream_started) * 1000
-                answer_parts.append(token)
-                yield _sse("token", {"content": token})
+            if runtime_actions:
+                # Same tool loop as the widget so owners can try actions in the playground
+                tools = [tool_schema(a) for a in runtime_actions]
+                executor = make_executor(runtime_actions, log_context=f"playground agent_id={runtime.id}")
+                async for event in astream_answer_with_tools(runtime.model, messages, tools, executor=executor):
+                    if event["type"] == "action":
+                        yield _sse("action", {"name": event["name"], "ok": event["ok"]})
+                    elif event["type"] == "token":
+                        if first_token_ms is None:
+                            first_token_ms = (time.perf_counter() - stream_started) * 1000
+                        answer_parts.append(event["content"])
+                        yield _sse("token", {"content": event["content"]})
+            else:
+                async for token in astream_answer(runtime.model, messages):
+                    if first_token_ms is None:
+                        first_token_ms = (time.perf_counter() - stream_started) * 1000
+                    answer_parts.append(token)
+                    yield _sse("token", {"content": token})
 
             answer = "".join(answer_parts)
             try:

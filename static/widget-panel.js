@@ -594,6 +594,12 @@
         scrollBottom(false);
       }
     }
+    if (eventName === "action") {
+      // An API action ran; keep the typing state honest until the answer arrives
+      if (botBubble && !answerParts.length) {
+        botBubble.innerHTML = `<span class="typing"><span></span><span></span><span></span></span><span class="action-note">Checking that for you…</span>`;
+      }
+    }
     if (eventName === "handoff") {
       // Backend signals a handoff is needed
       const newStatus = data.status || "collecting_email";

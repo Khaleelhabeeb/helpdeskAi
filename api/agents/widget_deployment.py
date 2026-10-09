@@ -43,6 +43,12 @@ from services.handoff_service import (
     VALID_HANDOFF_DIFFICULTIES,
     DEFAULT_HANDOFF_DIFFICULTY,
 )
+from services.actions import (
+    ACTIONS_SYSTEM_HINT,
+    load_runtime_actions,
+    make_executor as make_action_executor,
+    tool_schema as action_tool_schema,
+)
 from utils.jwt import get_current_user
 from utils.widget_security import (
     generate_widget_token,
@@ -759,6 +765,16 @@ async def public_widget_chat(
     else:
         transfer_tool = None
 
+    # Custom API actions — loaded once per request, executed inside the LLM tool loop
+    try:
+        runtime_actions = load_runtime_actions(db, agent_id_value)
+    except Exception:
+        logger.exception("widget_actions_load_failed agent_id=%s", agent_id_value)
+        db.rollback()
+        runtime_actions = []
+    if runtime_actions:
+        agent_instructions = f"{agent_instructions.strip()}\n\n{ACTIONS_SYSTEM_HINT}".strip()
+
     payload_visitor_email = (payload.visitor_email.strip() if payload.visitor_email else None) or None
     identity_email = None
     if payload.identity and payload.identity.get("email"):
@@ -1008,8 +1024,15 @@ async def public_widget_chat(
             history = await history_task
             messages = build_messages(agent_instructions, context, user_message, history=history)
             _tools = [transfer_tool] if handoff_effective and transfer_tool else []
+            _tools += [action_tool_schema(a) for a in runtime_actions]
+            _executor = make_action_executor(
+                runtime_actions, log_context=f"deployment_id={deployment_id} conversation_id={conversation_id_value}"
+            ) if runtime_actions else None
 
-            async for event in astream_answer_with_tools(agent_model, messages, _tools):
+            async for event in astream_answer_with_tools(agent_model, messages, _tools, executor=_executor):
+                if event["type"] == "action":
+                    yield _sse("action", {"name": event["name"], "ok": event["ok"]})
+                    continue
                 if event["type"] == "token":
                     token = event["content"]
                     if first_token_ms is None:

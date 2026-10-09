@@ -5,7 +5,7 @@ import re
 import uuid
 import anyio
 import httpx
-from typing import Callable, Iterable, Iterator, List, Optional, AsyncIterator
+from typing import Awaitable, Callable, Iterable, Iterator, List, Optional, AsyncIterator
 
 from sqlalchemy.orm import Session
 
@@ -281,52 +281,87 @@ async def astream_answer(model: str, messages: list[dict[str, str]]) -> AsyncIte
 
 async def astream_answer_with_tools(
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict],
     tools: list[dict],
+    executor: Optional[Callable[[str, dict], Awaitable[Optional[str]]]] = None,
+    max_tool_rounds: int = 3,
 ) -> AsyncIterator[dict]:
     """
     Async streaming with tool-call support. Yields:
         {"type": "token",     "content": str}
-        {"type": "tool_call", "name": str, "arguments": dict}
+        {"type": "tool_call", "name": str, "arguments": dict}   # tools the executor doesn't own
+        {"type": "action",    "name": str, "ok": bool}          # tools the executor ran
 
-    The caller acts on tool_call events (e.g. the handoff state machine).
+    Tools the executor handles (custom API actions) are run here and their results fed back
+    to the model for up to max_tool_rounds. Any other tool call (e.g. transfer_to_human) is
+    surfaced to the caller and ends the turn.
 
-    Groq returns finish_reason="tool_calls" with no streamed content, so we do a
-    non-streaming first pass to detect tool invocations, then fall back to streaming
-    tokens when there are none.
+    Groq returns finish_reason="tool_calls" with no streamed content, so each round is a
+    non-streaming call; the final answer is re-chunked into tokens.
     """
+    import json as _json
+
     client = get_async_groq_client()
     normalized = normalize_groq_model(model)
+    convo: list[dict] = list(messages)
 
-    async with _llm_semaphore:
-        response = await client.chat.completions.create(
-            model=normalized,
-            messages=messages,  # type: ignore[arg-type]
-            tools=tools,  # type: ignore[arg-type]
-            tool_choice="auto",
-            temperature=0.2,
-            max_completion_tokens=700,
-            stream=False,
-        )
+    for round_index in range(max_tool_rounds + 1):
+        # Last round: force a text answer so a looping model can't stall the reply
+        allow_tools = bool(tools) and round_index < max_tool_rounds
+        kwargs: dict = {}
+        if allow_tools:
+            kwargs = {"tools": tools, "tool_choice": "auto"}
+        async with _llm_semaphore:
+            response = await client.chat.completions.create(
+                model=normalized,
+                messages=convo,  # type: ignore[arg-type]
+                temperature=0.2,
+                max_completion_tokens=700,
+                stream=False,
+                **kwargs,
+            )
 
-    choice = response.choices[0] if response.choices else None
-    if not choice:
+        choice = response.choices[0] if response.choices else None
+        if not choice:
+            return
+
+        tool_calls = choice.message.tool_calls if choice.finish_reason == "tool_calls" else None
+        if tool_calls:
+            parsed = []
+            for tc in tool_calls:
+                try:
+                    args = _json.loads(tc.function.arguments or "{}")
+                except Exception:
+                    args = {}
+                parsed.append((tc, args if isinstance(args, dict) else {}))
+
+            # Anything the executor doesn't own (handoff) goes back to the caller
+            results: list[tuple] = []
+            for tc, args in parsed:
+                result = await executor(tc.function.name, args) if executor else None
+                if result is None:
+                    yield {"type": "tool_call", "name": tc.function.name, "arguments": args}
+                    return
+                results.append((tc, result))
+
+            convo.append({
+                "role": "assistant",
+                "content": choice.message.content or "",
+                "tool_calls": [
+                    {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"}}
+                    for tc, _ in parsed
+                ],
+            })
+            for tc, result in results:
+                ok = '"ok": true' in result
+                yield {"type": "action", "name": tc.function.name, "ok": ok}
+                convo.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+            continue
+
+        content = choice.message.content or ""
+        if content:
+            # Re-chunk the already-complete answer so callers still see a token stream
+            chunk_size = 8
+            for i in range(0, len(content), chunk_size):
+                yield {"type": "token", "content": content[i : i + chunk_size]}
         return
-
-    if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
-        for tc in choice.message.tool_calls:
-            fn = tc.function
-            try:
-                import json as _json
-                args = _json.loads(fn.arguments or "{}")
-            except Exception:
-                args = {}
-            yield {"type": "tool_call", "name": fn.name, "arguments": args}
-        return
-
-    content = choice.message.content or ""
-    if content:
-        # Re-chunk the already-complete answer so callers still see a token stream
-        chunk_size = 8
-        for i in range(0, len(content), chunk_size):
-            yield {"type": "token", "content": content[i : i + chunk_size]}
