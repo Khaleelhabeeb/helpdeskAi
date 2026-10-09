@@ -19,7 +19,7 @@ from starlette.responses import JSONResponse, Response
 from api import human_agent as human_agent_api
 from api import models as model_catalog
 from api import owner_human_agents, owner_team
-from api.agents import actions as agent_actions, agents, chat, knowledge_base, settings, widget_deployment
+from api.agents import actions as agent_actions, improve as agent_improve, agents, chat, knowledge_base, settings, widget_deployment
 from api.analytics import analytics
 from api.auth import auth, password_reset
 from api.scrape import scrape
@@ -233,6 +233,7 @@ app.include_router(agents.router, prefix="/agents", tags=["Agents"])
 app.include_router(settings.router, prefix="/agents", tags=["Agent Settings"])
 app.include_router(widget_deployment.router, prefix="/agents", tags=["Widget Deployment"])
 app.include_router(agent_actions.router, prefix="/agents", tags=["Agent Actions"])
+app.include_router(agent_improve.router, prefix="/agents", tags=["Answer Quality"])
 app.include_router(widget_deployment.public_router, prefix="/public/widget", tags=["Public Widget"])
 app.include_router(widget_deployment.help_router, prefix="/public/help", tags=["Public Help Page"])
 app.include_router(upload.router, prefix="/knowledge", tags=["Knowledge Upload"])

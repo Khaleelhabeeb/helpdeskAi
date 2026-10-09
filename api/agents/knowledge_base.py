@@ -12,11 +12,12 @@ import uuid as uuid_lib
 from pydantic import BaseModel, Field
 from services.ingest_queue import enqueue_kb_ingest
 from services.kb_limits import PayloadTooLargeError, enforce_text_limit, read_upload_limited
-from services.kb_source_storage import delete_kb_source, store_kb_source
+from services.kb_source_storage import store_kb_source
 from services.image_upload import ImageUploadError
 from services.vector_store import delete_for_kb
 from services.file_parser import extract_text_from_file
 from services.web_scraper import discover_site_links, crawl_site
+from services.kb_text import delete_kb_completely
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -237,18 +238,7 @@ async def delete_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(ge
     if not agent:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    # Delete from vector store
-    cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
-    if cfg and cfg.vector_store_namespace:
-        try:
-            delete_for_kb(cfg.vector_store_namespace, str(kb.id))
-        except Exception:
-            logger.exception("failed_to_delete_kb_vectors kb_id=%s", kb_id)
-
-    await delete_kb_source(kb.source_storage_key)
-    
-    db.delete(kb)
-    db.commit()
+    await delete_kb_completely(db, kb, agent)
     return {"message": "KB deleted"}
 
 

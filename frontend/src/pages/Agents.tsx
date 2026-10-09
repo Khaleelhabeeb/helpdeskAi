@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 import { AppLayout } from '../components/Layout';
 import { AgentActions } from '../components/actions/AgentActions';
+import { AgentImprove } from '../components/improve/AgentImprove';
 import { cn } from '../lib/utils';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
@@ -85,7 +86,7 @@ type ModelOption = {
   locked?: boolean;
 };
 
-type AgentTab = 'playground' | 'sources' | 'actions' | 'settings';
+type AgentTab = 'playground' | 'sources' | 'actions' | 'improve' | 'settings';
 
 type ChatMessage = {
   id: string;
@@ -996,6 +997,7 @@ export default function Agents() {
       { id: 'playground', label: 'Playground', icon: MessageCircle },
       { id: 'sources', label: 'Sources', icon: Database },
       { id: 'actions', label: 'Actions', icon: Zap },
+      { id: 'improve', label: 'Improve', icon: Sparkles },
       { id: 'settings', label: 'Settings', icon: Settings },
     ];
     return (
@@ -1137,6 +1139,8 @@ export default function Agents() {
           )}
 
           {agentTab === 'actions' && <AgentActions agentId={selectedAgent.id} />}
+
+          {agentTab === 'improve' && <AgentImprove agentId={selectedAgent.id} />}
 
           {agentTab === 'sources' && (
             <section className="mx-auto max-w-4xl overflow-hidden rounded-2xl border border-hairline bg-white">

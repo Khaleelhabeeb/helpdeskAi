@@ -43,6 +43,7 @@ from services.handoff_service import (
     VALID_HANDOFF_DIFFICULTIES,
     DEFAULT_HANDOFF_DIFFICULTY,
 )
+from services.answer_quality import classify_answer
 from services.actions import (
     ACTIONS_SYSTEM_HINT,
     load_runtime_actions,
@@ -1147,6 +1148,12 @@ async def public_widget_chat(
                 user_message=user_message,
                 answer=answer,
                 sender_type="bot",
+                answer_status=classify_answer(
+                    answer,
+                    retrieval_used=bool(use_retrieval and namespace),
+                    context=context,
+                    handoff=handoff_triggered,
+                ),
             )
             chat_logged = True
 
@@ -1775,7 +1782,7 @@ def delete_visitor_data(
     return {"deleted": True, "conversation_id": conversation_id}
 
 
-def _log_public_chat(session_id, user_id, agent_id, user_message, answer, sender_type="bot"):
+def _log_public_chat(session_id, user_id, agent_id, user_message, answer, sender_type="bot", answer_status=None):
     # Dedupe retries: same session+message hash within 10 min logs once
     try:
         import hashlib as _hl
@@ -1806,6 +1813,7 @@ def _log_public_chat(session_id, user_id, agent_id, user_message, answer, sender
                 role="assistant",
                 content=answer,
                 sender_type=sender_type,
+                answer_status=answer_status if sender_type == "bot" else None,
                 created_at=now,
             ))
             db.add(models.UsageLog(

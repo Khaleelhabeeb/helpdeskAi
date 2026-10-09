@@ -197,6 +197,7 @@ def get_team_conversation(
                 "content": r.content,
                 "sender_type": r.sender_type,
                 "sender_id": str(r.sender_id) if r.sender_id else None,
+                "answer_status": r.answer_status,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             })
     return {

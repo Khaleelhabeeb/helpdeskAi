@@ -6,6 +6,7 @@ from .kb_chunk import KbChunk
 from .enums import KBSourceType, KBStatus, JobState
 from .handoff import HumanAgent, AgentAssignment, Conversation, HumanPresence
 from .action import AgentAction
+from .correction import AnswerCorrection
 
 __all__ = [
     "User",
@@ -28,4 +29,5 @@ __all__ = [
     "Conversation",
     "HumanPresence",
     "AgentAction",
+    "AnswerCorrection",
 ]

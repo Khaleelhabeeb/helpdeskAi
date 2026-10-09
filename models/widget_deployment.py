@@ -75,5 +75,7 @@ class ChatMessage(Base):
     sender_type: Mapped[str] = mapped_column(String(16), nullable=False, default="visitor")
     # human_agents.id when sender_type = 'human_agent'
     sender_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # Bot replies only: answered | unanswered | handoff | corrected | dismissed (see services/answer_quality)
+    answer_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
 
     session: Mapped["ChatSession"] = relationship("ChatSession", back_populates="messages")

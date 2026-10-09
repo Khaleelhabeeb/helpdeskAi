@@ -1,4 +1,5 @@
-import { Inbox as InboxIcon, Loader2, RefreshCw, X } from 'lucide-react';
+import { Inbox as InboxIcon, Loader2, RefreshCw, Sparkles, X } from 'lucide-react';
+import { CorrectionDialog } from '../components/improve/CorrectionDialog';
 import { useEffect, useState } from 'react';
 import { AppLayout } from '../components/Layout';
 import { cn } from '../lib/utils';
@@ -16,7 +17,7 @@ type Conv = {
   preview?: string | null;
 };
 
-type Msg = { id: number | string; role: string; content: string; sender_type: string; created_at?: string | null };
+type Msg = { id: number | string; role: string; content: string; sender_type: string; answer_status?: string | null; created_at?: string | null };
 type ConvDetail = Conv & { messages: Msg[] };
 
 const STATUS_META: Record<string, { label: string; cls: string }> = {
@@ -43,6 +44,15 @@ export default function Inbox() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ConvDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [fixing, setFixing] = useState<{ messageId: number; question: string; answer: string } | null>(null);
+
+  // The visitor message right before a bot reply is the question it was answering
+  function questionBefore(messages: Msg[], index: number) {
+    for (let i = index - 1; i >= 0; i--) {
+      if (messages[i].sender_type === 'visitor') return messages[i].content;
+    }
+    return '';
+  }
 
   useEffect(() => {
     apiFetch<Agent[]>('/agents/').then(setAgents).catch(() => {});
@@ -187,8 +197,8 @@ export default function Inbox() {
                   ) : detail.messages.length === 0 ? (
                     <div className="text-sm text-on-surface-variant">No messages.</div>
                   ) : (
-                    detail.messages.map((m) => (
-                      <div key={m.id} className={m.sender_type === 'visitor' ? 'flex justify-end' : 'flex justify-start'}>
+                    detail.messages.map((m, i) => (
+                      <div key={m.id} className={m.sender_type === 'visitor' ? 'flex justify-end' : 'flex flex-col items-start'}>
                         <div
                           className={cn(
                             'max-w-[82%] rounded-2xl px-4 py-2.5 text-sm',
@@ -202,6 +212,21 @@ export default function Inbox() {
                           <div className="mb-1 text-[10px] font-bold uppercase tracking-wide opacity-60">{m.sender_type}</div>
                           <div className="whitespace-pre-wrap break-words">{m.content}</div>
                         </div>
+                        {m.sender_type === 'bot' && typeof m.id === 'number' && (
+                          <div className="mt-1 flex items-center gap-2 pl-1">
+                            {m.answer_status === 'unanswered' && <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">Unanswered</span>}
+                            {m.answer_status === 'corrected' ? (
+                              <span className="text-[11px] text-emerald-600">Answer improved</span>
+                            ) : (
+                              <button
+                                onClick={() => setFixing({ messageId: m.id as number, question: questionBefore(detail.messages, i), answer: m.content })}
+                                className="inline-flex items-center gap-1 text-[11px] font-medium text-zinc-500 hover:text-zinc-950"
+                              >
+                                <Sparkles className="h-3 w-3" /> Improve answer
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </div>
                     ))
                   )}
@@ -211,6 +236,20 @@ export default function Inbox() {
           </section>
         </div>
       </div>
+      {fixing && detail && (
+        <CorrectionDialog
+          agentId={detail.agent_id}
+          question={fixing.question}
+          originalAnswer={fixing.answer}
+          messageIds={[fixing.messageId]}
+          onClose={() => setFixing(null)}
+          onSaved={() => {
+            const id = fixing.messageId;
+            setFixing(null);
+            setDetail((cur) => cur && { ...cur, messages: cur.messages.map((x) => (x.id === id ? { ...x, answer_status: 'corrected' } : x)) });
+          }}
+        />
+      )}
     </AppLayout>
   );
 }
