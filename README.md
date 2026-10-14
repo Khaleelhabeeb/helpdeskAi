@@ -1,6 +1,6 @@
 # HelpdeskAI — Autonomous Customer Support Platform
 
-> Production-grade RAG helpdesk: create AI agents, ingest your knowledge base, embed a chat widget, and seamlessly hand off to human agents when the AI needs help. Built as a portfolio showcase for full-stack + AI engineering.
+> Production-grade RAG helpdesk: create AI agents, ingest your knowledge base, give agents custom API actions, embed a chat widget or hosted help page, and hand off to humans when needed. Built as a portfolio showcase for full-stack + AI engineering.
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-61DAFB?style=flat&logo=react&logoColor=black)](https://react.dev/)
@@ -17,72 +17,78 @@
 
 | Area | Capability |
 |---|---|
-| **LLM** | Direct `groq` SDK (`services/groq_client.py:54`) with per-loop `AsyncGroq` pools, timeout/retries, model prefix normalization |
-| **Vector store** | **PostgreSQL + pgvector** (`services/vector_store.py:114`) — HNSW `vector_cosine_ops`, namespace isolation, SQLite fallback for tests |
-| **Scraping** | `services/web_scraper.py` — extraction with favicon/`og:image`/`theme-color` branding, safe-URL checks, crawl concurrency limits |
-| **Auth** | Magic-link OTP (`/auth/otp/request`, `/auth/otp/verify`), Google OAuth callback, password reset — Supabase JWT verification + cache |
-| **Human Handoff** | Full state machine (`services/handoff_service.py:204`) + difficulty presets (easy/balanced/hard), LLM tool `transfer_to_human`, visitor email capture, fallback email (Brevo), presence (`services/presence.py`), atomic claim |
-| **Team** | Owner-managed human agents, agent assignments, invite tokens, separate human-agent auth (`/human-agent/auth/*`) + dashboard |
-| **Widget** | `static/widget.js` + `widget-panel.html/js` — signed deployment tokens, domain allowlist, SSE chat, WS live handoff, telemetry, embed snippet regeneration |
+| **AI Agents** | Create support agents with custom instructions, model choice, and branding |
+| **Knowledge Base** | Upload PDFs, paste text, or crawl websites — agents answer from your content |
+| **Custom API Actions** | Let agents call your own APIs (e.g. order status lookup) mid-conversation |
+| **Answer Improvement** | See questions your agent couldn't answer, teach the right answer once |
+| **Widget & Help page** | Embeddable chat bubble plus a hosted `/help` page, with your logo, colors, and domain lock |
+| **Human Handoff** | Bot hands off to a human when stuck, with Easy / Balanced / Hard sensitivity |
+| **Team & Inbox** | Invite human agents, assign them to agents, chat live with visitors |
+| **Auth** | Magic-link login, Google login, password reset |
 
 ---
 
 ## Features
 
 ### 1. AI Agents
-* Create agents per use-case (`POST /agents/create` — `api/agents/agents.py:102`) with name, model (`groq/llama-3.1-8b-instant` default), avatar upload (2 MB limit), and optional `website_url` for auto-branding.
-* Per-agent `AgentConfig`: `retrieval_enabled`, `retrieval_top_k` (capped by `CHAT_RETRIEVAL_TOP_K_CAP`), `system_prompt_locked`, `vector_store_namespace = "{user_id}:{agent_id}"`, `human_handoff_enabled`, `human_handoff_difficulty`.
-* Avatar → widget `logo_url` sync, theme color propagation, runtime cache invalidation (`services/chat_runtime.py`).
+* Create one agent per use-case with a name, AI model, avatar, and optional website for auto-branding.
+* Try it instantly in the Playground before embedding it anywhere.
+* Per-agent settings for knowledge retrieval, system prompt, and human handoff.
 
-### 2. Knowledge Base & RAG
-* Sources: PDF/TXT upload, pasted text, or URL (`POST /kb/*`, `POST /scrape/*`). File parsing via `services/file_parser.py`, chunking + S3-backed storage (`services/kb_source_storage.py`), quota enforcement (`services/storage_quota.py`).
-* Async ingest queue (`services/ingest_queue.py` / `ingest_worker.py`) — spool to `/tmp/helpdeskai-ingest`, Jina embeddings (`JINA_EMBED_MODEL=jina-embeddings-v5-text-small`), `services/vector_store.py:upsert_texts`.
-* Retrieval: `aretrieve_context` → `services/vector_store.py:search` (cosine `<=>`, `RAG_CONTEXT_MAX_CHARS=3500`), `build_messages` with `services/ai_prompt_builder.py`, streaming via `astream_answer_with_tools` (Groq).
-* Context cache (`RAG_CONTEXT_CACHE_TTL_SECONDS=180`) and concurrency caps (`JINA_EMBED_MAX_CONCURRENCY=4`, `LLM_STREAM_MAX_CONCURRENCY=8`).
+### 2. Knowledge Base
+* Add PDFs, pasted text, or website URLs. Everything becomes searchable for the agent.
+* Files are processed in the background with storage limits per plan.
+* Turn retrieval on/off and control how much context the agent uses.
 
-### 3. Embeddable Widget
-* Per-agent deployment (`models/widget_deployment.py`) — `deployment_id`, `display_name`, `logo_url`, `initial_messages`, `theme`, `primary_color`, `allowed_domains`, `is_enabled`.
-* Public APIs (`api/agents/widget_deployment.py`):
-  * `GET /public/widget/{deployment_id}/config` — cached (`WIDGET_CONFIG_CACHE_TTL_SECONDS=300`), ETag, domain check
-  * `POST /public/widget/{deployment_id}/chat` — SSE, rate-limited (Redis + in-memory fallback), abuse detection, handoff-aware streaming
-  * `POST /public/widget/{deployment_id}/telemetry`, `POST /.../conversations/{id}/email`, `GET /.../token`, `WS /public/widget/ws/{conversation_id}`
-* Owner APIs: `GET/PATCH /agents/{agent_id}/widget-deployment`, `POST /regenerate`, `POST /token` (signed via `utils/widget_security.py`).
-* Frontend embed: `<script src="{base}/static/widget.js?v=2.1.2" data-deployment-id="{id}" defer></script>` — `widget-loader.js` + `widget-panel.{html,js}` handle SSE/WS, visitor tokens, and handoff UI states.
+### 3. Embeddable Widget & Help Page
+* One embed script per agent with your logo, colors, and welcome messages.
+* Or turn on a hosted help page (`/help/your-id`) with custom headline, description, and suggested questions — embed it via iframe.
+* Lock it to your domains, disable anytime, and regenerate the snippet when needed.
+* Visitors get streaming replies, email capture, and smooth handoff to humans.
 
-### 4. Human Handoff — State Machine
+### 4. Custom API Actions
+* Give agents real abilities: order lookup, booking check, account status — any HTTP endpoint.
+* Define method, URL with `{placeholders}`, parameters the agent must collect, and secret headers.
+* Test each action with sample values before going live, then enable/disable anytime.
+* Works in both the Playground and the live widget — the agent calls the API, reads the result, and answers naturally.
+
+### 5. Improve Answers
+* Every bot reply is tagged answered / unanswered. The Improve tab shows totals, unanswered rate, and top repeated questions (7 / 30 / 90 days).
+* One click to teach the right answer or dismiss a false positive. Taught answers go live as knowledge and are reused next time.
+* Fix answers right from the Inbox transcript with the Improve answer button.
+
+### 6. Human Handoff
 ```
 bot ──► collecting_email ──► queued ──► human ──► resolved
  │              │               │          │
  └─► queued ────┘               └─► resolved
 ```
-* Trigger: LLM calls `transfer_to_human` tool (description varies by difficulty — `services/handoff_service.py:358`).
-* Difficulty (`HANDOFF_DIFFICULTY_META`):
-  * **Easy:** offer after 1 try, generous keyword match.
-  * **Balanced (default):** 1–2 tries + 1 clarifying question.
-  * **Hard:** 2–3 tries, require visitor to insist twice (server-gated via `should_allow_handoff`).
-* Gating: `human_handoff_enabled` must be on **and** at least one `active` HumanAgent assigned to the agent (`_is_handoff_effectively_enabled`). Disabled → auto-recover `queued/collecting_email → bot`.
-* Conversation (`models/handoff.py:Conversation`) scoped to `session_id`, WS fan-out via `_ws_registry` + `_human_registry`, `atomic_claim_conversation` (conditional `UPDATE ... WHERE status='queued'`), fallback email via `services/email_provider.py` (Brevo/`sib-api-v3-sdk`, 30-min throttle, presence-aware).
+* The bot hands off when the visitor asks for a human or it gets stuck.
+* Sensitivity presets:
+  * **Easy:** offers a human quickly.
+  * **Balanced (default):** tries once or twice first.
+  * **Hard:** only hands off when the visitor insists.
+* Only works when enabled and at least one human is assigned — otherwise the bot carries on.
+* If no human is online, the visitor can leave an email for follow-up.
 
-### 5. Team & Human Agents
-* Owner: `api/owner_human_agents.py` — invite (`status=invited` + email), list, assign to agents, revoke. `api/owner_team.py` — analytics, conversations.
-* Human: `api/human_agent.py` — login (JWT `human_agent` audience, `HUMAN_AGENT_JWT_TTL_HOURS=12`), WS dashboard, `claim` / `resolve` / `message`, presence heartbeat.
-* Frontend: `frontend/src/pages/Team.tsx`, `frontend/src/pages/humanAgent/*` (Login, AcceptInvite, Dashboard) — real-time queue, conversation view, claim race handling (409).
+### 7. Team, Inbox & Human Agents
+* Invite human agents by email, assign them to agents, revoke access anytime.
+* Shared Inbox with all conversations, status filters, and full transcripts.
+* Human dashboard with live queue, one-click claim, reply, and resolve.
 
-### 6. Auth & Users
-* Supabase JWT (`utils/jwt.py`, `services/supabase_auth.py` — 120s TTL, 2k LRU), OTP magic link, Google OAuth (`/auth/google/callback`, `/auth/oauth/exchange`), `POST /auth/refresh`, `POST /auth/upgrade/{tier}`.
-* Password reset (`api/auth/password_reset.py`), credits/subscription (`schemas/user.py`), storage quota tiers (`FREE_STORAGE_LIMIT_MB=2`, `PAID=50`, `PRO=100`).
+### 8. Auth & Users
+* Magic-link email login, Google login, and password reset.
+* Credit / subscription tiers with per-plan storage limits.
 
-### 7. Dashboard & Landing
-* `frontend/src/pages/Landing.tsx` — animated hero, channels grid (Slack/WhatsApp/Web/Gmail), feature cards, security section.
-* `frontend/src/pages/Dashboard.tsx` — per-agent cards, knowledge base list, recent conversations, message counts.
-* `frontend/src/pages/Agents.tsx` — creation with branding preview, model picker, scraping status.
-* `frontend/src/components/BrandIcons.tsx` + `Icon3D.tsx` for consistent branding.
+### 9. Dashboard
+* Overview of agents, knowledge sources, and recent conversations.
+* Agent creation with live branding preview and model picker.
+* Analytics, billing, guides, and settings in one layout.
 
-### 8. Production Hardening
-* Rate limiting: `utils/rate_limit.py` + `services/redis_client.py` (Upstash/Redis, `RATE_LIMIT_REDIS_PREFIX`), widget sliding-window fallback (`FALLBACK_RATE_LIMIT_MAX_KEYS=1000`).
-* Caching: Redis JSON for widget config, RAG context, auth; `CachedStaticFiles` (`main.py:204`) with immutable hashed builds.
-* Observability: `request_logging_middleware` (`main.py:45`) with `X-Request-ID`, `CONVERSATION` state logs, `widget_chat_latency` (retrieval + TTFT).
-* Security: `PublicWidgetCORSMiddleware`, domain allowlist (`_host_allowed`), `widget_security` abuse signatures, `verify_visitor_token`/`verify_widget_token`, `bcrypt` + `pyjwt`, `slowapi` throttling, `GZipMiddleware`.
+### 10. Production Hardening
+* Rate limiting, caching, and request logging out of the box.
+* Domain allowlisting, signed widget tokens, and abuse detection.
+* Graceful fallback when Redis is unavailable.
 
 ---
 
