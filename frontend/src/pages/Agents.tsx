@@ -1155,7 +1155,7 @@ export default function Agents() {
                 <div className="space-y-4">
                   <div>
                     <p className="text-sm font-semibold text-zinc-950">Add a source</p>
-                    <p className="mt-0.5 text-xs text-zinc-500">Pick a type, paste or upload, then press Add. Indexing starts right away.</p>
+                    <p className="mt-0.5 text-xs text-zinc-500">Pick a type, paste or upload, then press Add. Indexing starts right away. Originals aren&apos;t stored — files and text can only be retrained from a recent ingest, otherwise upload them again.</p>
                   </div>
                   <div className="flex rounded-lg border border-zinc-200 bg-zinc-50 p-1">
                     {[

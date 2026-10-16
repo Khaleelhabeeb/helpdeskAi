@@ -187,6 +187,7 @@ export default function Knowledge() {
             <h1 className="text-3xl font-bold tracking-tight text-brand-primary">Knowledge</h1>
             <p className="mt-1 text-sm text-on-surface-variant">
               Everything your agents are trained on — add sources, retrain, and keep answers accurate.
+              Originals aren&apos;t stored: files and text retrain from a recent ingest or need a fresh upload.
             </p>
           </div>
           <div className="flex items-center gap-2">

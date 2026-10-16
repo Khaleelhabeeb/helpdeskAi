@@ -7,13 +7,12 @@ from api.auth.auth import get_db
 from db import models
 from utils.jwt import get_current_user
 import anyio
+import hashlib
 import logging
 import uuid as uuid_lib
 from pydantic import BaseModel, Field
-from services.ingest_queue import enqueue_kb_ingest
+from services.ingest_queue import enqueue_kb_ingest, find_reusable_spool_path
 from services.kb_limits import PayloadTooLargeError, enforce_text_limit, read_upload_limited
-from services.kb_source_storage import store_kb_source
-from services.image_upload import ImageUploadError
 from services.vector_store import delete_for_kb
 from services.file_parser import extract_text_from_file
 from services.web_scraper import discover_site_links, crawl_site
@@ -65,24 +64,25 @@ async def add_knowledge_base(
 
     source_uri = None
     original_filename = None
-    source_storage_url = None
-    source_storage_key = None
     source_content_type = None
     source_content_sha256 = None
     file_size_bytes = 0
     extracted_size_bytes = 0
     extracted_text = ""
+    # NOTE: customer originals are intentionally never stored. File/text
+    # sources index from the request's extracted text via a short-lived local
+    # spool; URL sources re-scrape at ingest time.
 
     if source_type in (schemas.KBSourceType.upload_pdf, schemas.KBSourceType.upload_txt, schemas.KBSourceType.other):
         if not file:
             raise HTTPException(status_code=400, detail="File is required for upload_* source types")
-        
+
         try:
             file_content = await read_upload_limited(file)
         except PayloadTooLargeError as exc:
             raise HTTPException(status_code=413, detail=str(exc)) from exc
         file_size_bytes = len(file_content)
-        
+
         kb_id = str(uuid_lib.uuid4())
         original_filename = file.filename or f"upload-{kb_id}"
         try:
@@ -90,14 +90,10 @@ async def add_knowledge_base(
             extracted_size_bytes = enforce_text_limit(extracted_text)
         except PayloadTooLargeError as exc:
             raise HTTPException(status_code=413, detail=str(exc)) from exc
-        try:
-            stored = await store_kb_source(file_content, original_filename, file.content_type)
-        except ImageUploadError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        source_storage_url = stored.url
-        source_storage_key = stored.key
-        source_content_type = stored.content_type
-        source_content_sha256 = stored.sha256
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        source_content_type = file.content_type or "application/octet-stream"
+        source_content_sha256 = hashlib.sha256(file_content).hexdigest()
         source_uri = original_filename
         
     elif source_type == schemas.KBSourceType.url:
@@ -123,14 +119,8 @@ async def add_knowledge_base(
         original_filename = title or "Structured Text"
         text_bytes = structured_text.encode("utf-8")
         file_size_bytes = len(text_bytes)
-        try:
-            stored = await store_kb_source(text_bytes, f"{original_filename}.txt", "text/plain")
-        except ImageUploadError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        source_storage_url = stored.url
-        source_storage_key = stored.key
-        source_content_type = stored.content_type
-        source_content_sha256 = stored.sha256
+        source_content_type = "text/plain"
+        source_content_sha256 = hashlib.sha256(text_bytes).hexdigest()
         
     else:
         raise HTTPException(status_code=400, detail="Unsupported source_type")
@@ -143,8 +133,6 @@ async def add_knowledge_base(
         title=title or original_filename,
         status=models.KBStatus.pending,
         original_filename=original_filename,
-        source_storage_url=source_storage_url,
-        source_storage_key=source_storage_key,
         source_content_type=source_content_type,
         source_content_sha256=source_content_sha256,
         file_size_bytes=file_size_bytes,
@@ -160,6 +148,7 @@ async def add_knowledge_base(
     )
     db.add(job)
     db.commit()
+    db.refresh(job)
 
     queue_text = extracted_text if source_type != schemas.KBSourceType.url else None
     if not enqueue_kb_ingest(str(job.id), queue_text):
@@ -188,22 +177,40 @@ async def retrain_agent_knowledge(agent_id: str, db: Session = Depends(get_db), 
             except Exception:
                 logger.exception("failed_to_delete_kb_vectors_before_retrain kb_id=%s", kb.id)
 
-    jobs: list[models.KBIngestJob] = []
+    jobs: list[tuple[models.KBIngestJob, str | None]] = []
     for kb in kbs:
-        if kb.source_type != models.KBSourceType.url and not kb.source_storage_url:
+        if kb.source_type == models.KBSourceType.url:
+            kb.status = models.KBStatus.pending
+            kb.updated_at = datetime.now(timezone.utc)
+            job = models.KBIngestJob(kb_id=kb.id, state=models.JobState.queued)
+            db.add(job)
+            jobs.append((job, None))
+            continue
+        # File/text originals are not stored. Retry from the short-lived spool
+        # of a previous ingest when still available; otherwise the customer
+        # must upload the source again.
+        spool_path = find_reusable_spool_path(db, str(kb.id))
+        if not spool_path:
             kb.status = models.KBStatus.failed
+            kb.updated_at = datetime.now(timezone.utc)
             continue
         kb.status = models.KBStatus.pending
         kb.updated_at = datetime.now(timezone.utc)
-        job = models.KBIngestJob(kb_id=kb.id, state=models.JobState.queued)
+        job = models.KBIngestJob(
+            kb_id=kb.id,
+            state=models.JobState.queued,
+            transient_spool_path=spool_path,
+        )
         db.add(job)
-        jobs.append(job)
+        jobs.append((job, spool_path))
     db.commit()
-    for job in jobs:
+    enqueued: list[models.KBIngestJob] = []
+    for job, spool_path in jobs:
         db.refresh(job)
-        if not enqueue_kb_ingest(str(job.id), None):
+        if not enqueue_kb_ingest(str(job.id), reuse_spool_path=spool_path):
             raise HTTPException(status_code=503, detail="Knowledge ingestion queue is full. Please try again shortly.")
-    return jobs
+        enqueued.append(job)
+    return enqueued
 
 
 @router.get("/{agent_id}", response_model=List[schemas.KnowledgeBaseOut])
@@ -254,12 +261,21 @@ async def reindex_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(g
     if not agent:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    if kb.source_type != models.KBSourceType.url and not kb.source_storage_url:
-        raise HTTPException(status_code=400, detail="This source was created before stored-source retraining was enabled. Upload it again to retrain.")
+    reuse_spool_path = None
+    if kb.source_type != models.KBSourceType.url:
+        # File/text originals are not stored: retry from the short-lived spool
+        # of a previous ingest when still available, else ask for a re-upload.
+        reuse_spool_path = find_reusable_spool_path(db, str(kb.id))
+        if not reuse_spool_path:
+            raise HTTPException(status_code=400, detail="Originals are not stored. Upload this source again to retrain.")
 
     kb.status = models.KBStatus.pending
     kb.updated_at = datetime.now(timezone.utc)
-    job = models.KBIngestJob(kb_id=kb.id, state=models.JobState.queued)
+    job = models.KBIngestJob(
+        kb_id=kb.id,
+        state=models.JobState.queued,
+        transient_spool_path=reuse_spool_path,
+    )
     db.add(job)
     db.commit()
     db.refresh(job)
@@ -269,7 +285,7 @@ async def reindex_kb(kb_id: str, db: Session = Depends(get_db), user = Depends(g
             await anyio.to_thread.run_sync(delete_for_kb, cfg.vector_store_namespace, str(kb.id))
         except Exception:
             logger.exception("failed_to_delete_kb_vectors_before_reindex kb_id=%s", kb_id)
-    if not enqueue_kb_ingest(str(job.id), None):
+    if not enqueue_kb_ingest(str(job.id), reuse_spool_path=reuse_spool_path):
         raise HTTPException(status_code=503, detail="Knowledge ingestion queue is full. Please try again shortly.")
     return job
 
@@ -306,15 +322,9 @@ def get_kb_download_url(kb_id: str, db: Session = Depends(get_db), user = Depend
     agent = db.query(models.Agent).filter(models.Agent.id == kb.agent_id, models.Agent.user_id == user.id).first()
     if not agent:
         raise HTTPException(status_code=403, detail="Forbidden")
-    
-    if kb.source_storage_url:
-        return {
-            "kb_id": kb_id,
-            "filename": kb.original_filename or kb.title,
-            "download_url": kb.source_storage_url,
-            "expires_in_seconds": None
-        }
 
+    # Originals are not stored, so only URL sources (re-scraped live) have a
+    # download. File/text sources return 404: upload again if needed.
     if kb.source_type != models.KBSourceType.url or not kb.source_uri:
         raise HTTPException(status_code=404, detail="No original file available for download")
 

@@ -62,16 +62,25 @@ async def upload_worker_file(
     }
 
     client = await get_async_http_client()
-    response = await client.post(
-        image_worker_url,
-        headers=headers,
-        data=data,
-        files=files,
-        timeout=30.0,
-    )
+    try:
+        response = await client.post(
+            image_worker_url,
+            headers=headers,
+            data=data,
+            files=files,
+            timeout=30.0,
+        )
+    except Exception as exc:
+        raise ImageUploadError(f"Upload worker request failed: {exc}") from exc
 
     if response.status_code >= 400:
-        raise ImageUploadError("Image worker upload failed")
+        body = (response.text or "").strip()[:300]
+        # Surface the worker's own error (e.g. "Unauthorized", "Invalid file size")
+        # instead of an opaque message, so callers can diagnose misconfiguration.
+        detail = f" (status {response.status_code})"
+        if body:
+            detail += f": {body}"
+        raise ImageUploadError(f"Image worker upload failed{detail}")
 
     try:
         payload = response.json()

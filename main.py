@@ -55,6 +55,17 @@ async def lifespan(app: FastAPI):
         logger.info("handoff_sweeper_started")
     except Exception:
         logger.exception("handoff_sweeper_start_failed")
+    # Ingest durability: re-enqueue jobs interrupted by a crash (URL sources
+    # re-scrape, file/text resume from their spool) and clear stale spools.
+    try:
+        from services.ingest_queue import describe_spool_config, recover_interrupted_jobs, sweep_orphan_spools
+        logger.info("ingest_spool_config %s", describe_spool_config())
+        recovery = await _asyncio.to_thread(recover_interrupted_jobs)
+        logger.info("ingest_recovery_on_startup summary=%s", recovery)
+        swept = await _asyncio.to_thread(sweep_orphan_spools)
+        logger.info("ingest_spool_sweep_on_startup summary=%s", swept)
+    except Exception:
+        logger.exception("ingest_startup_recovery_failed")
     yield
     try:
         if _sweeper_stop is not None:

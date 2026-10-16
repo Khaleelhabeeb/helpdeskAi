@@ -83,27 +83,14 @@ class TestKnowledgeBaseModel:
         remaining = db_session.get(KBIngestJob, job_id)
         assert remaining is None
 
-    def test_knowledge_base_has_stored_source_property(self, db_session, agent):
-        kb1 = KnowledgeBase(
-            agent_id=agent.id,
-            source_type=KBSourceType.upload_pdf,
-            source_storage_key="uploads/abc.pdf",
-        )
-        kb2 = KnowledgeBase(
-            agent_id=agent.id,
-            source_type=KBSourceType.url,
-            source_storage_url="https://example.com/doc.pdf",
-        )
-        kb3 = KnowledgeBase(
-            agent_id=agent.id,
-            source_type=KBSourceType.text,
-        )
-        db_session.add_all([kb1, kb2, kb3])
+    def test_ingest_job_spool_path_defaults_to_none(self, db_session, knowledge_base):
+        job = KBIngestJob(kb_id=knowledge_base.id, state=JobState.queued)
+        db_session.add(job)
         db_session.commit()
+        db_session.refresh(job)
 
-        assert kb1.has_stored_source is True
-        assert kb2.has_stored_source is True
-        assert kb3.has_stored_source is False
+        assert job.transient_spool_path is None
+        assert job.claimed_by is None
 
     def test_knowledge_base_enums_stored_as_strings(self, db_session, agent):
         kb = KnowledgeBase(

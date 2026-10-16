@@ -13,7 +13,6 @@ from utils.jwt import get_current_user
 from uuid import UUID
 from services.vector_store import delete_namespace
 from services.image_upload import ImageUploadError, upload_avatar_image, upload_worker_file
-from services.kb_source_storage import delete_kb_source
 from services.kb_limits import PayloadTooLargeError, read_upload_limited
 from services.redis_client import cache_key, redis_delete
 from services.chat_runtime import invalidate_agent_runtime
@@ -338,7 +337,11 @@ async def delete_agent(agent_id: UUID, db: Session = Depends(get_db), user = Dep
             logger.exception("failed_to_delete_agent_vectors agent_id=%s", agent_id)
 
     for kb in kbs:
-        await delete_kb_source(kb.source_storage_key)
+        try:
+            from services.ingest_queue import delete_spools_for_kb
+            delete_spools_for_kb(db, str(kb.id))
+        except Exception:
+            logger.exception("failed_to_delete_kb_spools kb_id=%s", kb.id)
     
     db.delete(agent)
     db.commit()

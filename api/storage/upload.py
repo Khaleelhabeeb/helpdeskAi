@@ -1,4 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+import hashlib
 import uuid as uuid_lib
 import anyio
 from services.file_parser import extract_text_from_file
@@ -9,9 +10,10 @@ from sqlalchemy.orm import Session
 from utils.jwt import get_current_user
 from services.ingest_queue import enqueue_kb_ingest
 from services.kb_limits import PayloadTooLargeError, enforce_text_limit, read_upload_limited
-from services.kb_source_storage import store_kb_source
-from services.image_upload import ImageUploadError
 from services.storage_quota import check_storage_quota, check_files_quota, increment_storage_usage
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -66,10 +68,8 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    try:
-        stored = await store_kb_source(file_content, filename, file.content_type)
-    except ImageUploadError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # NOTE: customer originals are intentionally never stored. Indexing below
+    # runs from `extracted_text` via a short-lived local spool.
 
     if legacy_prompt_update:
         cfg = db.query(models.AgentConfig).filter(models.AgentConfig.agent_id == agent.id).first()
@@ -97,22 +97,21 @@ async def upload_file(agent_id: str = Form(...), file: UploadFile = File(...), l
         source_uri=filename,
         status=models.KBStatus.pending,
         original_filename=filename,
-        source_storage_url=stored.url,
-        source_storage_key=stored.key,
-        source_content_type=stored.content_type,
-        source_content_sha256=stored.sha256,
+        source_content_type=file.content_type or "application/octet-stream",
+        source_content_sha256=hashlib.sha256(file_content).hexdigest(),
         file_size_bytes=file_size_bytes,
         extracted_size_bytes=extracted_size_bytes
     )
     db.add(kb)
     db.commit()
     db.refresh(kb)
-    
+
     increment_storage_usage(db, user.id, file_size_bytes + extracted_size_bytes, 0)
 
     job = models.KBIngestJob(kb_id=kb.id, state=models.JobState.queued)
     db.add(job)
     db.commit()
+    db.refresh(job)
 
     if not enqueue_kb_ingest(str(job.id), extracted_text):
         raise HTTPException(status_code=503, detail="Knowledge ingestion queue is full. Please try again shortly.")

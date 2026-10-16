@@ -11,8 +11,6 @@ from db import models
 from services.rag_service import aindex_kb_text
 from services.kb_limits import enforce_text_limit
 from services.web_scraper import scrape_url_content
-from services.file_parser import extract_text_from_file
-from services.kb_source_storage import download_kb_source
 from services.vector_store import delete_for_kb
 from dotenv import load_dotenv
 
@@ -115,8 +113,13 @@ async def process_kb_ingest_job(
     then record success/failure and the resulting KB status.
 
     `transient_text_path` is the spool file supplied by the ingest queue.
+    When absent (e.g. a job resumed after a restart), the persisted spool path
+    on the job row is used. Customer originals are never fetched from remote
+    storage: file/text sources index from the spool, URL sources re-scrape.
     """
     db: Session = BackgroundSession()
+    spool_path: Optional[str] = transient_text_path
+    succeeded = False
     try:
         job = db.query(models.KBIngestJob).filter(models.KBIngestJob.id == job_id).first()
         if not job:
@@ -125,8 +128,12 @@ async def process_kb_ingest_job(
         if not kb:
             job.state = models.JobState.failed
             job.error = "KB not found"
+            job.claimed_by = None
             db.commit()
             return
+
+        if not spool_path and job.transient_spool_path:
+            spool_path = job.transient_spool_path
 
         job.state = models.JobState.running
         job.processed_chunks = 0
@@ -138,9 +145,9 @@ async def process_kb_ingest_job(
         namespace = config.vector_store_namespace if config else None
 
         text_content: Optional[str] = None
-        
-        if transient_text_path:
-            text_content = Path(transient_text_path).read_text(encoding="utf-8")
+
+        if spool_path and Path(spool_path).is_file():
+            text_content = Path(spool_path).read_text(encoding="utf-8")
         elif transient_text is not None and len(transient_text.strip()) > 0:
             text_content = transient_text
         elif kb.source_type == models.KBSourceType.url and kb.source_uri:
@@ -157,12 +164,11 @@ async def process_kb_ingest_job(
                         await _try_assign_branding_to_agent(db, agent, favicon_candidate, theme_color)
             except Exception as br_exc:
                 logger.info("ingest_branding_assign_failed kb_id=%s err=%s", kb.id, br_exc)
-        elif kb.source_storage_url:
-            source_bytes = await download_kb_source(kb.source_storage_url)
-            filename = kb.original_filename or kb.title or f"{kb.id}.txt"
-            text_content = await anyio.to_thread.run_sync(extract_text_from_file, source_bytes, filename)
-            kb.extracted_size_bytes = enforce_text_limit(text_content)
-            db.commit()
+        elif kb.source_type != models.KBSourceType.url:
+            raise ValueError(
+                "No text available for this source. Originals are not stored — "
+                "upload the source again to index it."
+            )
 
         if not text_content or len(text_content.strip()) == 0:
             raise ValueError("No text content extracted for KB")
@@ -192,10 +198,12 @@ async def process_kb_ingest_job(
 
         kb.chunk_count = chunk_count
         kb.status = models.KBStatus.ready
-        
+
         job.state = models.JobState.succeeded
         job.error = None
+        job.claimed_by = None
         db.commit()
+        succeeded = True
     except Exception as e:
         logger.exception("kb_ingest_job_failed job_id=%s", job_id)
         try:
@@ -203,6 +211,7 @@ async def process_kb_ingest_job(
             if job:
                 job.state = models.JobState.failed
                 job.error = str(e)
+                job.claimed_by = None
                 kb = db.query(models.KnowledgeBase).filter(models.KnowledgeBase.id == job.kb_id).first()
                 if kb:
                     kb.status = models.KBStatus.failed
@@ -210,9 +219,19 @@ async def process_kb_ingest_job(
         except SQLAlchemyError:
             db.rollback()
     finally:
-        if transient_text_path:
+        # Success: the spool has served its purpose — remove it now so customer
+        # text never lingers. Failure: keep it (bounded by the orphan sweeper)
+        # so retrain can retry without asking the customer to re-upload.
+        if succeeded and spool_path:
             try:
-                Path(transient_text_path).unlink(missing_ok=True)
+                Path(spool_path).unlink(missing_ok=True)
             except Exception:
-                logger.warning("failed_to_remove_ingest_spool path=%s", transient_text_path)
+                logger.warning("failed_to_remove_ingest_spool path=%s", spool_path)
+            try:
+                job = db.query(models.KBIngestJob).filter(models.KBIngestJob.id == job_id).first()
+                if job:
+                    job.transient_spool_path = None
+                    db.commit()
+            except SQLAlchemyError:
+                db.rollback()
         db.close()

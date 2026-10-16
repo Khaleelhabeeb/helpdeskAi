@@ -112,7 +112,7 @@ bot ──► collecting_email ──► queued ──► human ──► resolv
                  └───────────┘      └──────────────┘
                        │                    │
                  static/widget.js    ingest_worker (spool → embed → upsert)
-                 Brevo email fallback  Supabase auth  S3/KB storage
+                 Brevo email fallback  Supabase auth  no originals stored
 ```
 
 Request flow for a widget message: `visitor → widget-panel.js (SSE)` → `POST /public/widget/{id}/chat` → domain/rate/abuse check → `get_or_create_conversation` → history + `aretrieve_context` (pgvector) → `build_messages` (with `handoff_policy` if enabled) → `astream_answer_with_tools` → tool `transfer_to_human` → `transition_status` + `broadcast_to_conversation`/`broadcast_to_humans_for_agent` + `WS` → fallback email if queued + presence check.
@@ -128,7 +128,7 @@ Request flow for a widget message: `visitor → widget-panel.js (SSE)` → `POST
 | **Cache / Realtime** | Redis / Upstash Redis | `CACHE_REDIS_PREFIX=helpdeskai:`, pub/sub ready (`ENABLE_PG_NOTIFY`) |
 | **LLM / Embed** | Groq SDK (`groq>=0.24`) + Jina AI | Sync `Groq` + per-loop `AsyncGroq`, `JINA_EMBED_MODEL` |
 | **Auth** | Supabase JWT + JWT (human agents), bcrypt, pyjwt | OTP magic link + Google OAuth |
-| **Storage** | S3-compatible (KB sources), pgvector (chunks) | `kb_source_storage`, `storage_quota` |
+| **Storage** | pgvector (chunks only — customer originals are never stored) | `ingest_queue` spool + `storage_quota` |
 | **Email** | Brevo (sib-api-v3-sdk) | `services/email_provider.py`, mock outbox in dev (`/debug/emails`) |
 | **Frontend** | React 19, React Router 7, Vite 6, Tailwind 4, motion, lucide-react | `frontend/src/pages/*`, `frontend/src/components/*` |
 | **Widget** | Vanilla JS + HTML panel | `static/widget.js`, `widget-loader.js`, `widget-panel.{html,js}` |
@@ -213,6 +213,7 @@ uv run pytest -q
 ## Deployment Notes
 
 * **Backend:** Any ASGI host (Fly, Render, Railway). Set `ENV=production` to hide `/docs`. Ensure `pgvector` extension is enabled and `alembic upgrade head` has run.
+* **FastAPI Cloud:** No persistent volumes exist — leave `KB_INGEST_SPOOL_DIR` unset (ephemeral `/tmp`). Crash recovery is best-effort: URL sources always resume, file/text resume only if the same replica still holds the spool, otherwise the customer re-uploads. Multi-replica recovery is claim-guarded (`claimed_by`).
 * **Frontend:** `npm run build` → deploy `dist` (hosted at https://helpdeskai.web.app). Set `FRONTEND_URL` and `VITE_API_URL` accordingly.
 * **Widget:** `build_widget.py` hashes `widget-loader.js`/`widget-panel.*` for immutable caching (`main.py:CachedStaticFiles`); raw files get `max-age=60` so handoff fixes propagate fast.
 * **Redis:** Provide `REDIS_URL` or `UPSTASH_REDIS_URL` — widget rate limiting and config cache degrade gracefully to in-memory + DB without it.

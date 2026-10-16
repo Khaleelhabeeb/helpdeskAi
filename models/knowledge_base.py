@@ -16,8 +16,6 @@ class KnowledgeBase(Base):
     title = Column(String, nullable=True)
     status = Column(SQLAlchemyEnum(KBStatus), default=KBStatus.pending, nullable=False, index=True)
     original_filename = Column(String, nullable=True)
-    source_storage_url = Column(Text, nullable=True)
-    source_storage_key = Column(String, nullable=True)
     source_content_type = Column(String, nullable=True)
     source_content_sha256 = Column(String(64), nullable=True)
     file_size_bytes = Column(Integer, nullable=True)
@@ -32,10 +30,6 @@ class KnowledgeBase(Base):
     agent = relationship("Agent", back_populates="knowledge_bases")
     jobs = relationship("KBIngestJob", back_populates="kb", cascade="all, delete-orphan")
 
-    @property
-    def has_stored_source(self) -> bool:
-        return bool(self.source_storage_key or self.source_storage_url)
-
 
 class KBIngestJob(Base):
     __tablename__ = "kb_ingest_jobs"
@@ -45,6 +39,11 @@ class KBIngestJob(Base):
     total_chunks = Column(Integer, nullable=True)
     processed_chunks = Column(Integer, nullable=True)
     error = Column(Text, nullable=True)
+    # Local spool file holding the extracted text for this job. Short-lived:
+    transient_spool_path = Column(Text, nullable=True)
+    # Crash-recovery ownership token. Lets exactly one replica claim each stuck
+    # job on autoscaling hosts where several instances boot at once.
+    claimed_by = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
