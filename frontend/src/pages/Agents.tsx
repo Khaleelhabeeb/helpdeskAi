@@ -281,6 +281,7 @@ export default function Agents() {
   const [sourceText, setSourceText] = useState('');
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [isAddingSource, setAddingSource] = useState(false);
+  const [isUploadingAvatar, setUploadingAvatar] = useState(false);
   const [playgroundMessages, setPlaygroundMessages] = useState<ChatMessage[]>([
     {
       id: 'intro',
@@ -601,6 +602,24 @@ export default function Agents() {
       setError(err instanceof Error ? err.message : 'Could not save agent');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function uploadAvatar(file: File) {
+    if (!selectedAgent) return;
+    setUploadingAvatar(true);
+    setError('');
+    setNotice('');
+    try {
+      const body = new FormData();
+      body.append('avatar', file);
+      const updated = await apiFetch<Agent>(`/agents/${selectedAgent.id}/avatar`, { method: 'POST', body });
+      setAgents((current) => current.map((agent) => (agent.id === selectedAgent.id ? { ...agent, avatar_url: updated.avatar_url } : agent)));
+      setNotice('Agent image updated. The widget logo was synced too.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not upload image');
+    } finally {
+      setUploadingAvatar(false);
     }
   }
 
@@ -1240,7 +1259,34 @@ export default function Agents() {
 
               <section className="rounded-2xl border border-hairline bg-white p-6">
                 <h2 className="text-sm font-semibold text-zinc-950">Appearance</h2>
-                <p className="mt-0.5 text-xs text-zinc-500">How the chat widget looks for visitors.</p>
+                <p className="mt-0.5 text-xs text-zinc-500">Agent image and how the chat widget looks for visitors.</p>
+                <div className="mt-5 flex items-center gap-4">
+                  <label className="group relative shrink-0 cursor-pointer" title="Upload agent image">
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,image/gif"
+                      className="hidden"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) uploadAvatar(file);
+                        event.target.value = '';
+                      }}
+                    />
+                    <div className="grid h-16 w-16 place-items-center overflow-hidden rounded-full border border-zinc-200 bg-zinc-900 text-white transition-shadow group-hover:ring-2 group-hover:ring-zinc-900/15">
+                      {isUploadingAvatar ? (
+                        <Loader2 className="h-5 w-5 animate-spin" />
+                      ) : (
+                        <AgentInitials name={selectedAgent.name} image={selectedAgent.avatar_url} />
+                      )}
+                    </div>
+                  </label>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-zinc-900">Agent image</p>
+                    <p className="mt-0.5 text-xs text-zinc-500">
+                      {isUploadingAvatar ? 'Uploading…' : 'Click the photo to upload. PNG, JPG, WEBP, or GIF · max 2MB. Also used as the widget logo.'}
+                    </p>
+                  </div>
+                </div>
                 <div className="mt-5 grid gap-5 sm:grid-cols-2">
                   <div className="space-y-2">
                     <span className="text-xs font-medium text-zinc-700">Theme</span>

@@ -85,7 +85,7 @@ export default function WidgetDeployPage() {
                 <label className="group relative shrink-0 cursor-pointer">
                   <input
                     type="file"
-                    accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
                     className="hidden"
                     onChange={(e) => {
                       const file = e.target.files?.[0];
@@ -115,7 +115,7 @@ export default function WidgetDeployPage() {
                   <p className="mt-1 text-xs leading-relaxed text-on-surface-variant">
                     {isUploadingLogo
                       ? 'Uploading...'
-                      : 'Click the photo to upload a new image (PNG, JPG, WEBP, or SVG).'}
+                      : 'Click the photo to upload a new image (PNG, JPG, WEBP, or GIF · max 2MB).'}
                   </p>
                 </div>
               </div>
